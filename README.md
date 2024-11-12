@@ -127,6 +127,15 @@ If you provide `-c` switch without any additional address, then the daemon is tr
 If you provide `-c MAC_ADDRESS` where MAC_ADDRESS is the MAC of your phone (bluetooth), then the aa-proxy-rs will try to connect only to this specified device
 in a loop (ignoring all **bluetoothd** cached devices).
 
+## Steps to Follow To Auto Start Script
+1. SSH into the RPi
+2. Delete `aawgd` from `usr/bin`
+3. Add `aa-proxy-rs` to `usr/bin`
+4. Rename `aa-proxy-rs` to `aawgd`
+5. Run `chmod +x aawgd`
+6. Open `/etc/init.d/S93aawgd` and<br> repalce `start-stop-daemon -S -b -q -m -p "$PIDFILE" -x "/usr/bin/$DAEMON"`<br> with `start-stop-daemon -S -b -q -m -p "$PIDFILE" -x "/usr/bin/$DAEMON" -- -d -s5 -c`
+7. Restart RPi
+
 ## Troubleshooting
 Sometimes deleting the system Bluetooth cache at /var/lib/bluetooth and restarting bluetoothd fixes persistent issues with device connectivity.
 Consider also using "Forget" of bluetooth device in the Android phone.
