@@ -304,7 +304,7 @@ async fn read_message(
     Ok(HEADER_LEN + len)
 }
 
-pub async fn bluetooth_stop(state: BluetoothState) -> Result<()> {
+pub async fn bluetooth_stop(state: BluetoothState) -> Result<Adapter> {
     if let Some(handle) = state.handle_ble {
         info!("{} 📣 Removing BLE advertisement", NAME);
         drop(handle);
@@ -338,7 +338,7 @@ pub async fn bluetooth_stop(state: BluetoothState) -> Result<()> {
         info!("{} 💤 Bluetooth adapter powered off", NAME);
     }
 
-    Ok(())
+    Ok(state.adapter)
 }
 
 pub async fn bluetooth_setup_connection(

@@ -225,10 +225,13 @@ async fn tokio_main(args: Args, need_restart: Arc<Notify>, tcp_start: Arc<Notify
             .await;
 
         // wait for bluetooth stop properly
-        let _ = bt_stop.await;
+        let adapter = bt_stop.await.unwrap();
 
         // wait for restart
         need_restart.notified().await;
+        if args.keepalive {
+            let _ = adapter.unwrap().set_powered(false).await;
+        }
 
         // TODO: make proper main loop with cancelation
         info!(
