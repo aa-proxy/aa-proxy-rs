@@ -224,6 +224,9 @@ pub async fn io_loop(
             "{} 📳 TCP server: new client connected: <b>{:?}</b>",
             NAME, addr
         );
+        // disable Nagle algorithm, so segments are always sent as soon as possible,
+        // even if there is only a small amount of data
+        stream.set_nodelay(true)?;
 
         info!(
             "{} 📂 Opening USB accessory device: <u>{}</u>",
