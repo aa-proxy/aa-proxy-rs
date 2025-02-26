@@ -70,22 +70,72 @@ async fn copy<A: Endpoint<A>, B: Endpoint<B>>(
     bytes_written: Arc<AtomicUsize>,
     read_timeout: Duration,
 ) -> Result<()> {
+    const HEADER_LENGTH: usize = 4;
     let mut buf = vec![0u8; BUFFER_LEN];
+    if dbg_name_from == "TCP" {
+        buf = vec![0u8; HEADER_LENGTH];
+    }
     loop {
         // things look weird: we pass ownership of the buffer to `read`, and we get
         // it back, _even if there was an error_. There's a whole trait for that,
         // which `Vec<u8>` implements!
         debug!("{}: before read", dbg_name_from);
         let retval = from.read(buf);
-        let (res, buf_read) = timeout(read_timeout, retval)
+        let (res, mut buf_read) = timeout(read_timeout, retval)
             .await
             .map_err(|e| -> String { format!("{} read: {}", dbg_name_from, e) })?;
         // Propagate errors, see how many bytes we read
-        let n = res?;
+        let mut n = res?;
         debug!("{}: after read, {} bytes", dbg_name_from, n);
         if n == 0 {
             // A read of size zero signals EOF (end of file), finish gracefully
             return Ok(());
+        }
+
+        // full message handling
+        if dbg_name_from == "TCP" {
+            if n != HEADER_LENGTH {
+                // this is unexpected
+                return Ok(());
+            }
+            // compute message length
+            let mut message_length: usize = ((buf_read[2] << 8) + buf_read[3]).into();
+
+            const FRAME_TYPE_FIRST: u8 = 1 << 0;
+            const FRAME_TYPE_LAST: u8 = 1 << 1;
+            const FRAME_TYPE_MASK: u8 = FRAME_TYPE_FIRST | FRAME_TYPE_LAST;
+            if (buf_read[1] & FRAME_TYPE_MASK) == FRAME_TYPE_FIRST {
+                // This means the header is 8 bytes long, we need to read four more bytes.
+                message_length += 4;
+            }
+            if (HEADER_LENGTH + message_length) > BUFFER_LEN {
+                // Not enough space in the buffer. This is unexpected.
+                panic!("Not enough space in the buffer");
+            }
+
+            let mut remain = message_length;
+            // continue reading the rest of the message
+            while remain > 0 {
+                debug!(
+                    "{}: before read to end, computed message_length = {}, remain = {}",
+                    dbg_name_from, message_length, remain
+                );
+                let message = vec![0u8; remain];
+                let retval = from.read(message);
+                let (res, mut message) = timeout(read_timeout, retval)
+                    .await
+                    .map_err(|e| -> String { format!("{} read to end: {}", dbg_name_from, e) })?;
+                // Propagate errors, see how many bytes we read
+                let len = res?;
+                debug!("{}: after read to end, {} bytes", dbg_name_from, len);
+                if len == 0 {
+                    // A read of size zero signals EOF (end of file), finish gracefully
+                    return Ok(());
+                }
+                remain -= len;
+                buf_read.append(&mut message);
+                n += len;
+            }
         }
 
         // The `slice` method here is implemented in an extension trait: it
