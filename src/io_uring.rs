@@ -71,8 +71,8 @@ async fn copy<A: Endpoint<A>, B: Endpoint<B>>(
     read_timeout: Duration,
 ) -> Result<()> {
     const HEADER_LENGTH: usize = 4;
-    let mut buf = vec![0u8; BUFFER_LEN];
     loop {
+        let mut buf = vec![0u8; BUFFER_LEN];
         if dbg_name_from == "TCP" {
             buf = vec![0u8; HEADER_LENGTH];
         }
@@ -143,18 +143,13 @@ async fn copy<A: Endpoint<A>, B: Endpoint<B>>(
         // into the full `Vec<u8>`
         debug!("{}: before write {} bytes", dbg_name_to, n);
         let retval = to.write(buf_read.slice(..n)).submit();
-        let (res, buf_write) = timeout(read_timeout, retval)
+        let (res, _buf_write) = timeout(read_timeout, retval)
             .await
             .map_err(|e| -> String { format!("{} write: {}", dbg_name_to, e) })?;
         let n = res?;
         debug!("{}: after write, {} bytes", dbg_name_to, n);
         // Increment byte counters for statistics
         bytes_written.fetch_add(n, Ordering::Relaxed);
-
-        // Later is now, we want our full buffer back.
-        // That's why we declared our binding `mut` way back at the start of `copy`,
-        // even though we moved it into the very first `TcpStream::read` call.
-        buf = buf_write.into_inner();
     }
 }
 
