@@ -99,7 +99,7 @@ async fn copy<A: Endpoint<A>, B: Endpoint<B>>(
                 return Ok(());
             }
             // compute message length
-            let mut message_length: usize = ((buf_read[2] << 8) + buf_read[3]).into();
+            let mut message_length = (buf_read[3] as u16 + ((buf_read[2] as u16) << 8)) as usize;
 
             const FRAME_TYPE_FIRST: u8 = 1 << 0;
             const FRAME_TYPE_LAST: u8 = 1 << 1;
