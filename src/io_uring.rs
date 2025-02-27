@@ -108,10 +108,6 @@ async fn copy<A: Endpoint<A>, B: Endpoint<B>>(
                 // This means the header is 8 bytes long, we need to read four more bytes.
                 message_length += 4;
             }
-            if (HEADER_LENGTH + message_length) > BUFFER_LEN {
-                // Not enough space in the buffer. This is unexpected.
-                panic!("Not enough space in the buffer");
-            }
 
             let mut remain = message_length;
             // continue reading the rest of the message
