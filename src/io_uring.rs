@@ -141,7 +141,7 @@ async fn copy<A: Endpoint<A>, B: Endpoint<B>>(
         // The `slice` method here is implemented in an extension trait: it
         // returns an owned slice of our `Vec<u8>`, which we later turn back
         // into the full `Vec<u8>`
-        debug!("{}: before write", dbg_name_to);
+        debug!("{}: before write {} bytes", dbg_name_to, n);
         let retval = to.write(buf_read.slice(..n)).submit();
         let (res, buf_write) = timeout(read_timeout, retval)
             .await
