@@ -72,10 +72,10 @@ async fn copy<A: Endpoint<A>, B: Endpoint<B>>(
 ) -> Result<()> {
     const HEADER_LENGTH: usize = 4;
     let mut buf = vec![0u8; BUFFER_LEN];
-    if dbg_name_from == "TCP" {
-        buf = vec![0u8; HEADER_LENGTH];
-    }
     loop {
+        if dbg_name_from == "TCP" {
+            buf = vec![0u8; HEADER_LENGTH];
+        }
         // things look weird: we pass ownership of the buffer to `read`, and we get
         // it back, _even if there was an error_. There's a whole trait for that,
         // which `Vec<u8>` implements!
