@@ -73,9 +73,6 @@ async fn copy<A: Endpoint<A>, B: Endpoint<B>>(
     const HEADER_LENGTH: usize = 4;
     let mut buf = vec![0u8; BUFFER_LEN];
     loop {
-        //if dbg_name_from == "TCP" {
-        //    buf = vec![0u8; HEADER_LENGTH];
-        //}
         // things look weird: we pass ownership of the buffer to `read`, and we get
         // it back, _even if there was an error_. There's a whole trait for that,
         // which `Vec<u8>` implements!
@@ -128,7 +125,6 @@ async fn copy<A: Endpoint<A>, B: Endpoint<B>>(
                     "{}: before read to end, computed message_length = {}, remain = {}",
                     dbg_name_from, message_length, remain
                 );
-                //let message = vec![0u8; remain];
                 let message = buf.slice(n..n + remain);
                 let retval = from.read(message);
                 let (res, chunk) = timeout(read_timeout, retval)
@@ -136,17 +132,14 @@ async fn copy<A: Endpoint<A>, B: Endpoint<B>>(
                     .map_err(|e| -> String { format!("{} read to end: {}", dbg_name_from, e) })?;
                 // Propagate errors, see how many bytes we read
                 let len = res?;
-                //if len != remain {
-                //  message.truncate(len);
-                //}
                 debug!("{}: after read to end, {} bytes", dbg_name_from, len);
                 if len == 0 {
                     // A read of size zero signals EOF (end of file), finish gracefully
                     return Ok(());
                 }
                 remain -= len;
-                buf = chunk.into_inner();
                 n += len;
+                buf = chunk.into_inner();
             }
         }
 
