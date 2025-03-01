@@ -128,8 +128,7 @@ async fn copy<A: Endpoint<A>, B: Endpoint<B>>(
                     "{}: before read to end, computed message_length = {}, remain = {}",
                     dbg_name_from, message_length, remain
                 );
-                let message = buf.slice(n..n + remain);
-                let retval = from.read(message);
+                let retval = from.read(buf.slice(n..n + remain));
                 let (res, chunk) = timeout(read_timeout, retval)
                     .await
                     .map_err(|e| -> String { format!("{} read to end: {}", dbg_name_from, e) })?;
