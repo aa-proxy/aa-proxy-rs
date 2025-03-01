@@ -82,7 +82,7 @@ struct Args {
     keepalive: bool,
 
     /// Data transfer timeout
-    #[clap(short, long, value_name = "SECONDS", default_value_t = 5)]
+    #[clap(short, long, value_name = "SECONDS", default_value_t = 10)]
     timeout_secs: u16,
 }
 
