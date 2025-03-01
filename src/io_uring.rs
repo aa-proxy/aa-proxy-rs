@@ -71,17 +71,24 @@ async fn copy<A: Endpoint<A>, B: Endpoint<B>>(
     read_timeout: Duration,
 ) -> Result<()> {
     const HEADER_LENGTH: usize = 4;
+    let mut buf = vec![0u8; BUFFER_LEN];
     loop {
-        let mut buf = vec![0u8; BUFFER_LEN];
-        if dbg_name_from == "TCP" {
-            buf = vec![0u8; HEADER_LENGTH];
-        }
+        //if dbg_name_from == "TCP" {
+        //    buf = vec![0u8; HEADER_LENGTH];
+        //}
         // things look weird: we pass ownership of the buffer to `read`, and we get
         // it back, _even if there was an error_. There's a whole trait for that,
         // which `Vec<u8>` implements!
         debug!("{}: before read", dbg_name_from);
-        let retval = from.read(buf);
-        let (res, mut buf_read) = timeout(read_timeout, retval)
+        let slice = {
+            if dbg_name_from == "TCP" {
+                buf.slice(..4)
+            } else {
+                buf.slice(..)
+            }
+        };
+        let retval = from.read(slice);
+        let (res, buf_read) = timeout(read_timeout, retval)
             .await
             .map_err(|e| -> String { format!("{} read: {}", dbg_name_from, e) })?;
         // Propagate errors, see how many bytes we read
@@ -91,6 +98,7 @@ async fn copy<A: Endpoint<A>, B: Endpoint<B>>(
             // A read of size zero signals EOF (end of file), finish gracefully
             return Ok(());
         }
+        buf = buf_read.into_inner();
 
         // full message handling
         if dbg_name_from == "TCP" {
@@ -99,14 +107,18 @@ async fn copy<A: Endpoint<A>, B: Endpoint<B>>(
                 return Ok(());
             }
             // compute message length
-            let mut message_length = (buf_read[3] as u16 + ((buf_read[2] as u16) << 8)) as usize;
+            let mut message_length = (buf[3] as u16 + ((buf[2] as u16) << 8)) as usize;
 
             const FRAME_TYPE_FIRST: u8 = 1 << 0;
             const FRAME_TYPE_LAST: u8 = 1 << 1;
             const FRAME_TYPE_MASK: u8 = FRAME_TYPE_FIRST | FRAME_TYPE_LAST;
-            if (buf_read[1] & FRAME_TYPE_MASK) == FRAME_TYPE_FIRST {
+            if (buf[1] & FRAME_TYPE_MASK) == FRAME_TYPE_FIRST {
                 // This means the header is 8 bytes long, we need to read four more bytes.
                 message_length += 4;
+            }
+            if (HEADER_LENGTH + message_length) > BUFFER_LEN {
+                // Not enough space in the buffer. This is unexpected.
+                panic!("Not enough space in the buffer");
             }
 
             let mut remain = message_length;
@@ -116,23 +128,24 @@ async fn copy<A: Endpoint<A>, B: Endpoint<B>>(
                     "{}: before read to end, computed message_length = {}, remain = {}",
                     dbg_name_from, message_length, remain
                 );
-                let message = vec![0u8; remain];
+                //let message = vec![0u8; remain];
+                let message = buf.slice(n..n + remain);
                 let retval = from.read(message);
-                let (res, mut message) = timeout(read_timeout, retval)
+                let (res, chunk) = timeout(read_timeout, retval)
                     .await
                     .map_err(|e| -> String { format!("{} read to end: {}", dbg_name_from, e) })?;
                 // Propagate errors, see how many bytes we read
                 let len = res?;
-                if len != remain {
-                    message.truncate(len);
-                }
+                //if len != remain {
+                //  message.truncate(len);
+                //}
                 debug!("{}: after read to end, {} bytes", dbg_name_from, len);
                 if len == 0 {
                     // A read of size zero signals EOF (end of file), finish gracefully
                     return Ok(());
                 }
                 remain -= len;
-                buf_read.append(&mut message);
+                buf = chunk.into_inner();
                 n += len;
             }
         }
@@ -141,14 +154,19 @@ async fn copy<A: Endpoint<A>, B: Endpoint<B>>(
         // returns an owned slice of our `Vec<u8>`, which we later turn back
         // into the full `Vec<u8>`
         debug!("{}: before write {} bytes", dbg_name_to, n);
-        let retval = to.write(buf_read.slice(..n)).submit();
-        let (res, _buf_write) = timeout(read_timeout, retval)
+        let retval = to.write(buf.slice(..n)).submit();
+        let (res, buf_write) = timeout(read_timeout, retval)
             .await
             .map_err(|e| -> String { format!("{} write: {}", dbg_name_to, e) })?;
         let n = res?;
         debug!("{}: after write, {} bytes", dbg_name_to, n);
         // Increment byte counters for statistics
         bytes_written.fetch_add(n, Ordering::Relaxed);
+
+        // Later is now, we want our full buffer back.
+        // That's why we declared our binding `mut` way back at the start of `copy`,
+        // even though we moved it into the very first `TcpStream::read` call.
+        buf = buf_write.into_inner();
     }
 }
 
