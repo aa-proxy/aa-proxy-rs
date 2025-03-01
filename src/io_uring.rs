@@ -150,7 +150,7 @@ async fn copy<A: Endpoint<A>, B: Endpoint<B>>(
         // returns an owned slice of our `Vec<u8>`, which we later turn back
         // into the full `Vec<u8>`
         debug!("{}: before write {} bytes", dbg_name_to, n);
-        let retval = to.write(buf).submit();
+        let retval = to.write(buf.slice(..n)).submit();
         let (res, buf_write) = timeout(read_timeout, retval)
             .await
             .map_err(|e| -> String { format!("{} write: {}", dbg_name_to, e) })?;
@@ -162,7 +162,7 @@ async fn copy<A: Endpoint<A>, B: Endpoint<B>>(
         // Later is now, we want our full buffer back.
         // That's why we declared our binding `mut` way back at the start of `copy`,
         // even though we moved it into the very first `TcpStream::read` call.
-        buf = buf_write;
+        buf = buf_write.into_inner();
     }
 }
 
