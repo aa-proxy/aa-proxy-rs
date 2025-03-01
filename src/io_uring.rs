@@ -29,6 +29,12 @@ const USB_ACCESSORY_PATH: &str = "/dev/usb_accessory";
 const BUFFER_LEN: usize = 16 * 1024;
 const TCP_CLIENT_TIMEOUT: Duration = Duration::new(30, 0);
 
+// message related constants:
+const HEADER_LENGTH: usize = 4;
+const FRAME_TYPE_FIRST: u8 = 1 << 0;
+const FRAME_TYPE_LAST: u8 = 1 << 1;
+const FRAME_TYPE_MASK: u8 = FRAME_TYPE_FIRST | FRAME_TYPE_LAST;
+
 // tokio_uring::fs::File and tokio_uring::net::TcpStream are using different
 // read and write calls:
 // File is using read_at() and write_at(),
@@ -70,7 +76,6 @@ async fn copy<A: Endpoint<A>, B: Endpoint<B>>(
     bytes_written: Arc<AtomicUsize>,
     read_timeout: Duration,
 ) -> Result<()> {
-    const HEADER_LENGTH: usize = 4;
     let mut buf = vec![0u8; BUFFER_LEN];
     loop {
         // things look weird: we pass ownership of the buffer to `read`, and we get
@@ -79,7 +84,8 @@ async fn copy<A: Endpoint<A>, B: Endpoint<B>>(
         debug!("{}: before read", dbg_name_from);
         let slice = {
             if dbg_name_from == "TCP" {
-                buf.slice(..4)
+                // first: read only the header
+                buf.slice(..HEADER_LENGTH)
             } else {
                 buf.slice(..)
             }
@@ -106,9 +112,6 @@ async fn copy<A: Endpoint<A>, B: Endpoint<B>>(
             // compute message length
             let mut message_length = (buf[3] as u16 + ((buf[2] as u16) << 8)) as usize;
 
-            const FRAME_TYPE_FIRST: u8 = 1 << 0;
-            const FRAME_TYPE_LAST: u8 = 1 << 1;
-            const FRAME_TYPE_MASK: u8 = FRAME_TYPE_FIRST | FRAME_TYPE_LAST;
             if (buf[1] & FRAME_TYPE_MASK) == FRAME_TYPE_FIRST {
                 // This means the header is 8 bytes long, we need to read four more bytes.
                 message_length += 4;
