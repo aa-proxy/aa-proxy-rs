@@ -243,10 +243,12 @@ It should be also possible to `ssh` and execute:<br>
 `mount -o remount,rw /`<br>
 to make root filesystem read-write again temporarily.
 
-## Similar projects
+## Similar/other open source AndroidAuto-related projects
 - https://github.com/nisargjhaveri/WirelessAndroidAutoDongle
 - https://github.com/nisargjhaveri/AAWirelessGateway
 - https://github.com/openDsh/openauto
 - https://github.com/qhuyduong/AAGateway
 - https://github.com/Demon000/web-auto
 - https://github.com/f1xpl/openauto
+- https://github.com/gamelaster/opengal_proxy
+- https://github.com/tomasz-grobelny/AACS
