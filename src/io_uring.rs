@@ -123,6 +123,9 @@ async fn copy<A: Endpoint<A>, B: Endpoint<B>>(
                     .map_err(|e| -> String { format!("{} read to end: {}", dbg_name_from, e) })?;
                 // Propagate errors, see how many bytes we read
                 let len = res?;
+                if len != remain {
+                    message.truncate(len);
+                }
                 debug!("{}: after read to end, {} bytes", dbg_name_from, len);
                 if len == 0 {
                     // A read of size zero signals EOF (end of file), finish gracefully
