@@ -243,7 +243,8 @@ pub async fn pkt_modify_hook(pkt: &mut Packet, new_dpi: u16) -> Result<()> {
                 .unwrap()
                 .video_configs[0]
                 .set_density(new_dpi.into());
-            msg.set_make("Desktop Headunit".into());
+            msg.set_make("Google".into());
+            msg.set_model("Desktop Head Unit".into());
             info!(
                 "{} <yellow>{:?}</> Replacing DPI value: from <b>{}</> to <b>{}</>",
                 NAME,
