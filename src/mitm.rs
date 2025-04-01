@@ -15,6 +15,7 @@ use tokio_uring::buf::BoundedBuf;
 // protobuf stuff:
 include!(concat!(env!("OUT_DIR"), "/protos/mod.rs"));
 use crate::mitm::protos::*;
+use crate::mitm::AudioStreamType::AUDIO_STREAM_MEDIA;
 use protobuf::text_format::print_to_string_pretty;
 use protobuf::{Enum, Message, MessageDyn};
 use protos::ControlMessageType::{self, *};
@@ -245,6 +246,8 @@ pub async fn pkt_modify_hook(pkt: &mut Packet, new_dpi: u16) -> Result<()> {
                 .set_density(new_dpi.into());
             msg.set_make("Google".into());
             msg.set_model("Desktop Head Unit".into());
+            msg.services
+                .retain(|svc| svc.media_sink_service.audio_type() != AUDIO_STREAM_MEDIA);
             info!(
                 "{} <yellow>{:?}</> Replacing DPI value: from <b>{}</> to <b>{}</>",
                 NAME,
