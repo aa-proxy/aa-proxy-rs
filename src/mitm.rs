@@ -231,19 +231,33 @@ pub async fn pkt_modify_hook(
     developer_mode: bool,
     disable_media_sink: bool,
 ) -> Result<()> {
-    if pkt.channel != 0 {
-        return Ok(());
-    }
-
+    use crate::mitm::SensorMessageId::*;
     // message_id is the first 2 bytes of payload
     let message_id: i32 = u16::from_be_bytes(pkt.payload[0..=1].try_into()?).into();
 
     // trying to obtain an Enum from message_id
     let control = protos::ControlMessageType::from_i32(message_id);
-    debug!("message_id = {:04X}, {:?}", message_id, control);
+    let mut control2 = SensorMessageId::SENSOR_MESSAGE_ERROR;
+    info!("message_id = {:04X}, {:?}", message_id, control);
+    if pkt.channel == 7 {
+        control2 = protos::SensorMessageId::from_i32(message_id).unwrap_or(SENSOR_MESSAGE_ERROR);
+        info!("SensorMessageId = {:04X}, {:?}", message_id, control2);
+    }
 
     // parsing data
     let data = &pkt.payload[2..]; // start of message data
+    match control2 {
+        SENSOR_MESSAGE_BATCH => {
+            let msg = SensorBatch::parse_from_bytes(data)?;
+            info!(
+                "SENSOR_MESSAGE_BATCH = {}",
+                protobuf::text_format::print_to_string_pretty(&msg)
+            );
+            info!("RAW: {:04X?}", pkt.payload.clone().into_iter());
+        }
+        _ => (),
+    }
+
     match control.unwrap_or(MESSAGE_UNEXPECTED_MESSAGE) {
         MESSAGE_SERVICE_DISCOVERY_RESPONSE => {
             let mut msg = ServiceDiscoveryResponse::parse_from_bytes(data)?;
