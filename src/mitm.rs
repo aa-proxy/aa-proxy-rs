@@ -239,10 +239,10 @@ pub async fn pkt_modify_hook(
     let control = protos::ControlMessageType::from_i32(message_id);
     let mut control2 = SensorMessageId::SENSOR_MESSAGE_ERROR;
     info!("message_id = {:04X}, {:?}", message_id, control);
-    if pkt.channel == 7 {
+    //if pkt.channel == 7 {
         control2 = protos::SensorMessageId::from_i32(message_id).unwrap_or(SENSOR_MESSAGE_ERROR);
         info!("SensorMessageId = {:04X}, {:?}", message_id, control2);
-    }
+    //}
 
     // parsing data
     let data = &pkt.payload[2..]; // start of message data
