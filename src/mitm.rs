@@ -231,6 +231,7 @@ pub async fn pkt_modify_hook(
     developer_mode: bool,
     disable_media_sink: bool,
 ) -> Result<()> {
+    use crate::mitm::input_source_service::TouchScreen;
     use crate::mitm::SensorMessageId::*;
     // message_id is the first 2 bytes of payload
     let message_id: i32 = u16::from_be_bytes(pkt.payload[0..=1].try_into()?).into();
@@ -240,8 +241,8 @@ pub async fn pkt_modify_hook(
     let mut control2 = SensorMessageId::SENSOR_MESSAGE_ERROR;
     info!("message_id = {:04X}, {:?}", message_id, control);
     //if pkt.channel == 7 {
-        control2 = protos::SensorMessageId::from_i32(message_id).unwrap_or(SENSOR_MESSAGE_ERROR);
-        info!("SensorMessageId = {:04X}, {:?}", message_id, control2);
+    control2 = protos::SensorMessageId::from_i32(message_id).unwrap_or(SENSOR_MESSAGE_ERROR);
+    info!("SensorMessageId = {:04X}, {:?}", message_id, control2);
     //}
 
     // parsing data
@@ -281,6 +282,16 @@ pub async fn pkt_modify_hook(
                     new_dpi
                 );
             }
+
+            // adding a touchscreen!
+            let mut ts = TouchScreen::new();
+            ts.set_width(800);
+            ts.set_height(480);
+            msg.services[1]
+                .input_source_service
+                .as_mut()
+                .unwrap()
+                .touchscreen = vec![ts];
 
             // disable media sink
             if disable_media_sink {
