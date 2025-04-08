@@ -16,6 +16,7 @@ use tokio_uring::buf::BoundedBuf;
 include!(concat!(env!("OUT_DIR"), "/protos/mod.rs"));
 use crate::mitm::protos::*;
 use crate::mitm::AudioStreamType::*;
+use crate::mitm::SensorType::*;
 use protobuf::text_format::print_to_string_pretty;
 use protobuf::{Enum, Message, MessageDyn};
 use protos::ControlMessageType::{self, *};
@@ -296,6 +297,19 @@ pub async fn pkt_modify_hook(
                     get_name(proxy_type),
                     control.unwrap(),
                 );
+            }
+
+            // removing SENSOR_SPEED
+            if let Some(svc) = msg
+                .services
+                .iter_mut()
+                .find(|svc| !svc.sensor_source_service.sensors.is_empty())
+            {
+                svc.sensor_source_service
+                    .as_mut()
+                    .unwrap()
+                    .sensors
+                    .retain(|s| s.sensor_type() != SENSOR_SPEED);
             }
 
             // enabling developer mode
