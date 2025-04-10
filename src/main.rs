@@ -177,7 +177,7 @@ fn logging_init(debug: bool, log_path: &PathBuf) {
     };
 
     let console_logger: Box<dyn SharedLogger> = TermLogger::new(
-        requested_level,
+        LevelFilter::Info,
         conf.clone(),
         TerminalMode::Mixed,
         ColorChoice::Auto,

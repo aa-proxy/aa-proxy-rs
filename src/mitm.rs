@@ -213,7 +213,7 @@ pub async fn pkt_debug(proxy_type: ProxyType, pkt: &Packet) -> Result<()> {
 
     // trying to obtain an Enum from message_id
     let control = protos::ControlMessageType::from_i32(message_id);
-    debug!("message_id = {:04X}, {:?}", message_id, control);
+    debug!("{} decrypted {}", get_name(proxy_type), pkt);
 
     // parsing data
     let data = &pkt.payload[2..]; // start of message data
