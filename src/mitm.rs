@@ -16,6 +16,7 @@ use tokio_uring::buf::BoundedBuf;
 include!(concat!(env!("OUT_DIR"), "/protos/mod.rs"));
 use crate::mitm::protos::*;
 use crate::mitm::AudioStreamType::*;
+use crate::mitm::SensorMessageId::*;
 use crate::mitm::SensorType::*;
 use protobuf::text_format::print_to_string_pretty;
 use protobuf::{Enum, Message, MessageDyn};
@@ -233,16 +234,39 @@ pub async fn pkt_modify_hook(
     disable_media_sink: bool,
     disable_tts_sink: bool,
 ) -> Result<()> {
-    if pkt.channel != 0 {
-        return Ok(());
-    }
-
     // message_id is the first 2 bytes of payload
     let message_id: i32 = u16::from_be_bytes(pkt.payload[0..=1].try_into()?).into();
 
     // trying to obtain an Enum from message_id
     let control = protos::ControlMessageType::from_i32(message_id);
-    debug!("message_id = {:04X}, {:?}", message_id, control);
+    let mut control2 = SensorMessageId::SENSOR_MESSAGE_ERROR;
+    info!("message_id = {:04X}, {:?}", message_id, control);
+    if pkt.channel == 3 {
+        control2 = protos::SensorMessageId::from_i32(message_id).unwrap_or(SENSOR_MESSAGE_ERROR);
+        info!("SensorMessageId = {:04X}, {:?}", message_id, control2);
+
+        // parsing SENSOR data
+        let data = &pkt.payload[2..]; // start of message data
+        match control2 {
+            SENSOR_MESSAGE_BATCH => {
+                let mut msg = SensorBatch::parse_from_bytes(data)?;
+                info!(
+                    "SENSOR_MESSAGE_BATCH = {}",
+                    protobuf::text_format::print_to_string_pretty(&msg)
+                );
+                if !msg.driving_status_data.is_empty() {
+                    msg.driving_status_data[0].set_status(0);
+                    pkt.payload = msg.write_to_bytes()?;
+                }
+            }
+            _ => (),
+        }
+        return Ok(());
+    }
+
+    if pkt.channel != 0 {
+        return Ok(());
+    }
 
     // parsing data
     let data = &pkt.payload[2..]; // start of message data
