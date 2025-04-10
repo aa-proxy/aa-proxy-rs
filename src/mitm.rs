@@ -255,6 +255,8 @@ pub async fn pkt_modify_hook(
                 if !msg.driving_status_data.is_empty() && s.contains("driving_status_data") {
                     msg.driving_status_data[0].set_status(0);
                     pkt.payload = msg.write_to_bytes()?;
+                    pkt.payload.insert(0, (message_id >> 8) as u8);
+                    pkt.payload.insert(1, (message_id & 0xff) as u8);
                 }
             }
             _ => (),
