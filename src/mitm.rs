@@ -250,11 +250,9 @@ pub async fn pkt_modify_hook(
         match control2 {
             SENSOR_MESSAGE_BATCH => {
                 let mut msg = SensorBatch::parse_from_bytes(data)?;
-                info!(
-                    "SENSOR_MESSAGE_BATCH = {}",
-                    protobuf::text_format::print_to_string_pretty(&msg)
-                );
-                if !msg.driving_status_data.is_empty() {
+                let s = protobuf::text_format::print_to_string_pretty(&msg);
+                info!("SENSOR_MESSAGE_BATCH = {}", s);
+                if !msg.driving_status_data.is_empty() && s.contains("driving_status_data") {
                     msg.driving_status_data[0].set_status(0);
                     pkt.payload = msg.write_to_bytes()?;
                 }
