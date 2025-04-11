@@ -249,14 +249,17 @@ pub async fn pkt_modify_hook(
         let data = &pkt.payload[2..]; // start of message data
         match control2 {
             SENSOR_MESSAGE_BATCH => {
-                let mut msg = SensorBatch::parse_from_bytes(data)?;
-                let s = protobuf::text_format::print_to_string_pretty(&msg);
-                info!("SENSOR_MESSAGE_BATCH = {}", s);
-                if !msg.driving_status_data.is_empty() && s.contains("driving_status_data") {
-                    msg.driving_status_data[0].set_status(0);
-                    pkt.payload = msg.write_to_bytes()?;
-                    pkt.payload.insert(0, (message_id >> 8) as u8);
-                    pkt.payload.insert(1, (message_id & 0xff) as u8);
+                if let Ok(mut msg) = SensorBatch::parse_from_bytes(data) {
+                    let s = protobuf::text_format::print_to_string_pretty(&msg);
+                    info!("SENSOR_MESSAGE_BATCH = {}", s);
+                    if !msg.driving_status_data.is_empty() && s.contains("driving_status_data") {
+                        msg.driving_status_data[0].set_status(0);
+                        pkt.payload = msg.write_to_bytes()?;
+                        pkt.payload.insert(0, (message_id >> 8) as u8);
+                        pkt.payload.insert(1, (message_id & 0xff) as u8);
+                    }
+                } else {
+                    error!("SENSOR_MESSAGE_BATCH parsing error, channel={:02X}, flags={:02X}, payload={:02X?}", pkt.channel, pkt.flags, pkt.payload.clone().into_iter());
                 }
             }
             _ => (),
