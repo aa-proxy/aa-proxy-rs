@@ -291,11 +291,12 @@ async fn read_message(
     debug!("MessageID = {}, len = {}", message_id, len);
 
     if message_id != id.clone() as u16 {
-        return Err(format!(
+        warn!("unexpected MessageID = {}, len = {}, ignoring", message_id, len);
+        /*return Err(format!(
             "Received data has invalid MessageID: got: {:?}, expected: {:?}",
             message_id, id,
         )
-        .into());
+        .into());*/
     }
     info!(
         "{} 📨 stage #{} of {}: Received <yellow>{:?}</> frame from phone (⏱️ {} ms)",
