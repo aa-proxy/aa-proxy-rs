@@ -1,5 +1,6 @@
 # syntax=docker/dockerfile:1-labs
 ARG GH_BRANCH=main
+ENV GH_BRANCH=${GH_BRANCH}
 FROM rust:latest AS stage-rust
 # crosscompile stuff
 RUN apt update && apt upgrade -y
