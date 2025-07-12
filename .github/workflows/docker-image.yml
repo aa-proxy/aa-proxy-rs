@@ -17,7 +17,9 @@ jobs:
     - name: Build and push
       uses: docker/build-push-action@v6
       with:
-        tags: manio/aa-proxy-rs:latest
+        build-args: |
+          GH_BRANCH=${{ github.ref_name }}
+        tags: manio/aa-proxy-rs:${{ github.ref_name }}
         allow: security.insecure
         outputs: build
     - name: Upload a Build Artifact
