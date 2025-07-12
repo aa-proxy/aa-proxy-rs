@@ -7,7 +7,7 @@ RUN apt install -y gcc-arm-linux-gnueabihf
 RUN rustup target add arm-unknown-linux-gnueabihf
 # cloning and building
 WORKDIR /usr/src/app
-RUN git clone --branch "$GH_BRANCH" --single-branch https://github.com/manio/aa-proxy-rs .
+RUN git clone --branch ${GH_BRANCH} --single-branch https://github.com/manio/aa-proxy-rs .
 RUN cargo build --release
 RUN arm-linux-gnueabihf-strip target/arm-unknown-linux-gnueabihf/release/aa-proxy-rs
 # Pi Zero W needs special linking/building (https://github.com/manio/aa-proxy-rs/issues/3)
