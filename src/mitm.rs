@@ -23,7 +23,9 @@ use crate::mitm::sensor_source_service::Sensor;
 use crate::mitm::AudioStreamType::*;
 use crate::mitm::SensorMessageId::*;
 use crate::mitm::SensorType::*;
+use crate::mitm::VideoCodecResolutionType::VIDEO_1920x1080;
 use protobuf::text_format::print_to_string_pretty;
+use protobuf::EnumOrUnknown;
 use protobuf::{Enum, Message, MessageDyn};
 use protos::ControlMessageType::{self, *};
 
@@ -359,27 +361,8 @@ pub async fn pkt_modify_hook(
                     .iter_mut()
                     .find(|svc| !svc.media_sink_service.video_configs.is_empty())
                 {
-                msg.services
-                    .retain(|svc| svc.media_sink_service.codec_resolution() == VIDEO_1920x1080);
-                info!(
-                    "{} <yellow>{:?}</>: best codec retained",
-                    get_name(proxy_type),
-                    control.unwrap(),
-                );
-                /*
-                    // get previous/original value
-                    let prev_val = svc.media_sink_service.video_configs[0].density();
-                    // set new value
-                    svc.media_sink_service.as_mut().unwrap().video_configs[0]
-                        .set_density(dpi.into());
-                    info!(
-                        "{} <yellow>{:?}</>: replacing DPI[0] value: from <b>{}</> to <b>{}</>",
-                        get_name(proxy_type),
-                        control.unwrap(),
-                        prev_val,
-                        dpi
-                    );
-*/
+                    svc.media_sink_service.as_mut().unwrap().video_configs.remove(2);
+                    svc.media_sink_service.as_mut().unwrap().video_configs.remove(1);
                 }
             }
 
