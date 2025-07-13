@@ -359,6 +359,14 @@ pub async fn pkt_modify_hook(
                     .iter_mut()
                     .find(|svc| !svc.media_sink_service.video_configs.is_empty())
                 {
+                msg.services
+                    .retain(|svc| svc.media_sink_service.codec_resolution() == VIDEO_1920x1080);
+                info!(
+                    "{} <yellow>{:?}</>: best codec retained",
+                    get_name(proxy_type),
+                    control.unwrap(),
+                );
+                /*
                     // get previous/original value
                     let prev_val = svc.media_sink_service.video_configs[0].density();
                     // set new value
@@ -371,32 +379,7 @@ pub async fn pkt_modify_hook(
                         prev_val,
                         dpi
                     );
-
-                    // get previous/original value
-                    let prev_val = svc.media_sink_service.video_configs[1].density();
-                    // set new value
-                    svc.media_sink_service.as_mut().unwrap().video_configs[1]
-                        .set_density(dpi.into());
-                    info!(
-                        "{} <yellow>{:?}</>: replacing DPI[1] value: from <b>{}</> to <b>{}</>",
-                        get_name(proxy_type),
-                        control.unwrap(),
-                        prev_val,
-                        dpi
-                    );
-
-                    // get previous/original value
-                    let prev_val = svc.media_sink_service.video_configs[2].density();
-                    // set new value
-                    svc.media_sink_service.as_mut().unwrap().video_configs[2]
-                        .set_density(dpi.into());
-                    info!(
-                        "{} <yellow>{:?}</>: replacing DPI[2] value: from <b>{}</> to <b>{}</>",
-                        get_name(proxy_type),
-                        control.unwrap(),
-                        prev_val,
-                        dpi
-                    );
+*/
                 }
             }
 
