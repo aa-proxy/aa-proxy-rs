@@ -361,8 +361,18 @@ pub async fn pkt_modify_hook(
                     .iter_mut()
                     .find(|svc| !svc.media_sink_service.video_configs.is_empty())
                 {
-                    svc.media_sink_service.as_mut().unwrap().video_configs.remove(2);
-                    svc.media_sink_service.as_mut().unwrap().video_configs.remove(1);
+                    if svc.media_sink_service.as_mut().unwrap().video_configs.len() > 2 {
+                        svc.media_sink_service
+                            .as_mut()
+                            .unwrap()
+                            .video_configs
+                            .remove(2);
+                        svc.media_sink_service
+                            .as_mut()
+                            .unwrap()
+                            .video_configs
+                            .remove(1);
+                    }
                 }
             }
 
