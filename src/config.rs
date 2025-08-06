@@ -106,6 +106,7 @@ fn webserver_default_bind() -> Option<String> {
 pub struct ConfigValue {
     pub typ: String,
     pub description: String,
+    pub values: Option<Vec<String>>,
 }
 
 #[serde_as]
@@ -177,6 +178,7 @@ impl Default for ConfigValue {
         Self {
             typ: String::new(),
             description: String::new(),
+            values: None,
         }
     }
 }

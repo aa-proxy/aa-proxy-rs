@@ -45,8 +45,9 @@
                     "description": "Enable debug info"
                 },
                 "hexdump_level": {
-                    "typ": "string",
-                    "description": "Hex dump level [possible values: Disabled, DecryptedInput, RawInput, DecryptedOutput, RawOutput, All]"
+                    "typ": "select",
+                    "description": "Hex dump level [possible values: Disabled, DecryptedInput, RawInput, DecryptedOutput, RawOutput, All]",
+                    "values": ["Disabled", "DecryptedInput", "RawInput", "DecryptedOutput", "RawOutput", "All"]
                 },
                 "disable_console_debug": {
                     "typ": "boolean",

@@ -96,6 +96,7 @@ pub fn render_config_values(config: &ConfigJson) -> String {
     let mut html = String::new();
 
     for section in &config.titles {
+        // Section header row
         html.push_str(&format!(
             r#"<tr>
   <td colspan="2" style="color: #fff; background-color: #202632">
@@ -107,17 +108,25 @@ pub fn render_config_values(config: &ConfigJson) -> String {
         ));
 
         for (key, val) in &section.values {
-            let input_type = match val.typ.as_str() {
-                "string" => "text",
-                "integer" => "number",
-                "boolean" => "checkbox",
-                "select" => "select", // Optional: you can handle special types like select separately
-                _ => "text",
-            };
-
-            let input_html = match input_type {
-                "checkbox" => format!(r#"<input type="checkbox" role="switch" id="{key}" />"#),
-                _ => format!(r#"<input type="{input_type}" id="{key}" />"#),
+            let input_html = match val.typ.as_str() {
+                "string" => format!(r#"<input type="text" id="{key}" />"#, key = key),
+                "integer" => format!(r#"<input type="number" id="{key}" />"#, key = key),
+                "boolean" => format!(r#"<input type="checkbox" role="switch" id="{key}" />"#, key = key),
+                "select" => {
+                    // Render a <select> with options if they exist
+                    if let Some(options) = &val.values {
+                        let options_html = options
+                            .iter()
+                            .map(|opt| format!(r#"<option value="{0}">{0}</option>"#, opt))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        format!(r#"<select id="{key}">{options}</select>"#, key = key, options = options_html)
+                    } else {
+                        // fallback to text input if no options provided
+                        format!(r#"<input type="text" id="{key}" />"#, key = key)
+                    }
+                }
+                _ => format!(r#"<input type="text" id="{key}" />"#, key = key),
             };
 
             html.push_str(&format!(
