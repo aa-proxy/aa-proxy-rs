@@ -1,0 +1,157 @@
+{
+    "titles": [
+        {
+            "title": "GENERAL OPTIONS",
+            "values": {
+                "logfile": {
+                    "typ": "string",
+                    "description": "Log file path, by default it saved to /var/log in `tmpfs`/memory, if you want you can change e.g. to: \"/data/aa-proxy-rs.log\" and this way it will be saved to SD card (appended, not replaced)"
+                },
+                "stats_interval": {
+                    "typ": "integer",
+                    "description": "Interval of showing data transfer statistics in the log (0 = disabled) [seconds]"
+                },
+                "timeout_secs": {
+                    "typ": "integer",
+                    "description": "Data transfer timeout [seconds], after this idle time the session will be reconnected"
+                },
+                "webserver": {
+                    "typ": "string",
+                    "description": "Webserver bind address/port, empty = disabled"
+                },
+                "legacy": {
+                    "typ": "boolean",
+                    "description": "Enable legacy USB mode (some HeadUnits/cars needs this enabled for compatibility)"
+                },
+                "wired": {
+                    "typ": "string",
+                    "description": "Enable wired USB connection to phone (VID:PID should be specified, zero is wildcard and can be used for single or both fields) you can obtain it e.g. using `lsusb` after connecting phone, and then use e.g. \"18d1:0\" which will handle specified phone vendor ID (Google Pixel in this example)"
+                },
+                "dhu": {
+                    "typ": "boolean",
+                    "description": "Use a Google Android Auto Desktop Head Unit emulator instead of real HU device (will listen on TCP 5277 port)"
+                },
+                "udc": {
+                    "typ": "string",
+                    "description": "UDC Controller name (used in special configurations)"
+                }
+            }
+        },
+        {
+            "title": "DEBUGGING",
+            "values": {
+                "debug": {
+                    "typ": "boolean",
+                    "description": "Enable debug info"
+                },
+                "hexdump_level": {
+                    "typ": "string",
+                    "description": "Hex dump level [possible values: Disabled, DecryptedInput, RawInput, DecryptedOutput, RawOutput, All]"
+                },
+                "disable_console_debug": {
+                    "typ": "boolean",
+                    "description": "Disable debug level on console, save it only to logfile (helpful for `hexdump-level` option)"
+                }
+            }
+        },
+        {
+            "title": "BLUETOOTH AND WIFI RELATED",
+            "values": {
+                "advertise": {
+                    "typ": "boolean",
+                    "description": "BLE advertising"
+                },
+                "dongle_mode": {
+                    "typ": "boolean",
+                    "description": "Dongle mode"
+                },
+                "btalias": {
+                    "typ": "string",
+                    "description": "  # BLE device name (how your bluetooth device is visible) by default it is WirelessAADongle-CPUSERIAL for dongle mode you need to set it to: AndroidAuto-xxxxx"
+                },
+                "connect": {
+                    "typ": "string",
+                    "description": "Auto-connect to phone and initiate connection empty string/no value: don't auto-connect, zeros/wildcard: iterate over all previously connected devices, set it to phone BT MAC address for connecting to this specific phone"
+                },
+                "bt_timeout_secs": {
+                    "typ": "integer",
+                    "description": "Bluetooth handshake timeout [seconds], this is for rare cases when the phone stops responding, to prevent the bluetooth handshake deadlock with inifite waiting and not restarting connection again"
+                },
+                "iface": {
+                    "typ": "string",
+                    "description": "WLAN / Wi-Fi Hotspot interface (for obtaining IP and BSSID)"
+                },
+                "hostapd_conf": {
+                    "typ": "string",
+                    "description": "hostapd.conf file location (used for obtaining AP SSID and WPA passphrase)"
+                },
+                "keepalive": {
+                    "typ": "boolean",
+                    "description": "BT keep alive mode: BLE adapter doesn't power off after successful connection, so that the phone can remain connected (used in special configurations)"
+                },
+                "change_usb_order": {
+                    "typ": "boolean",
+                    "description": "Connect to usb before waiting bt connection"
+                }
+            }
+        },
+        {
+            "title": "MITM CONFIGURATION",
+            "values": {
+                "mitm": {
+                    "typ": "boolean",
+                    "description": "Enable MITM mode"
+                },
+                "dpi": {
+                    "typ": "integer",
+                    "description": "Force DPI 0 = don't change DPI"
+                },
+                "remove_tap_restriction": {
+                    "typ": "boolean",
+                    "description": "remove tap restriction"
+                },
+                "video_in_motion": {
+                    "typ": "boolean",
+                    "description": "Video in motion"
+                },
+                "disable_media_sink": {
+                    "typ": "boolean",
+                    "description": "Disable media sink"
+                },
+                "disable_tts_sink": {
+                    "typ": "boolean",
+                    "description": "Disable TTS sink"
+                },
+                "developer_mode": {
+                    "typ": "boolean",
+                    "description": "Developer mode"
+                },
+                "remove_bluetooth": {
+                    "typ": "boolean",
+                    "description": "Remove bluetooth service from service discovery response"
+                },
+                "remove_wifi": {
+                    "typ": "boolean",
+                    "description": "Remove wireless service from service discovery response"
+                }
+            }
+        },
+        {
+            "title": "MITM/EV ROUTING CONFIGURATION",
+            "values": {
+                "ev": {
+                    "typ": "boolean",
+                    "description": "Enable EV routing"
+                },
+                "ev_battery_logger": {
+                    "typ": "string",
+                    "description": "Path to script executed when Android Auto session starts/stops and EV battery data is needed Argument \"start\" or \"stop\" is appended automatically when invoked"
+                },
+                "ev_connector_types": {
+                    "typ": "string",
+                    "description": "List of EV connector types supported by your car. Possible values (separate multiple with a comma ','): \nEV_CONNECTOR_TYPE_J1772, \nEV_CONNECTOR_TYPE_MENNEKES, \nEV_CONNECTOR_TYPE_CHADEMO, \nEV_CONNECTOR_TYPE_COMBO_1, \nEV_CONNECTOR_TYPE_COMBO_2, \nEV_CONNECTOR_TYPE_TESLA_SUPERCHARGER, \nEV_CONNECTOR_TYPE_GBT If left empty, the default is \nEV_CONNECTOR_TYPE_MENNEKES."
+                }
+            }
+        }
+    ]
+}

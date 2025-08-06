@@ -1,6 +1,7 @@
 use bluer::Address;
 use serde::de::{self, Deserializer, Error as DeError, Visitor};
 use serde::{Deserialize, Serialize};
+use serde_with::serde_as;
 use simplelog::*;
 use std::{
     fmt::{self, Display},
@@ -11,8 +12,11 @@ use std::{
 };
 use tokio::sync::RwLock;
 use toml_edit::{value, DocumentMut};
+use std::collections::HashMap;
+use indexmap::IndexMap;
 
 pub type SharedConfig = Arc<RwLock<AppConfig>>;
+pub type SharedConfigJson = Arc<RwLock<ConfigJson>>;
 
 #[derive(
     clap::ValueEnum, Default, Debug, PartialEq, PartialOrd, Clone, Copy, Deserialize, Serialize,
@@ -99,6 +103,27 @@ fn webserver_default_bind() -> Option<String> {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
+pub struct ConfigValue {
+    pub typ: String,
+    pub description: String,
+}
+
+#[serde_as]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct ConfigValues {
+    pub title: String,
+    pub values: IndexMap<String, ConfigValue>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct ConfigJson {
+    pub titles: Vec<ConfigValues>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
 pub struct AppConfig {
     pub advertise: bool,
     pub dongle_mode: bool,
@@ -135,6 +160,9 @@ pub struct AppConfig {
     pub wired: Option<UsbId>,
     pub dhu: bool,
     pub ev: bool,
+    pub remove_bluetooth: bool,
+    pub remove_wifi: bool,
+    pub change_usb_order: bool,
     #[serde(default, deserialize_with = "empty_string_as_none")]
     pub ev_battery_logger: Option<PathBuf>,
     #[serde(default, deserialize_with = "empty_string_as_none")]
@@ -142,6 +170,32 @@ pub struct AppConfig {
 
     #[serde(skip)]
     pub restart_requested: bool,
+}
+
+impl Default for ConfigValue {
+    fn default() -> Self {
+        Self {
+            typ: String::new(),
+            description: String::new(),
+        }
+    }
+}
+
+impl Default for ConfigValues {
+    fn default() -> Self {
+        Self {
+            title: String::new(),
+            values: IndexMap::new(),
+        }
+    }
+}
+
+impl Default for ConfigJson {
+    fn default() -> Self {
+        Self {
+            titles: Vec::new(),
+        }
+    }
 }
 
 impl Default for AppConfig {
@@ -174,6 +228,9 @@ impl Default for AppConfig {
             wired: None,
             dhu: false,
             ev: false,
+            remove_bluetooth: false,
+            remove_wifi: false,
+            change_usb_order: false,
             ev_battery_logger: None,
             restart_requested: false,
             ev_connector_types: None,
@@ -182,6 +239,8 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
+    const CONFIG_JSON: &str = include_str!("../static/config.json");
+
     pub fn load(config_file: PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
         use ::config::File;
         let file_config: AppConfig = ::config::Config::builder()
@@ -241,6 +300,9 @@ impl AppConfig {
         );
         doc["dhu"] = value(self.dhu);
         doc["ev"] = value(self.ev);
+        doc["remove_bluetooth"] = value(self.remove_bluetooth);
+        doc["remove_wifi"] = value(self.remove_wifi);
+        doc["change_usb_order"] = value(self.change_usb_order);
         if let Some(path) = &self.ev_battery_logger {
             doc["ev_battery_logger"] = value(path.display().to_string());
         }
@@ -249,5 +311,10 @@ impl AppConfig {
         }
 
         let _ = fs::write(config_file, doc.to_string());
+    }
+
+    pub fn load_config_json() -> Result<ConfigJson, Box<dyn std::error::Error>> {
+        let parsed: ConfigJson = serde_json::from_str(Self::CONFIG_JSON)?;
+        Ok(parsed)
     }
 }

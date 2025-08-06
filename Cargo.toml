@@ -36,11 +36,13 @@ byteorder = "1.5.0"
 config = "0.14"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
+serde_with = { version = "3" }
 axum = "0.6"
 hyper = { version = "0.14", features = ["full"] }
 toml_edit = "0.22"
 chrono = "0.4.41"
 hex = "0.4.3"
+indexmap = { version = "2", features = ["serde"] }
 
 [build-dependencies]
 protoc-bin-vendored = "3.1.0"

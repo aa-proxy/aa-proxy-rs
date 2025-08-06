@@ -10,6 +10,7 @@ mod web;
 
 use crate::config::AppConfig;
 use crate::config::SharedConfig;
+use crate::config::SharedConfigJson;
 use crate::mitm::Packet;
 use bluetooth::bluetooth_setup_connection;
 use bluetooth::bluetooth_stop;
@@ -162,6 +163,7 @@ fn logging_init(debug: bool, disable_console_debug: bool, log_path: &PathBuf) {
 
 async fn tokio_main(
     config: SharedConfig,
+    config_json: SharedConfigJson,
     need_restart: Arc<Notify>,
     tcp_start: Arc<Notify>,
     config_file: PathBuf,
@@ -175,6 +177,7 @@ async fn tokio_main(
         // preparing AppState and starting webserver
         let state = web::AppState {
             config: config.clone(),
+            config_json: config_json.clone(),
             config_file: config_file.into(),
             tx,
             sensor_channel,
@@ -221,6 +224,7 @@ async fn tokio_main(
             config.read().await.udc.clone(),
         ));
     }
+    let change_usb_order = config.read().await.change_usb_order;
     loop {
         if let Some(ref mut usb) = usb {
             if let Err(e) = usb.init() {
@@ -229,6 +233,13 @@ async fn tokio_main(
         }
 
         let mut bt_stop = None;
+        if change_usb_order {
+            if let Some(ref mut usb) = usb {
+                usb.enable_default_and_wait_for_accessory(accessory_started.clone())
+                    .await;
+            }
+        }
+
         if let Some(ref wifi_conf) = wifi_conf {
             loop {
                 match bluetooth_setup_connection(
@@ -256,10 +267,12 @@ async fn tokio_main(
                 }
             }
         }
-
-        if let Some(ref mut usb) = usb {
-            usb.enable_default_and_wait_for_accessory(accessory_started.clone())
-                .await;
+        
+        if !change_usb_order {
+            if let Some(ref mut usb) = usb {
+                usb.enable_default_and_wait_for_accessory(accessory_started.clone())
+                    .await;
+            }
         }
 
         if let Some(bt_stop) = bt_stop {
@@ -287,6 +300,7 @@ fn main() {
 
     // parse config
     let config = AppConfig::load(args.config.clone()).unwrap();
+    let config_json = AppConfig::load_config_json().expect("Invalid embedded config.json");
 
     logging_init(config.debug, config.disable_console_debug, &config.logfile);
     info!(
@@ -330,6 +344,7 @@ fn main() {
     let tcp_start = Arc::new(Notify::new());
     let tcp_start_cloned = tcp_start.clone();
     let config = Arc::new(RwLock::new(config));
+    let config_json = Arc::new(RwLock::new(config_json));
     let config_cloned = config.clone();
     let tx = Arc::new(Mutex::new(None));
     let tx_cloned = tx.clone();
@@ -341,6 +356,7 @@ fn main() {
     runtime.spawn(async move {
         tokio_main(
             config_cloned,
+            config_json.clone(),
             need_restart,
             tcp_start,
             args.config.clone(),

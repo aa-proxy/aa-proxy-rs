@@ -1,9 +1,11 @@
 use crate::config::AppConfig;
 use crate::config::SharedConfig;
+use crate::config::SharedConfigJson;
 use crate::ev::send_ev_data;
 use crate::ev::BatteryData;
 use crate::ev::EV_MODEL_FILE;
 use crate::mitm::Packet;
+use crate::config::ConfigJson;
 use axum::{
     body::Body,
     extract::{Query, RawBody, State},
@@ -34,6 +36,7 @@ const NAME: &str = "<i><bright-black> web: </>";
 #[derive(Clone)]
 pub struct AppState {
     pub config: SharedConfig,
+    pub config_json: SharedConfigJson,
     pub config_file: Arc<PathBuf>,
     pub tx: Arc<Mutex<Option<Sender<Packet>>>>,
     pub sensor_channel: Arc<Mutex<Option<u8>>>,
@@ -43,6 +46,7 @@ pub fn app(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/config", get(get_config).post(set_config))
+        .route("/config-data", get(get_config_data))
         .route("/download", get(download_handler))
         .route("/restart", get(restart_handler))
         .route("/upload-hex-model", post(upload_hex_model_handler))
@@ -88,14 +92,78 @@ fn linkify_git_info(git_date: &str, git_hash: &str) -> String {
     }
 }
 
-async fn index() -> impl IntoResponse {
+pub fn render_config_values(config: &ConfigJson) -> String {
+    let mut html = String::new();
+
+    for section in &config.titles {
+        html.push_str(&format!(
+            r#"<tr>
+  <td colspan="2" style="color: #fff; background-color: #202632">
+    <strong>{}</strong>
+  </td>
+</tr>
+"#,
+            section.title
+        ));
+
+        for (key, val) in &section.values {
+            let input_type = match val.typ.as_str() {
+                "string" => "text",
+                "integer" => "number",
+                "boolean" => "checkbox",
+                "select" => "select", // Optional: you can handle special types like select separately
+                _ => "text",
+            };
+
+            let input_html = match input_type {
+                "checkbox" => format!(r#"<input type="checkbox" role="switch" id="{key}" />"#),
+                _ => format!(r#"<input type="{input_type}" id="{key}" />"#),
+            };
+
+            html.push_str(&format!(
+                r#"<tr>
+  <td><label for="{key}">{key}</label></td>
+  <td>
+    {input_html}<br/>
+    <small><pre>{desc}</pre></small>
+  </td>
+</tr>
+"#,
+                key = key,
+                input_html = input_html,
+                desc = val.description
+            ));
+        }
+    }
+
+    html
+}
+
+pub fn render_config_ids(config: &ConfigJson) -> String {
+    let mut all_keys = Vec::new();
+
+    for section in &config.titles {
+        for key in section.values.keys() {
+            all_keys.push(format!(r#""{}""#, key));
+        }
+    }
+
+    format!("{}", all_keys.join(", "))
+}
+
+async fn index(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let config_json_guard = state.config_json.read().await;
+    let config_json = &*config_json_guard;
+
     let html = TEMPLATE
         .replace("{BUILD_DATE}", env!("BUILD_DATE"))
         .replace(
             "{GIT_INFO}",
             &linkify_git_info(env!("GIT_DATE"), env!("GIT_HASH")),
         )
-        .replace("{PICO_CSS}", PICO_CSS);
+        .replace("{PICO_CSS}", PICO_CSS)
+        .replace("{CONFIG_VALUES}", &render_config_values(config_json))
+        .replace("{CONFIG_IDS}", &render_config_ids(config_json));
     Html(html)
 }
 
@@ -242,6 +310,11 @@ async fn upload_hex_model_handler(
 
 async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let cfg = state.config.read().await.clone();
+    Json(cfg)
+}
+
+async fn get_config_data(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let cfg = state.config_json.read().await.clone();
     Json(cfg)
 }
 
