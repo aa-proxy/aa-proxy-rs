@@ -40,6 +40,11 @@ use tokio::time::Instant;
 use std::net::SocketAddr;
 use tokio::sync::RwLock;
 
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+use flate2::read::GzDecoder;
+
 // module name for logging engine
 const NAME: &str = "<i><bright-black> main: </>";
 const HOSTAPD_CONF_IN: &str = "/etc/hostapd.conf.in";
@@ -366,6 +371,49 @@ fn generate_hostapd_conf(config: AppConfig) -> std::io::Result<()> {
     fs::write(HOSTAPD_CONF_OUT, rendered)
 }
 
+const REQUIRED: [&str; 4] = [
+    "CONFIG_USB_CONFIGFS_UEVENT",
+    "CONFIG_USB_CONFIGFS_F_ACC",
+    "CONFIG_BT_RFCOMM",
+    "CONFIG_BT_RFCOMM_TTY",
+];
+
+pub fn check_kernel_config(path: &str) -> bool {
+    match File::open(path) {
+        Ok(file) => {
+            let decoder = GzDecoder::new(file);
+            let reader = BufReader::new(decoder);
+
+            let mut config: HashMap<String, String> = HashMap::new();
+            for line in reader.lines().flatten() {
+                if let Some((key, val)) = line.split_once('=') {
+                    config.insert(key.trim().to_string(), val.trim().to_string());
+                }
+            }
+
+            let mut missing = Vec::new();
+            for &key in &REQUIRED {
+                match config.get(key).map(|s| s.as_str()) {
+                    Some("y") | Some("m") => {}
+                    _ => missing.push(key.to_string()),
+                }
+            }
+
+            if missing.is_empty() {
+                info!("✅ All required kernel configs are enabled.");
+                true
+            } else {
+                error!("❌ Missing kernel configs: {:?}", missing);
+                false
+            }
+        }
+        Err(e) => {
+            warn!("⚠️ Failed to open {}: {}", path, e);
+            false
+        }
+    }
+}
+
 fn main() {
     let started = Instant::now();
 
@@ -384,6 +432,8 @@ fn main() {
         env!("GIT_HASH")
     );
 
+    check_kernel_config("/proc/config.gz");
+
     // generate system configs from template and exit
     if args.generate_system_config {
         generate_hostapd_conf(config).expect("error generating config from template");
@@ -394,6 +444,7 @@ fn main() {
     if let Ok(model) = get_sbc_model() {
         info!("{} 📟 SBC model: <bold><blue>{}</>", NAME, model);
     }
+
 
     // check and display config
     if args.config.exists() {
