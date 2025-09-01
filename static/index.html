@@ -1,41 +1,78 @@
-<!doctype html>
-<html>
+<!DOCTYPE html>
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>aa-proxy-rs</title>
     <style>
       {PICO_CSS}
+
+      :root {
+        --pico-grid-column-gap: 0.5rem;
+        --pico-grid-row-gap: 0rem;
+      }
+
+      .section-title {
+        color: #fff;
+        font-weight: bold;
+        background-color: #202632;
+        width: 100%;
+        border-radius: 0.375rem;
+        padding: calc(0.25rem * 2);
+      }
+
+      .section-body {
+        padding: 0.375rem;
+      }
+
+      hr {
+        border: none;
+        background-color: #202632;
+        overflow: visible;
+        text-align: center;
+        height: 0.125rem;
+      }
+
+      .grid {
+        display: grid;
+        align-items: center;
+      }
+
+      .grid-cols-1 {
+        grid-template-columns: repeat(1, minmax(0, 1fr)) !important;
+      }
+
+      .grid-cols-2 {
+        grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+      }
     </style>
   </head>
   <body>
-    <div align="right" style="padding-right: 1em">
+    <header style="text-align: center; padding-bottom: 0">
+      <h3 style="text-align: center; margin-bottom: 0.125rem">
+        🛸 aa-proxy-rs
+      </h3>
       <small>build: {BUILD_DATE}, git: {GIT_INFO}</small>
-    </div>
-    <div style="text-align: center; margin-top: 1em">
-      <h3>🛸 aa-proxy-rs</h3>
-    </div>
-    <form id="config-form">
-      <table>
-        <tr>
-          <td colspan="2" style="color: #fff; background-color: #202632">
-            <strong>🚀 ACTIONS</strong>
-          </td>
-        </tr>
-        <tr>
-          <td colspan="2">
+    </header>
+
+    <main class="container">
+      <form id="config-form">
+        <fieldset>
+          <legend class="section-title"><strong>🚀 ACTIONS</strong></legend>
+          <div class="grid grid-cols-2 section-body">
             <button type="button" onclick="saveConfig()">💾 Save</button>
+            <button type="button" id="downloadBtn">📥 Download log</button>
             <button type="button" onclick="window.location.href='/restart'">
               🧬 Apply / restart
             </button>
-            <button type="button" id="downloadBtn">📥 Download log</button>
             <button type="button" onclick="window.location.href='/reboot'">
               🔁 Reboot device
             </button>
-          </td>
-        </tr>
+          </div>
+        </fieldset>
         {CONFIG_VALUES}
-      </table>
-    </form>
+      </form>
+    </main>
 
     <script>
       // button event listener
@@ -95,7 +132,7 @@
 
       async function saveConfig() {
         const config = {};
-        const ids = [{CONFIG_IDS}];
+        const ids = [{ CONFIG_IDS }];
         ids.forEach((id) => (config[id] = getValue(id)));
         await fetch("/config", {
           method: "POST",

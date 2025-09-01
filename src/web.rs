@@ -106,15 +106,16 @@ pub fn render_config_values(config: &ConfigJson) -> String {
     for section in &config.titles {
         // Section header row
         html.push_str(&format!(
-            r#"<tr>
-                 <td colspan="2" style="color: #fff; background-color: #202632">
-                   <strong>{}</strong>
-                 </td>
-               </tr>"#,
+            r#"
+            <fieldset>
+                <legend class="section-title">{}</legend>
+                <div class="grid grid-cols-1 section-body">
+            "#,
             section.title,
         ));
 
-        for (key, val) in &section.values {
+        let len = section.values.len();
+        for (i, (key, val)) in section.values.iter().enumerate() {
             let input_html = match val.typ.as_str() {
                 "string" => format!(r#"<input type="text" id="{key}" />"#),
                 "integer" => format!(r#"<input type="number" id="{key}" />"#),
@@ -138,15 +139,25 @@ pub fn render_config_values(config: &ConfigJson) -> String {
 
             let desc = replace_backticks(val.description.replace("\n", "<br>"));
             html.push_str(&format!(
-                r#"<tr>
-                     <td><label for="{key}">{key}</label></td>
-                     <td>
-                       {input_html}<br/>
-                       <small>{desc}</small>
-                     </td>
-                   </tr>"#,
+                r#"
+                <div class="grid grid-cols-2">
+                    <label for="{key}">{key}</label>
+                    <div>
+                        {input_html}
+                        <div><small>{desc}</small></div>
+                    </div>
+                </div>
+                "#
             ));
+
+            // nice line break
+            if i + 1 != len {
+                html.push_str("<hr>")
+            }
         }
+
+        // Close section
+        html.push_str("</div></fieldset>");
     }
 
     html
