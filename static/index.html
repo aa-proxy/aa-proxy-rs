@@ -132,7 +132,7 @@
 
       async function saveConfig() {
         const config = {};
-        const ids = [{ CONFIG_IDS }];
+        const ids = [{CONFIG_IDS}];
         ids.forEach((id) => (config[id] = getValue(id)));
         await fetch("/config", {
           method: "POST",
