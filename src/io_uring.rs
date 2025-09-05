@@ -437,10 +437,15 @@ pub async fn io_loop(
         // freed by aborting both tasks (which both hold a `Rc<TcpStream>`
         // for each direction)
         reader_hu.abort();
+        let _ = reader_hu.await;
         reader_md.abort();
+        let _ = reader_md.await;
         from_file.abort();
+        let _ = from_file.await;
         from_stream.abort();
+        let _ = from_stream.await;
         monitor.abort();
+        let _ = monitor.await;
 
         // set webserver context EV stuff to None
         let mut tx_lock = tx.lock().await;
