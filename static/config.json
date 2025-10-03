@@ -208,6 +208,10 @@
         "eth_mode": {
           "typ": "string",
           "description": "Configure Ethernet mode (optional). Options:\n- `DHCP` (case-insensitive): dynamic IP assignment\n- Static IP: e.g. `192.168.100.1/24`\n- Leave blank to disable"
+        },
+        "usb_serial_console": {
+          "typ": "boolean",
+          "description": "Enables the USB serial gadget (ttyGS0) for low-level console debugging. This should be disabled during normal Android Auto operation."
         }
       }
     }
