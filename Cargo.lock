@@ -48,6 +48,7 @@ dependencies = [
  "tokio-uring",
  "tokio-util",
  "toml_edit",
+ "uuid",
 ]
 
 [[package]]
