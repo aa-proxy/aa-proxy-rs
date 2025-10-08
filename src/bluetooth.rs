@@ -76,7 +76,7 @@ pub async fn setup_bluetooth_adapter(
 ) -> Result<(Session, Adapter)> {
     let session = bluer::Session::new().await?;
     let adapter = session.default_adapter().await?;
-    
+
     // setting BT alias for further use
     let alias = match btalias {
         None => match get_cpu_serial_number_suffix().await {
@@ -93,7 +93,7 @@ pub async fn setup_bluetooth_adapter(
         adapter.name(),
         adapter.address().await?
     );
-    
+
     adapter.set_alias(alias.clone()).await?;
     adapter.set_powered(true).await?;
     adapter.set_pairable(true).await?;

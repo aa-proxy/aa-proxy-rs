@@ -1,11 +1,11 @@
 use aa_proxy_rs::bluetooth;
-use aa_proxy_rs::config_types::BluetoothAddressList;
 use aa_proxy_rs::btle;
 use aa_proxy_rs::config::SharedConfig;
 use aa_proxy_rs::config::SharedConfigJson;
 use aa_proxy_rs::config::WifiConfig;
 use aa_proxy_rs::config::{Action, AppConfig};
 use aa_proxy_rs::config::{DEFAULT_WLAN_ADDR, TCP_SERVER_PORT};
+use aa_proxy_rs::config_types::BluetoothAddressList;
 use aa_proxy_rs::io_uring::io_loop;
 use aa_proxy_rs::led::{LedColor, LedManager, LedMode};
 use aa_proxy_rs::mitm::Packet;
@@ -206,7 +206,6 @@ pub async fn setup_bluetooth_and_btle(
     state: AppState,
     stopped: bool,
 ) -> Result<Option<BluetoothResources>> {
-
     loop {
         let mut bt_state = None;
         let mut btle_handle = None;
@@ -216,7 +215,6 @@ pub async fn setup_bluetooth_and_btle(
         if bluetooth_enabled || enable_btle {
             match bluetooth::setup_bluetooth_adapter(btalias.clone(), advertise).await {
                 Ok((session, adapter)) => {
-
                     // --- Start BLE GATT server first ---
                     if enable_btle {
                         match btle::run_btle_server(&adapter, state.clone()).await {
@@ -232,13 +230,14 @@ pub async fn setup_bluetooth_and_btle(
                     }
 
                     // --- Prepare UUIDs ---
-                    let mut uuids: std::collections::BTreeSet<bluer::Uuid> = std::collections::BTreeSet::new();
+                    let mut uuids: std::collections::BTreeSet<bluer::Uuid> =
+                        std::collections::BTreeSet::new();
 
                     /*if enable_btle {
                         uuids.insert(bluer::Uuid::parse_str(btle::SERVICE_UUID_128).unwrap());
                     }
                     else if advertise {*/
-                        uuids.insert(bluetooth::AAWG_PROFILE_UUID);
+                    uuids.insert(bluetooth::AAWG_PROFILE_UUID);
                     //}
 
                     // --- BLE advertisement ---
@@ -266,20 +265,32 @@ pub async fn setup_bluetooth_and_btle(
                         for attempt in 0..3 {
                             match adapter.advertise(le_advertisement.clone()).await {
                                 Ok(handle) => {
-                                    info!("{} 📣 BLE advertisement started with UUIDs (attempt {})", NAME, attempt + 1);
+                                    info!(
+                                        "{} 📣 BLE advertisement started with UUIDs (attempt {})",
+                                        NAME,
+                                        attempt + 1
+                                    );
                                     adv_handle = Some(handle);
                                     adv_success = true;
                                     break;
                                 }
                                 Err(e) => {
-                                    warn!("{} 🥏 Advertising attempt {} failed: {}", NAME, attempt + 1, e);
+                                    warn!(
+                                        "{} 🥏 Advertising attempt {} failed: {}",
+                                        NAME,
+                                        attempt + 1,
+                                        e
+                                    );
                                     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                                 }
                             }
                         }
 
                         if !adv_success {
-                            warn!("{} 🥏 Advertising with UUIDs failed, fallback to local name only", NAME);
+                            warn!(
+                                "{} 🥏 Advertising with UUIDs failed, fallback to local name only",
+                                NAME
+                            );
 
                             // Retry only with local name
                             if let Some(handle) = adv_handle.take() {
@@ -298,13 +309,17 @@ pub async fn setup_bluetooth_and_btle(
                                     }
                                     Err(e) => {
                                         warn!("{} 🥏 Local-name-only advertising attempt {} failed: {}", NAME, attempt + 1, e);
-                                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                                        tokio::time::sleep(std::time::Duration::from_millis(200))
+                                            .await;
                                     }
                                 }
                             }
 
                             if !adv_success {
-                                error!("{} 🥏 BLE advertisement completely failed after retries", NAME);
+                                error!(
+                                    "{} 🥏 BLE advertisement completely failed after retries",
+                                    NAME
+                                );
                                 success = false;
                             }
                         }
@@ -353,7 +368,10 @@ pub async fn setup_bluetooth_and_btle(
                 adv_handle,
             }));
         } else {
-            error!("{} Bluetooth setup failed, cleaning up and retrying...", NAME);
+            error!(
+                "{} Bluetooth setup failed, cleaning up and retrying...",
+                NAME
+            );
 
             // Drop any stale handles
             if let Some(handle) = adv_handle.take() {
@@ -367,7 +385,9 @@ pub async fn setup_bluetooth_and_btle(
             }
 
             // Reset adapter to clear BlueZ state
-            if let Ok((_session, adapter)) = bluetooth::setup_bluetooth_adapter(btalias.clone(), advertise).await {
+            if let Ok((_session, adapter)) =
+                bluetooth::setup_bluetooth_adapter(btalias.clone(), advertise).await
+            {
                 let _ = adapter.set_powered(false).await;
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 let _ = adapter.set_powered(true).await;
@@ -488,7 +508,9 @@ async fn tokio_main(
             Duration::from_secs(cfg.bt_timeout_secs.into()),
             state.clone(),
             stopped,
-        ).await {
+        )
+        .await
+        {
             Ok(result) => result,
             Err(e) => {
                 error!("{} Fatal error in Bluetooth setup: {}", NAME, e);
