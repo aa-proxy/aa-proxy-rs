@@ -335,7 +335,7 @@ async fn craft_response(req: &Request, state: AppState) -> Response {
             // decode into Vec<u8>
             let binary_data = match hex::decode(body) {
                 Ok(data) => data,
-                Err(err) => {
+                Err(_err) => {
                     return Response {
                         status: 400,
                         path: req.path.clone(),
