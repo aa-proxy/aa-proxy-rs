@@ -136,10 +136,6 @@ pub async fn run_btle_server(
                             info!("{} 🥏 Got Notify subscription event (mtu={})", NAME, notifier.mtu());
                             writer_opt = Some(notifier);
                         }
-    
-                        other => {
-                            info!("{} 🥏 Unhandled characteristic event: {:?}", NAME, other);
-                        }
                     }
     
                     // Drain available reads
