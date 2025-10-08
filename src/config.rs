@@ -216,7 +216,7 @@ fn get_latest_wifi_version() -> std::io::Result<u16> {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            advertise: false,
+            advertise: true,
             dongle_mode: false,
             debug: false,
             hexdump_level: HexdumpLevel::Disabled,

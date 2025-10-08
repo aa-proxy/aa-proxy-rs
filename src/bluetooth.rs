@@ -3,18 +3,16 @@ use crate::config::IDENTITY_NAME;
 use crate::config_types::BluetoothAddressList;
 use anyhow::anyhow;
 use backon::{ExponentialBuilder, Retryable};
-use bluer::adv::Advertisement;
 use bluer::{
-    adv::AdvertisementHandle,
     agent::{Agent, AgentHandle},
     rfcomm::{Profile, ProfileHandle, Role, Stream},
-    Adapter, Address, Device, Uuid,
+    Adapter, Address, Device, Session, Uuid,
 };
 use futures::StreamExt;
 use simplelog::*;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::AsyncReadExt;
+use tokio::{io::AsyncReadExt, sync::Mutex};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
@@ -24,6 +22,7 @@ include!(concat!(env!("OUT_DIR"), "/protos/mod.rs"));
 use protobuf::Message;
 use WifiInfoResponse::AccessPointType;
 use WifiInfoResponse::SecurityMode;
+
 const HEADER_LEN: usize = 4;
 const STAGES: u8 = 5;
 
@@ -34,7 +33,7 @@ const NAME: &str = "<i><bright-black> bluetooth: </>";
 // async contexts needs some extra restrictions
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-const AAWG_PROFILE_UUID: Uuid = Uuid::from_u128(0x4de17a0052cb11e6bdf40800200c9a66);
+pub const AAWG_PROFILE_UUID: Uuid = Uuid::from_u128(0x4de17a0052cb11e6bdf40800200c9a66);
 const HSP_HS_UUID: Uuid = Uuid::from_u128(0x0000110800001000800000805f9b34fb);
 const HSP_AG_UUID: Uuid = Uuid::from_u128(0x0000111200001000800000805f9b34fb);
 const AV_REMOTE_CONTROL_TARGET_UUID: Uuid = Uuid::from_u128(0x0000110c00001000800000805f9b34fb);
@@ -54,7 +53,7 @@ enum MessageId {
 }
 
 pub struct BluetoothState {
-    handle_ble: Option<AdvertisementHandle>,
+    adapter: Adapter,
     handle_aa: ProfileHandle,
     handle_hsp: Option<JoinHandle<Result<ProfileHandle>>>,
     handle_agent: AgentHandle,
@@ -71,14 +70,15 @@ pub async fn get_cpu_serial_number_suffix() -> Result<String> {
     Ok(serial)
 }
 
-async fn power_up_and_wait_for_connection(
-    advertise: bool,
-    dongle_mode: bool,
+// Create and configure the Bluetooth adapter
+pub async fn setup_bluetooth_adapter(
     btalias: Option<String>,
-    connect: BluetoothAddressList,
-    bt_timeout: Duration,
+    advertise: bool,
     stopped: bool,
-) -> Result<(BluetoothState, Stream)> {
+) -> Result<(Session, Adapter)> {
+    let session = bluer::Session::new().await?;
+    let adapter = session.default_adapter().await?;
+    
     // setting BT alias for further use
     let alias = match btalias {
         None => match get_cpu_serial_number_suffix().await {
@@ -89,37 +89,33 @@ async fn power_up_and_wait_for_connection(
     };
     info!("{} 🥏 Bluetooth alias: <bold><green>{}</>", NAME, alias);
 
-    let session = bluer::Session::new().await?;
-    let adapter = session.default_adapter().await?;
     info!(
         "{} 🥏 Opened bluetooth adapter <b>{}</> with address <b>{}</b>",
         NAME,
         adapter.name(),
         adapter.address().await?
     );
+    
     adapter.set_alias(alias.clone()).await?;
     adapter.set_powered(true).await?;
     adapter.set_pairable(true).await?;
 
-    let handle_ble = if advertise {
-        // Perform a Bluetooth LE advertisement
-        info!("{} 📣 BLE Advertisement started", NAME);
-        let le_advertisement = Advertisement {
-            advertisement_type: bluer::adv::Type::Peripheral,
-            service_uuids: vec![AAWG_PROFILE_UUID].into_iter().collect(),
-            discoverable: Some(true),
-            local_name: Some(alias),
-            ..Default::default()
-        };
-
-        Some(adapter.advertise(le_advertisement).await?)
-    } else {
+    if advertise {
         adapter.set_discoverable(true).await?;
         adapter.set_discoverable_timeout(0).await?;
+    }
 
-        None
-    };
+    Ok((session, adapter))
+}
 
+async fn power_up_and_wait_for_connection(
+    session: Session,
+    adapter: Adapter,
+    dongle_mode: bool,
+    connect: Option<Address>,
+    keepalive: bool,
+    bt_timeout: Duration,
+) -> Result<(BluetoothState, Stream)> {
     // Default agent is probably needed when pairing for the first time
     let agent = Agent::default();
     let handle_agent = session.register_agent(agent).await?;
@@ -272,7 +268,7 @@ async fn power_up_and_wait_for_connection(
 
     // generate structure with adapter and handlers for graceful shutdown later
     let state = BluetoothState {
-        handle_ble,
+        adapter,
         handle_aa,
         handle_hsp: task_hsp,
         handle_agent,
@@ -440,10 +436,6 @@ async fn read_message(
         debug!("remaining {} bytes: {:02X?}", n, buf);
 
         // analyzing WifiConnectStatus
-        // this is a frame where phone cannot connect to WiFi:
-        // [08, FD, FF, FF, FF, FF, FF, FF, FF, FF, 01] -> which is -i64::MAX
-        // and this is where all is fine:
-        // [08, 00]
         if id == MessageId::WifiConnectStatus && n >= 2 {
             if buf[1] != 0 {
                 return Err("phone cannot connect to our WiFi AP...".into());
@@ -455,10 +447,6 @@ async fn read_message(
 }
 
 pub async fn bluetooth_stop(state: BluetoothState) -> Result<()> {
-    if let Some(handle) = state.handle_ble {
-        info!("{} 📣 Removing BLE advertisement", NAME);
-        drop(handle);
-    }
     info!("{} 🥷 Unregistering default agent", NAME);
     drop(state.handle_agent);
     info!("{} 📱 Removing AA profile", NAME);
@@ -485,10 +473,11 @@ pub async fn bluetooth_stop(state: BluetoothState) -> Result<()> {
     Ok(())
 }
 
-pub async fn bluetooth_setup_connection(
-    advertise: bool,
+// New function that accepts pre-created session and adapter
+pub async fn bluetooth_setup_connection_with_adapter(
+    session: Session,
+    adapter: Adapter,
     dongle_mode: bool,
-    btalias: Option<String>,
     connect: BluetoothAddressList,
     wifi_config: WifiConfig,
     tcp_start: Arc<Notify>,
@@ -500,10 +489,11 @@ pub async fn bluetooth_setup_connection(
     let mut stage = 1;
     let mut started;
 
+    // Use the provided session and adapter instead of creating new ones
     let (state, mut stream) = power_up_and_wait_for_connection(
-        advertise,
+        session,
+        adapter,
         dongle_mode,
-        btalias,
         connect,
         bt_timeout,
         stopped,
