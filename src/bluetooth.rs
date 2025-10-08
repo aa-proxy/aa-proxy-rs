@@ -53,7 +53,6 @@ enum MessageId {
 }
 
 pub struct BluetoothState {
-    adapter: Adapter,
     handle_aa: ProfileHandle,
     handle_hsp: Option<JoinHandle<Result<ProfileHandle>>>,
     handle_agent: AgentHandle,
@@ -267,7 +266,6 @@ async fn power_up_and_wait_for_connection(
 
     // generate structure with adapter and handlers for graceful shutdown later
     let state = BluetoothState {
-        adapter,
         handle_aa,
         handle_hsp: task_hsp,
         handle_agent,
