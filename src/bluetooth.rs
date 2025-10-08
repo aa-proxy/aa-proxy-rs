@@ -12,7 +12,7 @@ use futures::StreamExt;
 use simplelog::*;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::{io::AsyncReadExt, sync::Mutex};
+use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
@@ -74,7 +74,6 @@ pub async fn get_cpu_serial_number_suffix() -> Result<String> {
 pub async fn setup_bluetooth_adapter(
     btalias: Option<String>,
     advertise: bool,
-    stopped: bool,
 ) -> Result<(Session, Adapter)> {
     let session = bluer::Session::new().await?;
     let adapter = session.default_adapter().await?;
@@ -112,9 +111,9 @@ async fn power_up_and_wait_for_connection(
     session: Session,
     adapter: Adapter,
     dongle_mode: bool,
-    connect: Option<Address>,
-    keepalive: bool,
+    connect: BluetoothAddressList,
     bt_timeout: Duration,
+    stopped: bool,
 ) -> Result<(BluetoothState, Stream)> {
     // Default agent is probably needed when pairing for the first time
     let agent = Agent::default();
@@ -182,7 +181,7 @@ async fn power_up_and_wait_for_connection(
 
                 info!("{} 🧲 Attempting to start an AndroidAuto session via bluetooth with the following devices, in this order: {:?}", NAME, addresses);
                 let try_connect_bluetooth_addresses_retry =
-                    || try_connect_bluetooth_addresses(dongle_mode, &adapter, &addresses);
+                    || try_connect_bluetooth_addresses(dongle_mode, &adapter_cloned, &addresses);
 
                 let retry_policy = ExponentialBuilder::default()
                     .with_min_delay(Duration::from_secs(1))

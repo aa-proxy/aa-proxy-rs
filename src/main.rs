@@ -1,3 +1,6 @@
+use aa_proxy_rs::bluetooth;
+use aa_proxy_rs::config_types::BluetoothAddressList;
+use aa_proxy_rs::btle;
 use aa_proxy_rs::config::SharedConfig;
 use aa_proxy_rs::config::SharedConfigJson;
 use aa_proxy_rs::config::WifiConfig;
@@ -196,13 +199,13 @@ pub async fn setup_bluetooth_and_btle(
     advertise: bool,
     bluetooth_enabled: bool,
     dongle_mode: bool,
-    connect: Option<bluer::Address>,
+    connect: BluetoothAddressList,
     wifi_conf: Option<WifiConfig>,
     tcp_start: Arc<Notify>,
-    keepalive: bool,
     bt_timeout: Duration,
     state: AppState,
-) -> Result<Option<BluetoothResources>, Box<dyn std::error::Error + Send + Sync>> {
+    stopped: bool,
+) -> Result<Option<BluetoothResources>> {
 
     loop {
         let mut bt_state = None;
@@ -314,11 +317,11 @@ pub async fn setup_bluetooth_and_btle(
                                 session,
                                 adapter,
                                 dongle_mode,
-                                connect,
+                                connect.clone(),
                                 wifi_config.clone(),
                                 tcp_start.clone(),
-                                keepalive,
                                 bt_timeout,
+                                stopped,
                             )
                             .await
                             {
@@ -469,18 +472,22 @@ async fn tokio_main(
         }
 
         // --- Setup Bluetooth (Classic + BLE) ---
+        // read and clone the effective config in advance to avoid holding the lock
+        let cfg = config.read().await.clone();
+        let stopped = cfg.action_requested == Some(Action::Stop);
+
         let bluetooth_resources = match setup_bluetooth_and_btle(
-            config.read().await.btalias.clone(),
+            cfg.btalias,
             true, // enable BLE
-            config.read().await.advertise,
+            cfg.advertise,
             true, // enable classic BT
-            config.read().await.dongle_mode,
-            config.read().await.connect,
+            cfg.dongle_mode,
+            cfg.connect,
             wifi_conf.clone(),
             tcp_start.clone(),
-            config.read().await.keepalive,
-            Duration::from_secs(config.read().await.bt_timeout_secs.into()),
-            state.clone()
+            Duration::from_secs(cfg.bt_timeout_secs.into()),
+            state.clone(),
+            stopped,
         ).await {
             Ok(result) => result,
             Err(e) => {

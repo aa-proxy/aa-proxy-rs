@@ -8,7 +8,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 use flate2::{write::{ZlibEncoder, ZlibDecoder}, Compression};
 use serde::{Deserialize, Serialize};
-use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use simplelog::*;
