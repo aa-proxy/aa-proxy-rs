@@ -295,7 +295,7 @@ async fn download_handler(
         let mut added_paths: HashSet<PathBuf> = HashSet::new();
 
         // Use glob to find matching files
-        let glob_patterns = vec!["/var/log/aa-proxy-*log", "/var/log/syslog"];
+        let glob_patterns = vec!["/var/log/aa-proxy-*log", "/var/log/messages"];
         for pattern in glob_patterns {
             match glob(pattern) {
                 Ok(paths) => {
