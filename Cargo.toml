@@ -28,7 +28,6 @@ simplelog = { version = "0.11.2", features = ["paris", "ansi_term"] }
 clap = { version = "4.5.37", features = ["derive"] }
 humantime = "2.1.0"
 log = "0.4.22"
-simple_config_parser = "1.0.0"
 netif = "0.1.6"
 openssl = { version = "0.10", features = ["vendored"] }
 nusb = { git = "https://github.com/kevinmehall/nusb" }

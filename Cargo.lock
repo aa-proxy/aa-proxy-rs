@@ -39,7 +39,6 @@ dependencies = [
  "serde_json",
  "serde_with",
  "shell-words",
- "simple_config_parser",
  "simplelog",
  "tar",
  "thiserror 2.0.12",
@@ -2017,12 +2016,6 @@ checksum = "9203b8055f63a2a00e2f593bb0510367fe707d7ff1e5c872de2f537b339e5410"
 dependencies = [
  "libc",
 ]
-
-[[package]]
-name = "simple_config_parser"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d562b7cb7cef3d30257e59582674255342665ced8462ad861412e074c653b11"
 
 [[package]]
 name = "simplelog"
