@@ -13,7 +13,6 @@ use aa_proxy_rs::usb_gadget::UsbGadgetState;
 use aa_proxy_rs::web;
 use clap::Parser;
 use humantime::format_duration;
-use simple_config_parser::Config;
 use simplelog::*;
 use std::os::unix::fs::PermissionsExt;
 
@@ -70,13 +69,13 @@ struct Args {
     generate_system_config: bool,
 }
 
-fn init_wifi_config(iface: &str, hostapd_conf: PathBuf) -> WifiConfig {
+fn init_wifi_config(cfg: &AppConfig) -> WifiConfig {
     let mut ip_addr = String::from(DEFAULT_WLAN_ADDR);
 
     // Get UP interface and IP
     for ifa in netif::up().unwrap() {
         match ifa.name() {
-            val if val == iface => {
+            val if val == cfg.iface => {
                 debug!("Found interface: {:?}", ifa);
                 // IPv4 Address contains None scope_id, while IPv6 contains Some
                 match ifa.scope_id() {
@@ -91,27 +90,20 @@ fn init_wifi_config(iface: &str, hostapd_conf: PathBuf) -> WifiConfig {
         }
     }
 
-    let bssid = mac_address::mac_address_by_name(iface)
-        .expect(&format!("mac_address_by_name for {:?}", iface))
-        .expect(&format!("No MAC address found for interface: {:?}", iface))
+    let bssid = mac_address::mac_address_by_name(&cfg.iface)
+        .expect(&format!("mac_address_by_name for {:?}", cfg.iface))
+        .expect(&format!(
+            "No MAC address found for interface: {:?}",
+            cfg.iface
+        ))
         .to_string();
-
-    // Create a new config from hostapd.conf
-    let hostapd = Config::new().file(&hostapd_conf).expect(&format!(
-        "Unable to open hostapd config: {:?}",
-        hostapd_conf
-    ));
-
-    // read SSID and WPA_KEY
-    let ssid = &hostapd.get_str("ssid").unwrap();
-    let wpa_key = &hostapd.get_str("wpa_passphrase").unwrap();
 
     WifiConfig {
         ip_addr,
         port: TCP_SERVER_PORT,
-        ssid: ssid.into(),
+        ssid: cfg.ssid.clone(),
         bssid,
-        wpa_key: wpa_key.into(),
+        wpa_key: cfg.wpa_passphrase.clone(),
     }
 }
 
@@ -238,7 +230,7 @@ async fn tokio_main(
 
     let wifi_conf = {
         if !cfg.wired.is_some() {
-            Some(init_wifi_config(&cfg.iface, cfg.hostapd_conf.clone()))
+            Some(init_wifi_config(&cfg))
         } else {
             None
         }
