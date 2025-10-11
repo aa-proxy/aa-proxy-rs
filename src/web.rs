@@ -43,7 +43,7 @@ const TEMPLATE: &str = include_str!("../static/index.html");
 const PICO_CSS: &str = include_str!("../static/pico.min.css");
 const AA_PROXY_RS_URL: &str = "https://github.com/aa-proxy/aa-proxy-rs";
 const BUILDROOT_URL: &str = "https://github.com/aa-proxy/buildroot";
-const CERT_DEST_DIR: &str = "/etc/aa-proxy-rs/";
+pub const CERT_DEST_DIR: &str = "/etc/aa-proxy-rs/";
 
 // module name for logging engine
 const NAME: &str = "<i><bright-black> web: </>";
