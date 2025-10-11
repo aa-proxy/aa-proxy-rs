@@ -215,6 +215,11 @@ pub async fn setup_bluetooth_and_btle(
         if bluetooth_enabled || enable_btle {
             match bluetooth::setup_bluetooth_adapter(btalias.clone(), advertise).await {
                 Ok((session, adapter)) => {
+                    let _ = adapter.set_powered(false).await;
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    let _ = adapter.set_powered(true).await;
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    
                     // --- Start BLE GATT server first ---
                     if enable_btle {
                         match btle::run_btle_server(&adapter, state.clone()).await {
@@ -255,7 +260,7 @@ pub async fn setup_bluetooth_and_btle(
 
                         let mut le_advertisement = bluer::adv::Advertisement {
                             advertisement_type: bluer::adv::Type::Peripheral,
-                            //service_uuids: uuids.clone(),
+                            service_uuids: uuids.clone(),
                             discoverable: Some(true), // temporarily true for stable discovery
                             local_name: Some(local_name),
                             ..Default::default()
@@ -385,14 +390,14 @@ pub async fn setup_bluetooth_and_btle(
             }
 
             // Reset adapter to clear BlueZ state
-            if let Ok((_session, adapter)) =
+            /*if let Ok((_session, adapter)) =
                 bluetooth::setup_bluetooth_adapter(btalias.clone(), advertise).await
             {
                 let _ = adapter.set_powered(false).await;
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 let _ = adapter.set_powered(true).await;
                 tokio::time::sleep(Duration::from_secs(1)).await;
-            }
+            }*/
 
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
@@ -477,7 +482,7 @@ async fn tokio_main(
     });
 
     let change_usb_order = cfg.change_usb_order;
-    loop {
+    loop {        
         if let Some(ref mut leds) = led_manager {
             leds.set_led(LedColor::Green, LedMode::Heartbeat).await;
         }
@@ -543,6 +548,13 @@ async fn tokio_main(
 
         if let Some(bt_stop) = bt_stop {
             let _ = bt_stop.await;
+        }
+         // --- Clean up previous BLE resources ---
+         if let Some(handle) = _btle_keepalive.take() {
+            drop(handle); // or handle.stop().await if your library supports it
+        }
+        if let Some(handle) = _adv_keepalive.take() {
+            drop(handle); // stops advertising
         }
 
         // inform via LED about successful connection

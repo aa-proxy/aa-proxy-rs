@@ -1,12 +1,13 @@
 use crate::bluetooth::AAWG_PROFILE_UUID;
-use crate::config::AppConfig;
-use crate::ev::EV_MODEL_FILE;
-use crate::web::AppState;
+use crate::config::{Action, AppConfig};
+use crate::ev::{send_ev_data, BatteryData, EV_MODEL_FILE};
+use crate::web::{AppState, CERT_DEST_DIR};
 use bluer::gatt::local::{
     Application, Characteristic, CharacteristicNotify, CharacteristicNotifyMethod,
     CharacteristicWrite, CharacteristicWriteMethod, Service,
 };
 use bluer::Adapter;
+use flate2::read::GzDecoder;
 use flate2::{
     write::{ZlibDecoder, ZlibEncoder},
     Compression,
@@ -14,23 +15,27 @@ use flate2::{
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use simplelog::*;
-use std::io::Write;
-use std::path::PathBuf;
+use tar::Archive;
+use tokio::fs;
+use std::io::{Cursor, Write};
+use std::path::{Path, PathBuf};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 
 #[derive(Deserialize, Serialize, Debug)]
 struct Request {
-    method: String,
-    path: String,
-    body: Option<String>,
+    m: String,
+    pt: String,
+    b: Option<String>,
+    #[serde(default)]
+    p: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
 struct Response {
-    status: u16,
-    path: String,
-    body: Option<String>,
+    s: u16,
+    pt: String,
+    b: Option<String>,
 }
 
 const FINISH_SIGNAL: u32 = u32::MAX;
@@ -108,7 +113,7 @@ pub async fn run_btle_server(
             }
         }
     };
-    //let app_handle = adapter.serve_gatt_application(app).await?;
+
     info!("{} 🥏 GATT server running", NAME);
 
     let mut char_control = char_control;
@@ -295,18 +300,41 @@ fn decrypt_and_parse(buf: &[u8]) -> Request {
 }
 
 async fn craft_response(req: &Request, state: AppState) -> Response {
+
+    {
+        let cfg_guard = state.config.read().await;
+        let expected_password = cfg_guard.ble_password.clone();
+
+        // Only enforce password if config has one
+        if !expected_password.is_empty() {
+            match &req.p {
+                Some(provided_password) if provided_password == &expected_password => {
+                    // ✅ Password OK, continue
+                }
+                Some(_) => {
+                    error!("{} 🥏 Invalid BLE password from request", NAME);
+                    return Response {
+                        s: 403,
+                        pt: req.pt.clone(),
+                        b: Some("{ \"error\": \"invalid password\" }".to_string()),
+                    };
+                }
+                None => {
+                    error!("{} 🥏 Missing BLE password in request", NAME);
+                    return Response {
+                        s: 403,
+                        pt: req.pt.clone(),
+                        b: Some("{ \"error\": \"missing password\" }".to_string()),
+                    };
+                }
+            }
+        } else {
+            debug!("{} 🥏 Password check skipped (empty ble_password)", NAME);
+        }
+    }
+
     // same match, but use .await where needed
-    match req.path.as_str() {
-        "/hello" => Response {
-            status: 200,
-            path: req.path.clone(),
-            body: Some("Hello from Rust server!".to_string()),
-        },
-        "/echo" => Response {
-            status: 200,
-            path: req.path.clone(),
-            body: req.body.clone(),
-        },
+    match req.pt.as_str() {
         "/get-config-data" => {
             // async read instead of blocking
             let cfg_guard = state.config_json.read().await;
@@ -315,9 +343,9 @@ async fn craft_response(req: &Request, state: AppState) -> Response {
             info!("{} 🥏 /get-config-data response: {}", NAME, cfg_str);
 
             Response {
-                status: 200,
-                path: req.path.clone(),
-                body: Some(cfg_str),
+                s: 200,
+                pt: req.pt.clone(),
+                b: Some(cfg_str),
             }
         }
         "/get-config" => {
@@ -328,21 +356,21 @@ async fn craft_response(req: &Request, state: AppState) -> Response {
             info!("{} 🥏 /get-config response: {}", NAME, cfg_str);
 
             Response {
-                status: 200,
-                path: req.path.clone(),
-                body: Some(cfg_str),
+                s: 200,
+                pt: req.pt.clone(),
+                b: Some(cfg_str),
             }
         }
         "/update-config" => {
             // ensure there is a body
-            let body = match req.body.clone() {
+            let body = match req.b.clone() {
                 Some(b) => b,
                 None => {
                     error!("{} 🥏 /update-config - missing body", NAME);
                     return Response {
-                        status: 400,
-                        path: req.path.clone(),
-                        body: None,
+                        s: 400,
+                        pt: req.pt.clone(),
+                        b: Some("{ \"status\": 0, \"msg\": \"missing body\" }".to_string()),
                     };
                 }
             };
@@ -353,9 +381,9 @@ async fn craft_response(req: &Request, state: AppState) -> Response {
                 Err(e) => {
                     error!("{} 🥏 /update-config - failed to parse JSON: {}", NAME, e);
                     return Response {
-                        status: 400,
-                        path: req.path.clone(),
-                        body: Some("{ \"status\": 0 }".to_string()),
+                        s: 400,
+                        pt: req.pt.clone(),
+                        b: Some("{ \"status\": 0, \"msg\": \"failed to parse JSON\"  }".to_string()),
                     };
                 }
             };
@@ -375,21 +403,21 @@ async fn craft_response(req: &Request, state: AppState) -> Response {
             );
 
             Response {
-                status: 200,
-                path: req.path.clone(),
-                body: Some("{ \"status\": 1 }".to_string()),
+                s: 200,
+                pt: req.pt.clone(),
+                b: Some("{ \"status\": 1 }".to_string()),
             }
         }
         "/update-hex-model" => {
             // ensure there is a body
-            let body = match req.body.clone() {
+            let body = match req.b.clone() {
                 Some(b) => b,
                 None => {
                     error!("{} 🥏 /update-hex-model - missing body", NAME);
                     return Response {
-                        status: 400,
-                        path: req.path.clone(),
-                        body: None,
+                        s: 400,
+                        pt: req.pt.clone(),
+                        b: Some("{ \"status\": 0, \"msg\": \"missing body\" }".to_string()),
                     };
                 }
             };
@@ -398,9 +426,9 @@ async fn craft_response(req: &Request, state: AppState) -> Response {
                 Ok(data) => data,
                 Err(_err) => {
                     return Response {
-                        status: 400,
-                        path: req.path.clone(),
-                        body: Some("{ \"status\": 0 }".to_string()),
+                        s: 400,
+                        pt: req.pt.clone(),
+                        b: Some("{ \"status\": 0, \"msg\": \"failed to parse\" }".to_string()),
                     }
                 }
             };
@@ -410,21 +438,224 @@ async fn craft_response(req: &Request, state: AppState) -> Response {
             if let Err(err) = tokio::fs::write(&path, &binary_data).await {
                 error!("write failed: {}", err);
                 return Response {
-                    status: 400,
-                    path: req.path.clone(),
-                    body: Some("{ \"status\": 0 }".to_string()),
+                    s: 400,
+                    pt: req.pt.clone(),
+                    b: Some("{ \"status\": 0, \"msg\": \"failed to write\" }".to_string()),
                 };
             }
             return Response {
-                status: 200,
-                path: req.path.clone(),
-                body: Some("{ \"status\": 1 }".to_string()),
+                s: 200,
+                pt: req.pt.clone(),
+                b: Some("{ \"status\": 1 }".to_string()),
             };
         }
+        "/battery" => {
+            // ensure there is a body
+            let body = match req.b.clone() {
+                Some(b) => b,
+                None => {
+                    error!("{} 🥏 /battery - missing body", NAME);
+                    return Response {
+                        s: 400,
+                        pt: req.pt.clone(),
+                        b: Some("{ \"status\": 0, \"msg\": \"missing body\" }".to_string()),
+                    };
+                }
+            };
+
+            // parse JSON string into AppConfig
+            let data: BatteryData = match serde_json::from_str(&body) {
+                Ok(cfg) => cfg,
+                Err(e) => {
+                    error!("{} 🥏 /battery - failed to parse JSON: {}", NAME, e);
+                    return Response {
+                        s: 400,
+                        pt: req.pt.clone(),
+                        b: Some("{ \"status\": 0, \"msg\": \"failed to parse JSON\" }".to_string()),
+                    };
+                }
+            };
+
+            match data.battery_level_percentage {
+                Some(level) => {
+                    if level < 0.0 || level > 100.0 {
+                        return Response {
+                            s: 400,
+                            pt: req.pt.clone(),
+                            b: Some("{ \"status\": 0, \"msg\": \"battery_level_percentage out of range\" }".to_string()),
+                        };
+                    }
+                }
+                None => {
+                    if data.battery_level_wh.is_none() {
+                        return Response {
+                            s: 400,
+                            pt: req.pt.clone(),
+                            b: Some("{ \"status\": 0, \"msg\": \"Either battery_level_percentage or battery_level_wh has to be set\" }".to_string()),
+                        };
+                    }
+                }
+            }
+        
+            info!("{} Received battery data: {:?}", NAME, data);
+        
+            if let Some(ch) = *state.sensor_channel.lock().await {
+                if let Some(tx) = state.tx.lock().await.clone() {
+                    if let Err(e) = send_ev_data(tx.clone(), ch, data).await {
+                        error!("{} EV model error: {}", NAME, e);
+                        return Response {
+                            s: 400,
+                            pt: req.pt.clone(),
+                            b: Some("{ \"status\": 0, \"msg\": \"ev model error\" }".to_string()),
+                        };
+                    }
+                }
+            } else {
+                warn!("{} Not sending packet because no sensor channel yet", NAME);
+                return Response {
+                    s: 400,
+                    pt: req.pt.clone(),
+                    b: Some("{ \"status\": 0, \"msg\": \"Not sending packet because no sensor channel yet\" }".to_string()),
+                };
+            }
+            Response {
+                s: 200,
+                pt: req.pt.clone(),
+                b: Some("{ \"status\": 1 }".to_string()),
+            }
+        }
+        "/restart" => {
+            state.config.write().await.action_requested = Some(Action::Reconnect);
+
+            Response {
+                s: 200,
+                pt: req.pt.clone(),
+                b: Some("{ \"status\": 1 }".to_string()),
+            }
+        }
+        "/reboot" => {
+            state.config.write().await.action_requested = Some(Action::Reboot);
+
+            Response {
+                s: 200,
+                pt: req.pt.clone(),
+                b: Some("{ \"status\": 1 }".to_string()),
+            }
+        }
+        "/update-certs" => {
+            let body = match req.b.clone() {
+                Some(b) => b,
+                None => {
+                    error!("{} 🥏 /update-certs - missing body", NAME);
+                    return Response {
+                        s: 400,
+                        pt: req.pt.clone(),
+                        b: Some("{ \"status\": 0, \"msg\": \"missing body\" }".to_string()),
+                    };
+                }
+            };
+            
+            // Read request body into bytes
+            let body_bytes = match hyper::body::to_bytes(body).await {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    return Response {
+                        s: 400,
+                        pt: req.pt.clone(),
+                        b: Some("{ \"status\": 0, \"msg\": \"parse error\" }".to_string()),
+                    };
+                }
+            };
+
+            // temp dir
+            let extract_to = Path::new("/tmp");
+
+            // Clean up previous unpack (optional but clean)
+            let old_path = extract_to.join("aa-proxy-rs");
+            if fs::metadata(&old_path).await.is_ok() {
+                if let Err(_) = fs::remove_dir_all(&old_path).await {
+                    return Response {
+                        s: 400,
+                        pt: req.pt.clone(),
+                        b: Some("{ \"status\": 0, \"msg\": \"clean error\" }".to_string()),
+                    };
+                }
+            }
+
+            // Prepare GZIP decoder over the byte buffer
+            let decompressed = GzDecoder::new(Cursor::new(body_bytes));
+            let mut archive = Archive::new(decompressed);
+
+            // Unpack archive directly into /tmp
+            if let Err(_) = archive.unpack(extract_to) {
+                return Response {
+                    s: 400,
+                    pt: req.pt.clone(),
+                    b: Some("{ \"status\": 0, \"msg\": \"unpack error\" }".to_string()),
+                };
+            }
+
+            // Iterate over extracted files
+            let mut valid_files = vec![];
+            let certs_dir = Path::new("/tmp/aa-proxy-rs");
+
+            let mut entries = match fs::read_dir(&certs_dir).await {
+                Ok(e) => e,
+                Err(_) => {
+                    return Response {
+                        s: 400,
+                        pt: req.pt.clone(),
+                        b: Some("{ \"status\": 0, \"msg\": \"read error\" }".to_string()),
+                    };
+                }
+            };
+
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let path = entry.path();
+                let filename = match path.file_name().and_then(|f| f.to_str()) {
+                    Some(name) => name,
+                    None => continue,
+                };
+
+                // Accept only .pem files
+                if filename.ends_with(".pem") {
+                    valid_files.push((path.clone(), filename.to_string()));
+                }
+            }
+
+            if valid_files.is_empty() {
+                return Response {
+                    s: 400,
+                    pt: req.pt.clone(),
+                    b: Some("{ \"status\": 0, \"msg\": \"files not valid\" }".to_string()),
+                };
+            }
+
+            // Copy valid .pem files to destination
+            for (src_path, filename) in valid_files {
+                let dest_path = Path::new(CERT_DEST_DIR).join(filename);
+                match fs::copy(&src_path, &dest_path).await {
+                    Ok(_) => {}
+                    Err(_) => {
+                        return Response {
+                            s: 400,
+                            pt: req.pt.clone(),
+                            b: Some("{ \"status\": 0, \"msg\": \"save error\" }".to_string()),
+                        };
+                    }
+                }
+            }
+
+            Response {
+                s: 200,
+                pt: req.pt.clone(),
+                b: Some("{ \"status\": 1 }".to_string()),
+            }
+        }
         _ => Response {
-            status: 404,
-            path: req.path.clone(),
-            body: Some("Unknown method".to_string()),
+            s: 404,
+            pt: req.pt.clone(),
+            b: Some("Unknown method".to_string()),
         },
     }
 }
