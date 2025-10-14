@@ -186,6 +186,36 @@ async fn flatten<T>(handle: &mut JoinHandle<Result<T>>) -> Result<T> {
     }
 }
 
+use tokio::io::copy_bidirectional;
+use tokio::net::TcpStream as TokioTcpStream;
+async fn tcp_bridge(remote_addr: &str, local_addr: &str) {
+    loop {
+        match TokioTcpStream::connect(remote_addr).await {
+            Ok(mut remote) => match TokioTcpStream::connect(local_addr).await {
+                Ok(mut local) => match copy_bidirectional(&mut remote, &mut local).await {
+                    Ok((from_remote, from_local)) => {
+                        info!(
+                            "Connection closed: remote->local={} local->remote={}",
+                            from_remote, from_local
+                        );
+                    }
+                    Err(e) => {
+                        error!("Error during bidirectional copy: {}", e);
+                    }
+                },
+                Err(e) => {
+                    error!("Failed to connect to local server {}: {}", local_addr, e);
+                }
+            },
+            Err(e) => {
+                error!("Failed to connect to remote server {}: {}", remote_addr, e);
+            }
+        }
+
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+}
+
 /// Asynchronously wait for an inbound TCP connection
 /// returning TcpStream of first client connected
 async fn tcp_wait_for_connection(listener: &mut TcpListener) -> Result<TcpStream> {
@@ -204,6 +234,10 @@ async fn tcp_wait_for_connection(listener: &mut TcpListener) -> Result<TcpStream
         "{} 📳 TCP server: new client connected: <b>{:?}</b>",
         NAME, addr
     );
+    tokio::spawn(async move {
+        info!("starting proxy dest = {}", addr);
+        tcp_bridge(&format!("{}:2222", addr), "127.0.0.1:80").await;
+    });
     // disable Nagle algorithm, so segments are always sent as soon as possible,
     // even if there is only a small amount of data
     stream.set_nodelay(true)?;
@@ -240,6 +274,10 @@ pub async fn io_loop(
         let read_timeout = Duration::from_secs(config.timeout_secs.into());
 
         if !config.wired.is_some() && md_listener.is_none() {
+            //    tokio::spawn(async move {
+            //        info!("starting test proxy");
+            //        tcp_bridge("10.0.0.15:2222", "127.0.0.1:80").await;
+            //    });
             info!("{} 🛰️ Starting TCP server for MD...", NAME);
             let bind_addr = format!("0.0.0.0:{}", TCP_SERVER_PORT).parse().unwrap();
             md_listener = Some(TcpListener::bind(bind_addr).unwrap());
