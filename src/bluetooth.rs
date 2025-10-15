@@ -3,9 +3,7 @@ use crate::config::IDENTITY_NAME;
 use crate::config_types::BluetoothAddressList;
 use anyhow::anyhow;
 use backon::{ExponentialBuilder, Retryable};
-use bluer::adv::Advertisement;
 use bluer::{
-    adv::AdvertisementHandle,
     agent::{Agent, AgentHandle},
     rfcomm::{Profile, ProfileHandle, Role, Stream},
     Adapter, Address, Device, Session, Uuid,

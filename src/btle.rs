@@ -1,4 +1,4 @@
-use crate::bluetooth::{AAWG_PROFILE_UUID, BTLE_PROFILE_UUID};
+use crate::bluetooth::BTLE_PROFILE_UUID;
 use crate::config::{Action, AppConfig};
 use crate::ev::{send_ev_data, BatteryData, EV_MODEL_FILE};
 use crate::web::{AppState, CERT_DEST_DIR};
