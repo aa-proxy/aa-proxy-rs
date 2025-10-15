@@ -207,6 +207,7 @@ pub async fn setup_bluetooth_and_btle(
         if bluetooth_enabled || enable_btle {
             match bluetooth::setup_bluetooth_adapter(btalias.clone(), advertise).await {
                 Ok((session, adapter)) => {
+                    // FIXME check if we really need this power down before!
                     let _ = adapter.set_powered(false).await;
                     tokio::time::sleep(Duration::from_secs(1)).await;
                     let _ = adapter.set_powered(true).await;

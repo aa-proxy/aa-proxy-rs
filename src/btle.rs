@@ -299,6 +299,8 @@ fn decrypt_and_parse(buf: &[u8]) -> Request {
     serde_json::from_slice(&dec).unwrap()
 }
 
+// FIXME below function should use/translate direct requests to main webserver
+// REWRITE THIS !!!
 async fn craft_response(req: &Request, state: AppState) -> Response {
     {
         let cfg_guard = state.config.read().await;

@@ -249,6 +249,8 @@ async fn tcp_wait_for_connection(listener: &mut TcpListener) -> Result<TcpStream
             NAME,
             addr.ip()
         );
+        // FIXME use port configured by user for webserver
+        // or ignore when webserver disabled...
         tcp_bridge(&format!("{}:2222", addr.ip()), "127.0.0.1:80").await;
     });
 
