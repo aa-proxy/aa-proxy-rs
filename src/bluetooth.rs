@@ -34,7 +34,7 @@ const NAME: &str = "<i><bright-black> bluetooth: </>";
 // async contexts needs some extra restrictions
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-const AAWG_PROFILE_UUID: Uuid = Uuid::from_u128(0x4de17a0052cb11e6bdf40800200c9a66);
+pub const AAWG_PROFILE_UUID: Uuid = Uuid::from_u128(0x4de17a0052cb11e6bdf40800200c9a66);
 const HSP_HS_UUID: Uuid = Uuid::from_u128(0x0000110800001000800000805f9b34fb);
 const HSP_AG_UUID: Uuid = Uuid::from_u128(0x0000111200001000800000805f9b34fb);
 const AV_REMOTE_CONTROL_TARGET_UUID: Uuid = Uuid::from_u128(0x0000110c00001000800000805f9b34fb);
