@@ -7,6 +7,8 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::io::copy_bidirectional;
+use tokio::net::TcpStream as TokioTcpStream;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, Mutex, Notify};
 use tokio::task::JoinHandle;
@@ -186,6 +188,40 @@ async fn flatten<T>(handle: &mut JoinHandle<Result<T>>) -> Result<T> {
     }
 }
 
+async fn tcp_bridge(remote_addr: &str, local_addr: &str) {
+    loop {
+        match TokioTcpStream::connect(remote_addr).await {
+            Ok(mut remote) => match TokioTcpStream::connect(local_addr).await {
+                Ok(mut local) => match copy_bidirectional(&mut remote, &mut local).await {
+                    Ok((from_remote, from_local)) => {
+                        info!(
+                            "{} Connection closed: remote->local={} local->remote={}",
+                            NAME, from_remote, from_local
+                        );
+                    }
+                    Err(e) => {
+                        error!("{} Error during bidirectional copy: {}", NAME, e);
+                    }
+                },
+                Err(e) => {
+                    error!(
+                        "{} Failed to connect to local server {}: {}",
+                        NAME, local_addr, e
+                    );
+                }
+            },
+            Err(e) => {
+                error!(
+                    "{} Failed to connect to remote server {}: {}",
+                    NAME, remote_addr, e
+                );
+            }
+        }
+
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+}
+
 /// Asynchronously wait for an inbound TCP connection
 /// returning TcpStream of first client connected
 async fn tcp_wait_for_connection(listener: &mut TcpListener) -> Result<TcpStream> {
@@ -204,6 +240,20 @@ async fn tcp_wait_for_connection(listener: &mut TcpListener) -> Result<TcpStream
         "{} 📳 TCP server: new client connected: <b>{:?}</b>",
         NAME, addr
     );
+
+    // this is creating a reverse tcp bridge for Android
+    // direct connection to the device side is not allowed
+    tokio::spawn(async move {
+        info!(
+            "{} starting TCP reverse connection, Android IP: {}",
+            NAME,
+            addr.ip()
+        );
+        // FIXME use port configured by user for webserver
+        // or ignore when webserver disabled...
+        tcp_bridge(&format!("{}:2222", addr.ip()), "127.0.0.1:80").await;
+    });
+
     // disable Nagle algorithm, so segments are always sent as soon as possible,
     // even if there is only a small amount of data
     stream.set_nodelay(true)?;
