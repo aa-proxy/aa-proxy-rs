@@ -30,6 +30,10 @@
         "wpa_passphrase": {
           "typ": "string",
           "description": "Wi-Fi password used as the WPA pre-shared key (WPA-PSK)"
+        },
+        "ble_password": {
+          "typ": "string",
+          "description": "BLE password to communicate with companion app, please set it on app too"
         }
       }
     },
