@@ -234,12 +234,6 @@ pub async fn setup_bluetooth_and_btle(
 
                     // --- BLE advertisement ---
                     if !uuids.is_empty() {
-                        let local_name = format!(
-                            "{}-{}",
-                            adapter.alias().await.unwrap_or("RustBLE".to_string()),
-                            btle::SERVICE_UUID_16
-                        );
-
                         // Stop any previous advertisement first
                         if let Some(handle) = adv_handle.take() {
                             drop(handle);
@@ -249,7 +243,7 @@ pub async fn setup_bluetooth_and_btle(
                             advertisement_type: bluer::adv::Type::Peripheral,
                             service_uuids: uuids.clone(),
                             discoverable: Some(true), // temporarily true for stable discovery
-                            local_name: Some(local_name),
+                            local_name: Some(adapter.alias().await?),
                             ..Default::default()
                         };
 
