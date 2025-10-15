@@ -15,6 +15,7 @@ use clap::Parser;
 use humantime::format_duration;
 use simplelog::*;
 use std::os::unix::fs::PermissionsExt;
+use web::AppState;
 
 use std::fs;
 use std::fs::OpenOptions;
@@ -189,6 +190,13 @@ async fn tokio_main(
 ) -> Result<()> {
     let accessory_started = Arc::new(Notify::new());
     let accessory_started_cloned = accessory_started.clone();
+    let state = web::AppState {
+        config: config.clone(),
+        config_json: config_json.clone(),
+        config_file: config_file.into(),
+        tx,
+        sensor_channel,
+    };
 
     // LED support
     let mut led_manager = if led_support {
@@ -200,14 +208,7 @@ async fn tokio_main(
     let cfg = config.read().await.clone();
     if let Some(ref bindaddr) = cfg.webserver {
         // preparing AppState and starting webserver
-        let state = web::AppState {
-            config: config.clone(),
-            config_json: config_json.clone(),
-            config_file: config_file.into(),
-            tx,
-            sensor_channel,
-        };
-        let app = web::app(state.into());
+        let app = web::app(state.clone().into());
 
         match bindaddr.parse::<SocketAddr>() {
             Ok(addr) => {
