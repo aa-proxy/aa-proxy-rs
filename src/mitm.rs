@@ -974,8 +974,9 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
         ev_tx,
     };
     loop {
+        tokio::select! {
         // handling data from opposite device's thread, which needs to be transmitted
-        if let Ok(mut pkt) = rx.try_recv() {
+        Some(mut pkt) = rx.recv() => {
             let handled = pkt_modify_hook(
                 proxy_type,
                 &mut pkt,
@@ -1010,10 +1011,10 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
                 // fixme: compute final_len for precise stats
                 bytes_written.fetch_add(HEADER_LENGTH + pkt.payload.len(), Ordering::Relaxed);
             }
-        };
+        }
 
         // handling input data from the reader thread
-        if let Ok(mut pkt) = rxr.try_recv() {
+        Some(mut pkt) = rxr.recv() => {
             let _ = pkt_debug(proxy_type, HexdumpLevel::RawInput, hex_requested, &pkt).await;
             match pkt.decrypt_payload(&mut mem_buf, &mut server).await {
                 Ok(_) => {
@@ -1038,6 +1039,6 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
                 Err(e) => error!("decrypt_payload: {:?}", e),
             }
         }
-        tokio::time::sleep(Duration::from_millis(5)).await;
+        }
     }
 }
