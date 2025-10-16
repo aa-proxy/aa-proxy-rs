@@ -32,6 +32,7 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>
 const USB_ACCESSORY_PATH: &str = "/dev/usb_accessory";
 pub const BUFFER_LEN: usize = 16 * 1024;
 const TCP_CLIENT_TIMEOUT: Duration = Duration::new(30, 0);
+const COMP_APP_TCP_PORT: u16 = 9999;
 
 use crate::config::{Action, SharedConfig};
 use crate::config::{TCP_DHU_PORT, TCP_SERVER_PORT};
@@ -268,7 +269,11 @@ async fn tcp_wait_for_connection(listener: &mut TcpListener) -> Result<TcpStream
         );
         // FIXME use port configured by user for webserver
         // or ignore when webserver disabled...
-        tcp_bridge(&format!("{}:2222", addr.ip()), "127.0.0.1:80").await;
+        tcp_bridge(
+            &format!("{}:{}", addr.ip(), COMP_APP_TCP_PORT),
+            "127.0.0.1:80",
+        )
+        .await;
     });
 
     // disable Nagle algorithm, so segments are always sent as soon as possible,
