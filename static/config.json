@@ -151,6 +151,10 @@
           "typ": "integer",
           "description": "Force DPI\n0 = don't change DPI"
         },
+        "audio_max_unacked": {
+          "typ": "integer",
+          "description": "Override the `max_unacked` setting for audio channels. This may improve audio performance on some head units, but could worsen it on others. Adjust this value experimentally only if you experience audio stuttering.\n0 = leave unchanged"
+        },
         "remove_tap_restriction": {
           "typ": "boolean",
           "description": "remove tap restriction"
