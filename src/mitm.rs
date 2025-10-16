@@ -18,10 +18,12 @@ use tokio_uring::buf::BoundedBuf;
 // protobuf stuff:
 include!(concat!(env!("OUT_DIR"), "/protos/mod.rs"));
 use crate::mitm::protos::navigation_maneuver::NavigationType::*;
+use crate::mitm::protos::Config as AudioConfig;
 use crate::mitm::protos::*;
 use crate::mitm::sensor_source_service::Sensor;
 use crate::mitm::AudioStreamType::*;
 use crate::mitm::ByeByeReason::USER_SELECTION;
+use crate::mitm::MediaMessageId::*;
 use crate::mitm::SensorMessageId::*;
 use crate::mitm::SensorType::*;
 use protobuf::text_format::print_to_string_pretty;
@@ -62,6 +64,7 @@ const KEYS_PATH: &str = "/etc/aa-proxy-rs";
 pub struct ModifyContext {
     sensor_channel: Option<u8>,
     nav_channel: Option<u8>,
+    audio_channels: Vec<u8>,
     ev_tx: Sender<EvTaskCommand>,
 }
 
@@ -375,6 +378,43 @@ pub async fn pkt_modify_hook(
         }
     }
 
+    // if configured, override max_unacked for matching audio channels
+    if cfg.audio_max_unacked > 0
+        && ctx.audio_channels.contains(&pkt.channel)
+        && proxy_type == ProxyType::HeadUnit
+    {
+        match protos::MediaMessageId::from_i32(message_id).unwrap_or(MEDIA_MESSAGE_DATA) {
+            m @ MEDIA_MESSAGE_CONFIG => {
+                if let Ok(mut msg) = AudioConfig::parse_from_bytes(&data) {
+                    // get previous/original value
+                    let prev_val = msg.max_unacked();
+                    // set new value
+                    msg.set_max_unacked(cfg.audio_max_unacked.into());
+
+                    info!(
+                        "{} <yellow>{:?}</>: overriding max audio unacked from <b>{}</> to <b>{}</> for channel: <b>{:#04x}</>",
+                        get_name(proxy_type),
+                        m,
+                        prev_val,
+                        cfg.audio_max_unacked,
+                        pkt.channel,
+                    );
+
+                    // FIXME: this code fragment is used multiple times
+                    // rewrite payload to new message contents
+                    pkt.payload = msg.write_to_bytes()?;
+                    // inserting 2 bytes of message_id at the beginning
+                    pkt.payload.insert(0, (message_id >> 8) as u8);
+                    pkt.payload.insert(1, (message_id & 0xff) as u8);
+                    return Ok(false);
+                }
+                // end processing
+                return Ok(false);
+            }
+            _ => (),
+        }
+    }
+
     if pkt.channel != 0 {
         return Ok(false);
     }
@@ -465,6 +505,22 @@ pub async fn pkt_modify_hook(
                     "{} <yellow>{:?}</>: media sink disabled",
                     get_name(proxy_type),
                     control.unwrap(),
+                );
+            }
+
+            // save all audio sink channels in context
+            if cfg.audio_max_unacked > 0 {
+                for svc in msg
+                    .services
+                    .iter()
+                    .filter(|svc| !svc.media_sink_service.audio_configs.is_empty())
+                {
+                    ctx.audio_channels.push(svc.id() as u8);
+                }
+                info!(
+                    "{} <blue>media_sink_service:</> channels: <b>{:02x?}</>",
+                    get_name(proxy_type),
+                    ctx.audio_channels
                 );
             }
 
@@ -914,6 +970,7 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
     let mut ctx = ModifyContext {
         sensor_channel: None,
         nav_channel: None,
+        audio_channels: vec![],
         ev_tx,
     };
     loop {
