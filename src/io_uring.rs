@@ -190,29 +190,46 @@ async fn flatten<T>(handle: &mut JoinHandle<Result<T>>) -> Result<T> {
 
 async fn tcp_bridge(remote_addr: &str, local_addr: &str) {
     loop {
+        debug!(
+            "{} tcp_bridge: before connect, local={} remote={}",
+            NAME, local_addr, remote_addr
+        );
         match TokioTcpStream::connect(remote_addr).await {
-            Ok(mut remote) => match TokioTcpStream::connect(local_addr).await {
-                Ok(mut local) => match copy_bidirectional(&mut remote, &mut local).await {
-                    Ok((from_remote, from_local)) => {
-                        info!(
-                            "{} Connection closed: remote->local={} local->remote={}",
-                            NAME, from_remote, from_local
+            Ok(mut remote) => {
+                debug!(
+                    "{} tcp_bridge: remote side connected: ({})",
+                    NAME, remote_addr
+                );
+                match TokioTcpStream::connect(local_addr).await {
+                    Ok(mut local) => {
+                        debug!(
+                            "{} tcp_bridge: local side connected: ({})",
+                            NAME, local_addr
                         );
+                        info!("{} Connected to companion app TCP server ({}), starting bidirectional transfer...", NAME, local_addr);
+                        match copy_bidirectional(&mut remote, &mut local).await {
+                            Ok((from_remote, from_local)) => {
+                                debug!(
+                                    "{} tcp_bridge: Connection closed: remote->local={} local->remote={}",
+                                    NAME, from_remote, from_local
+                                );
+                            }
+                            Err(e) => {
+                                error!("{} Error during bidirectional copy: {}", NAME, e);
+                            }
+                        }
                     }
                     Err(e) => {
-                        error!("{} Error during bidirectional copy: {}", NAME, e);
+                        debug!(
+                            "{} tcp_bridge: Failed to connect to local server {}: {}",
+                            NAME, local_addr, e
+                        );
                     }
-                },
-                Err(e) => {
-                    error!(
-                        "{} Failed to connect to local server {}: {}",
-                        NAME, local_addr, e
-                    );
                 }
-            },
+            }
             Err(e) => {
-                error!(
-                    "{} Failed to connect to remote server {}: {}",
+                debug!(
+                    "{} tcp_bridge: Failed to connect to remote server {}: {}",
                     NAME, remote_addr, e
                 );
             }
