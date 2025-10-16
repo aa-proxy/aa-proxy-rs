@@ -293,7 +293,7 @@ async fn try_connect_bluetooth_addresses(
         let device = adapter.device(*addr)?;
         let dev_name = match device.name().await {
             Ok(Some(name)) => format!(" (<b><blue>{}</>)", name),
-            _ => String::default(),
+            _ => String::new(),
         };
         info!("{} 🧲 Trying to connect to: {}{}", NAME, addr, dev_name);
         if let Ok(true) = adapter.device(*addr)?.is_paired().await {

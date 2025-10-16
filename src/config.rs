@@ -276,9 +276,9 @@ impl Default for AppConfig {
             },
             ssid: String::from(IDENTITY_NAME),
             wpa_passphrase: String::from(IDENTITY_NAME),
-            eth_mode: String::default(),
+            eth_mode: String::new(),
             startup_delay: 0,
-            ble_password: "".to_string(),
+            ble_password: String::new(),
         }
     }
 }
@@ -339,11 +339,7 @@ impl AppConfig {
         doc["disable_media_sink"] = value(self.disable_media_sink);
         doc["disable_tts_sink"] = value(self.disable_tts_sink);
         doc["developer_mode"] = value(self.developer_mode);
-        doc["wired"] = value(
-            self.wired
-                .as_ref()
-                .map_or("".to_string(), |w| w.to_string()),
-        );
+        doc["wired"] = value(self.wired.as_ref().map_or(String::new(), |w| w.to_string()));
         doc["dhu"] = value(self.dhu);
         doc["ev"] = value(self.ev);
         doc["remove_bluetooth"] = value(self.remove_bluetooth);
