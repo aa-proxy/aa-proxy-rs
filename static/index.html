@@ -55,85 +55,112 @@
       <small>build: {BUILD_DATE}, git: {GIT_INFO}</small>
     </header>
 
+    <template id="actions-template">
+      <fieldset>
+        <legend class="section-title"><strong>🚀 ACTIONS</strong></legend>
+        <div class="grid grid-cols-2 section-body">
+          <button type="button" onclick="saveConfig()">💾 Save</button>
+          <button type="button" class="download-btn">
+            📜 Download log package (.tar.gz)
+          </button>
+          <button type="button" onclick="handleAction('/restart')">
+            🧬 Apply / restart
+          </button>
+          <button type="button" onclick="handleAction('/reboot')">
+            🔁 Reboot device
+          </button>
+          <button type="button" data-endpoint="/upload-certs">
+            📤 Upload MITM certs (.tar.gz)
+          </button>
+          <button type="button" class="backup-btn">
+            📦 Backup configuration (.tar.gz)
+          </button>
+          <button
+            type="button"
+            onclick="handleAction('/factory-reset', 'Are you sure you want to factory reset?')"
+          >
+            ♻️ Factory reset
+          </button>
+          <button type="button" data-endpoint="/userdata-restore">
+            📤 Restore configuration (.tar.gz)
+          </button>
+        </div>
+      </fieldset>
+    </template>
+
     <main class="container">
       <form id="config-form">
-        <fieldset>
-          <legend class="section-title"><strong>🚀 ACTIONS</strong></legend>
-          <div class="grid grid-cols-2 section-body">
-            <button type="button" onclick="saveConfig()">💾 Save</button>
-            <button type="button" id="downloadBtn">
-              📜 Download log package (.tar.gz)
-            </button>
-            <button type="button" onclick="handleAction('/restart')">
-              🧬 Apply / restart
-            </button>
-            <button type="button" onclick="handleAction('/reboot')">
-              🔁 Reboot device
-            </button>
-            <button type="button" data-endpoint="/upload-certs">
-              📤 Upload MITM certs (.tar.gz)
-            </button>
-            <button type="button" id="backupBtn">
-              📦 Backup configuration (.tar.gz)
-            </button>
-            <button
-              type="button"
-              onclick="handleAction('/factory-reset', 'Are you sure you want to factory reset?')"
-            >
-              ♻️ Factory reset
-            </button>
-            <button type="button" data-endpoint="/userdata-restore">
-              📤 Restore configuration (.tar.gz)
-            </button>
-            <input
-              type="file"
-              id="file-input"
-              accept=".tar.gz"
-              style="display: none"
-            />
-          </div>
-        </fieldset>
-        {CONFIG_VALUES}
+        <!-- hidden file input for all upload buttons -->
+        <input
+          type="file"
+          id="file-input"
+          accept=".tar.gz"
+          style="display: none"
+        />
+        <!-- buttons and CONFIG_VALUES will be inserted via JS -->
       </form>
     </main>
 
     <script>
-      // button event listeners
-      document.getElementById("downloadBtn").addEventListener("click", () => {
-        triggerDownload("/download", "logs");
-      });
+      document.addEventListener("DOMContentLoaded", () => {
+        const form = document.getElementById("config-form");
+        const template = document.getElementById("actions-template");
 
-      document.getElementById("backupBtn").addEventListener("click", () => {
-        triggerDownload("/userdata-backup", "backup");
-      });
+        // Insert top set of buttons
+        form.appendChild(template.content.cloneNode(true));
 
-      // upload buttons event listeners
-      document.querySelectorAll("button[data-endpoint]").forEach((button) => {
-        button.addEventListener("click", () => {
-          const endpoint = button.dataset.endpoint;
-          const fileInput = document.getElementById("file-input");
+        // Insert CONFIG_VALUES once in the middle
+        const configValuesHtml = `{CONFIG_VALUES}`;
+        const div = document.createElement("div");
+        div.innerHTML = configValuesHtml;
+        form.appendChild(div);
 
-          const handler = () => {
-            uploadTarGzFile("file-input", endpoint);
-            fileInput.removeEventListener("change", handler); // detach to avoid double upload
-          };
+        // Insert bottom set of buttons
+        form.appendChild(template.content.cloneNode(true));
 
-          fileInput.addEventListener("change", handler);
-          fileInput.click();
+        // button event listeners
+        // download buttons
+        document.querySelectorAll(".download-btn").forEach((btn) => {
+          btn.addEventListener("click", () => {
+            triggerDownload("/download", "logs");
+          });
+        });
+
+        // backup buttons
+        document.querySelectorAll(".backup-btn").forEach((btn) => {
+          btn.addEventListener("click", () => {
+            triggerDownload("/userdata-backup", "backup");
+          });
+        });
+
+        // single hidden file input in the form
+        const fileInput = document.getElementById("file-input");
+
+        // upload buttons event listeners
+        document.querySelectorAll("button[data-endpoint]").forEach((button) => {
+          button.addEventListener("click", () => {
+            const endpoint = button.dataset.endpoint;
+
+            const handler = () => {
+              uploadTarGzFile(fileInput, endpoint); // pass the element, not the ID
+              fileInput.removeEventListener("change", handler); // detach to avoid double upload
+            };
+
+            fileInput.addEventListener("change", handler);
+            fileInput.click();
+          });
         });
       });
 
-      async function uploadTarGzFile(fileInputId, endpoint) {
-        const fileInput = document.getElementById(fileInputId);
-        const file = fileInput.files[0];
-        if (!file) return; // user cancelled, just ignore
+      // upload function now accepts the actual input element
+      async function uploadTarGzFile(fileInputEl, endpoint) {
+        const file = fileInputEl.files[0];
+        if (!file) return; // user cancelled
 
         try {
           const res = await fetch(endpoint, {
             method: "POST",
-            headers: {
-              "Content-Type": "application/gzip",
-            },
+            headers: { "Content-Type": "application/gzip" },
             body: file,
           });
 
@@ -146,7 +173,7 @@
         } catch (err) {
           alert(`❌ Upload failed: ${err}`);
         } finally {
-          fileInput.value = ""; // Reset input so the same file can be reselected
+          fileInputEl.value = ""; // Reset input so the same file can be reselected
         }
       }
 
