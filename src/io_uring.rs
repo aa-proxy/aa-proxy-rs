@@ -290,12 +290,19 @@ pub async fn io_loop(
     tx: Arc<Mutex<Option<Sender<Packet>>>>,
     sensor_channel: Arc<Mutex<Option<u8>>>,
 ) -> Result<()> {
-    // prepare/bind needed TCP listeners
-    let mut dhu_listener = None;
-    let mut md_listener = None;
     let shared_config = config.clone();
     #[allow(unused_variables)]
     let (client_handler, ev_tx) = spawn_ev_client_task().await;
+
+    // prepare/bind needed TCP listeners
+    info!("{} 🛰️ Starting TCP server for MD...", NAME);
+    let bind_addr = format!("0.0.0.0:{}", TCP_SERVER_PORT).parse().unwrap();
+    let mut md_listener = Some(TcpListener::bind(bind_addr).unwrap());
+    info!("{} 🛰️ MD TCP server bound to: <u>{}</u>", NAME, bind_addr);
+    info!("{} 🛰️ Starting TCP server for DHU...", NAME);
+    let bind_addr = format!("0.0.0.0:{}", TCP_DHU_PORT).parse().unwrap();
+    let mut dhu_listener = Some(TcpListener::bind(bind_addr).unwrap());
+    info!("{} 🛰️ DHU TCP server bound to: <u>{}</u>", NAME, bind_addr);
 
     loop {
         // reload new config
@@ -310,19 +317,6 @@ pub async fn io_loop(
             }
         };
         let read_timeout = Duration::from_secs(config.timeout_secs.into());
-
-        if !config.wired.is_some() && md_listener.is_none() {
-            info!("{} 🛰️ Starting TCP server for MD...", NAME);
-            let bind_addr = format!("0.0.0.0:{}", TCP_SERVER_PORT).parse().unwrap();
-            md_listener = Some(TcpListener::bind(bind_addr).unwrap());
-            info!("{} 🛰️ MD TCP server bound to: <u>{}</u>", NAME, bind_addr);
-        }
-        if config.dhu && dhu_listener.is_none() {
-            info!("{} 🛰️ Starting TCP server for DHU...", NAME);
-            let bind_addr = format!("0.0.0.0:{}", TCP_DHU_PORT).parse().unwrap();
-            dhu_listener = Some(TcpListener::bind(bind_addr).unwrap());
-            info!("{} 🛰️ DHU TCP server bound to: <u>{}</u>", NAME, bind_addr);
-        }
 
         let mut md_tcp = None;
         let mut md_usb = None;
