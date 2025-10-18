@@ -412,6 +412,9 @@ pub async fn io_loop(
         let mut from_stream;
         let mut reader_hu;
         let mut reader_md;
+        // these will be used for cleanup
+        let mut md_tcp_stream = None;
+        let mut hu_tcp_stream = None;
 
         // MITM/proxy mpsc channels:
         let (tx_hu, rx_md): (Sender<Packet>, Receiver<Packet>) = mpsc::channel(10);
@@ -440,6 +443,7 @@ pub async fn io_loop(
             let md = Rc::new(md_tcp.unwrap());
             md_r = IoDevice::EndpointIo(md.clone());
             md_w = IoDevice::EndpointIo(md.clone());
+            md_tcp_stream = Some(md.clone());
         }
         // HU transfer device
         if let Some(hu) = hu_usb {
@@ -452,6 +456,7 @@ pub async fn io_loop(
             let hu = Rc::new(hu_tcp.unwrap());
             hu_r = IoDevice::TcpStreamIo(hu.clone());
             hu_w = IoDevice::TcpStreamIo(hu.clone());
+            hu_tcp_stream = Some(hu.clone());
         }
 
         // handling battery in JSON
@@ -519,6 +524,14 @@ pub async fn io_loop(
         from_file.abort();
         from_stream.abort();
         monitor.abort();
+
+        // make sure TCP connections are closed before next connection attempts
+        if let Some(stream) = md_tcp_stream {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        }
+        if let Some(stream) = hu_tcp_stream {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        }
 
         // set webserver context EV stuff to None
         let mut tx_lock = tx.lock().await;
