@@ -23,6 +23,7 @@ use futures::StreamExt;
 use glob::glob;
 use hyper::body::to_bytes;
 use regex::Regex;
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use simplelog::*;
 use std::collections::HashMap;
@@ -69,6 +70,7 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/reboot", post(reboot_handler))
         .route("/upload-hex-model", post(upload_hex_model_handler))
         .route("/upload-certs", post(upload_cert_bundle_handler))
+        .route("/certs-info", get(certs_info_handler))
         .route("/battery", post(battery_handler))
         .route("/userdata-backup", get(userdata_backup_handler))
         .route("/userdata-restore", post(userdata_restore_handler))
@@ -539,6 +541,21 @@ pub async fn upload_cert_bundle_handler(
         StatusCode::OK,
         format!("Certificates uploaded to {}", CERT_DEST_DIR),
     )
+}
+
+async fn certs_info_handler(State(_state): State<Arc<AppState>>) -> impl IntoResponse {
+    let hash_path = Path::new(CERT_DEST_DIR).join(CERT_SHA_FILENAME);
+
+    let sha = match fs::read_to_string(hash_path).await {
+        Ok(content) => content.trim().to_string(),
+        Err(_) => String::new(),
+    };
+
+    let json_body = json!({
+        "sha": sha
+    });
+
+    Json(json_body)
 }
 
 async fn userdata_backup_handler(
