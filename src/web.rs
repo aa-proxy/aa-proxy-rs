@@ -32,6 +32,7 @@ use std::path::PathBuf;
 use std::{io::Cursor, path::Path, sync::Arc};
 use tar::Archive;
 use tar::Builder;
+use time::OffsetDateTime;
 use tokio::fs;
 use tokio::fs::File;
 use tokio::io::duplex;
@@ -75,6 +76,7 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/userdata-backup", get(userdata_backup_handler))
         .route("/userdata-restore", post(userdata_restore_handler))
         .route("/factory-reset", post(factory_reset_handler))
+        .route("/set-time", post(set_time_handler))
         .with_state(state)
 }
 
@@ -708,6 +710,55 @@ async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 async fn get_config_data(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let cfg = state.config_json.read().await.clone();
     Json(cfg)
+}
+
+/// POST /set-time
+/// Body: plain text, e.g. "2025-10-15T16:20:22+02:00"
+pub async fn set_time_handler(body: RawBody) -> impl IntoResponse {
+    // Read the whole body as bytes
+    let bytes = match to_bytes(body.0).await {
+        Ok(b) => b,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, format!("Failed to read body: {e}")).into_response()
+        }
+    };
+
+    let time_str = match std::str::from_utf8(&bytes) {
+        Ok(s) => s.trim(),
+        Err(_) => return (StatusCode::BAD_REQUEST, "Body must be UTF-8").into_response(),
+    };
+
+    // Parse time using RFC3339
+    let parsed =
+        match OffsetDateTime::parse(time_str, &time::format_description::well_known::Rfc3339) {
+            Ok(t) => t,
+            Err(e) => {
+                return (StatusCode::BAD_REQUEST, format!("Invalid time format: {e}"))
+                    .into_response()
+            }
+        };
+
+    // Convert to UTC
+    let utc = parsed.to_offset(time::UtcOffset::UTC);
+
+    // Set system time via libc::clock_settime()
+    // Requires CAP_SYS_TIME or root privileges
+    let ts = libc::timespec {
+        tv_sec: utc.unix_timestamp(),
+        tv_nsec: utc.nanosecond() as i64,
+    };
+    let result = unsafe { libc::clock_settime(libc::CLOCK_REALTIME, &ts) };
+    if result != 0 {
+        let err = std::io::Error::last_os_error();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to set clock: {err}"),
+        )
+            .into_response();
+    }
+
+    info!("{} 🕰️ system time set to: <b>{}</>", NAME, utc);
+    (StatusCode::OK, format!("System time set to {utc}")).into_response()
 }
 
 async fn set_config(
