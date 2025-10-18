@@ -23,6 +23,7 @@ use futures::StreamExt;
 use glob::glob;
 use hyper::body::to_bytes;
 use regex::Regex;
+use sha2::{Digest, Sha256};
 use simplelog::*;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -44,6 +45,7 @@ const PICO_CSS: &str = include_str!("../static/pico.min.css");
 const AA_PROXY_RS_URL: &str = "https://github.com/aa-proxy/aa-proxy-rs";
 const BUILDROOT_URL: &str = "https://github.com/aa-proxy/buildroot";
 pub const CERT_DEST_DIR: &str = "/etc/aa-proxy-rs/";
+const CERT_SHA_FILENAME: &str = "cert-bundle.sha";
 
 // module name for logging engine
 const NAME: &str = "<i><bright-black> web: </>";
@@ -443,6 +445,10 @@ pub async fn upload_cert_bundle_handler(
         }
     };
 
+    // Compute sha256 for the tarball
+    let hash = Sha256::digest(&body_bytes); // [u8; 32]
+    let hash_hex = hex::encode(hash); // hex hash String
+
     // temp dir
     let extract_to = Path::new("/tmp");
 
@@ -518,6 +524,15 @@ pub async fn upload_cert_bundle_handler(
                 );
             }
         }
+    }
+
+    // finally: save the hash of the new bundle to sha file
+    let hash_path = Path::new(CERT_DEST_DIR).join(CERT_SHA_FILENAME);
+    if let Err(err) = fs::write(&hash_path, &hash_hex).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to write hash file: {}", err),
+        );
     }
 
     (
