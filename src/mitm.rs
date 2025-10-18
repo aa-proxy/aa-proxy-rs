@@ -836,8 +836,9 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
     // in full_frames/passthrough mode we only directly pass packets from one endpoint to the other
     if passthrough {
         loop {
+            tokio::select! {
             // handling data from opposite device's thread, which needs to be transmitted
-            if let Ok(pkt) = rx.try_recv() {
+            Some(pkt) = rx.recv() => {
                 pkt.transmit(&mut device)
                     .await
                     .with_context(|| format!("proxy/{}: transmit failed", get_name(proxy_type)))?;
@@ -845,13 +846,13 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
                 // Increment byte counters for statistics
                 // fixme: compute final_len for precise stats
                 bytes_written.fetch_add(HEADER_LENGTH + pkt.payload.len(), Ordering::Relaxed);
-            };
+            }
 
             // handling input data from the reader thread
-            if let Ok(pkt) = rxr.try_recv() {
+            Some(pkt) = rxr.recv() => {
                 tx.send(pkt).await?;
             }
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            }
         }
     }
 
