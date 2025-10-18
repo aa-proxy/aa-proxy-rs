@@ -744,8 +744,8 @@ pub async fn set_time_handler(body: RawBody) -> impl IntoResponse {
     // Set system time via libc::clock_settime()
     // Requires CAP_SYS_TIME or root privileges
     let ts = libc::timespec {
-        tv_sec: utc.unix_timestamp(),
-        tv_nsec: utc.nanosecond() as i64,
+        tv_sec: utc.unix_timestamp() as _,
+        tv_nsec: utc.nanosecond() as _,
     };
     let result = unsafe { libc::clock_settime(libc::CLOCK_REALTIME, &ts) };
     if result != 0 {
