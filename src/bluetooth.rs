@@ -1,6 +1,8 @@
+use crate::btle;
 use crate::config::WifiConfig;
 use crate::config::IDENTITY_NAME;
 use crate::config_types::BluetoothAddressList;
+use crate::web::AppState;
 use anyhow::anyhow;
 use backon::{ExponentialBuilder, Retryable};
 use bluer::{
@@ -58,6 +60,12 @@ pub struct BluetoothState {
     handle_agent: AgentHandle,
 }
 
+pub struct BluetoothResources {
+    pub bt_state: Option<BluetoothState>,
+    pub btle_handle: Option<bluer::gatt::local::ApplicationHandle>,
+    pub adv_handle: Option<bluer::adv::AdvertisementHandle>,
+}
+
 pub async fn get_cpu_serial_number_suffix() -> Result<String> {
     let mut serial = String::new();
     let contents = tokio::fs::read_to_string("/sys/firmware/devicetree/base/serial-number").await?;
@@ -103,6 +111,190 @@ pub async fn setup_bluetooth_adapter(
     }
 
     Ok((session, adapter))
+}
+
+pub async fn setup_bluetooth_and_btle(
+    btalias: Option<String>,
+    enable_btle: bool,
+    advertise: bool,
+    bluetooth_enabled: bool,
+    dongle_mode: bool,
+    connect: BluetoothAddressList,
+    wifi_conf: Option<WifiConfig>,
+    tcp_start: Arc<Notify>,
+    bt_timeout: Duration,
+    state: AppState,
+    stopped: bool,
+) -> Result<Option<BluetoothResources>> {
+    loop {
+        let mut bt_state = None;
+        let mut btle_handle = None;
+        let mut adv_handle = None;
+        let mut success = true;
+
+        if bluetooth_enabled || enable_btle {
+            match setup_bluetooth_adapter(btalias.clone(), advertise).await {
+                Ok((session, adapter)) => {
+                    // --- Start BLE GATT server first ---
+                    if enable_btle {
+                        match btle::run_btle_server(&adapter, state.clone()).await {
+                            Ok(handle) => {
+                                info!("{} 🥏 BLE GATT server started successfully", NAME);
+                                btle_handle = Some(handle);
+                            }
+                            Err(e) => {
+                                error!("{} 🥏 Failed to start BLE server: {}", NAME, e);
+                                success = false;
+                            }
+                        }
+                    }
+
+                    // --- Prepare UUIDs ---
+                    let mut uuids: std::collections::BTreeSet<bluer::Uuid> =
+                        std::collections::BTreeSet::new();
+                    uuids.insert(BTLE_PROFILE_UUID);
+
+                    // --- BLE advertisement ---
+                    if !uuids.is_empty() {
+                        // Stop any previous advertisement first
+                        if let Some(handle) = adv_handle.take() {
+                            drop(handle);
+                        }
+
+                        let mut le_advertisement = bluer::adv::Advertisement {
+                            advertisement_type: bluer::adv::Type::Peripheral,
+                            service_uuids: uuids.clone(),
+                            discoverable: Some(true), // temporarily true for stable discovery
+                            local_name: Some(adapter.alias().await?),
+                            ..Default::default()
+                        };
+
+                        let mut adv_success = false;
+                        for attempt in 0..3 {
+                            match adapter.advertise(le_advertisement.clone()).await {
+                                Ok(handle) => {
+                                    info!(
+                                        "{} 📣 BLE advertisement started with UUIDs (attempt {})",
+                                        NAME,
+                                        attempt + 1
+                                    );
+                                    adv_handle = Some(handle);
+                                    adv_success = true;
+                                    break;
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        "{} 🥏 Advertising attempt {} failed: {}",
+                                        NAME,
+                                        attempt + 1,
+                                        e
+                                    );
+                                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                                }
+                            }
+                        }
+
+                        if !adv_success {
+                            warn!(
+                                "{} 🥏 Advertising with UUIDs failed, fallback to local name only",
+                                NAME
+                            );
+
+                            // Retry only with local name
+                            if let Some(handle) = adv_handle.take() {
+                                drop(handle);
+                            }
+
+                            le_advertisement.service_uuids = Default::default();
+
+                            for attempt in 0..3 {
+                                match adapter.advertise(le_advertisement.clone()).await {
+                                    Ok(handle) => {
+                                        info!("{} 📣 BLE advertisement started with local name only (attempt {})", NAME, attempt + 1);
+                                        adv_handle = Some(handle);
+                                        adv_success = true;
+                                        break;
+                                    }
+                                    Err(e) => {
+                                        warn!("{} 🥏 Local-name-only advertising attempt {} failed: {}", NAME, attempt + 1, e);
+                                        tokio::time::sleep(std::time::Duration::from_millis(200))
+                                            .await;
+                                    }
+                                }
+                            }
+
+                            if !adv_success {
+                                error!(
+                                    "{} 🥏 BLE advertisement completely failed after retries",
+                                    NAME
+                                );
+                                success = false;
+                            }
+                        }
+                    }
+
+                    // --- Classic Bluetooth setup ---
+                    if bluetooth_enabled {
+                        if let Some(ref wifi_config) = wifi_conf {
+                            match bluetooth_setup_connection_with_adapter(
+                                session,
+                                adapter,
+                                dongle_mode,
+                                connect.clone(),
+                                wifi_config.clone(),
+                                tcp_start.clone(),
+                                bt_timeout,
+                                stopped,
+                            )
+                            .await
+                            {
+                                Ok(state) => {
+                                    info!("{} 🥏 Classic Bluetooth started successfully", NAME);
+                                    bt_state = Some(state);
+                                }
+                                Err(e) => {
+                                    error!("{} 🥏 Failed to start classic Bluetooth: {}", NAME, e);
+                                    success = false;
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("{} 🥏 Failed to setup Bluetooth adapter: {}", NAME, e);
+                    success = false;
+                }
+            }
+        } else {
+            return Ok(None);
+        }
+
+        if success {
+            return Ok(Some(BluetoothResources {
+                bt_state,
+                btle_handle,
+                adv_handle,
+            }));
+        } else {
+            error!(
+                "{} Bluetooth setup failed, cleaning up and retrying...",
+                NAME
+            );
+
+            // Drop any stale handles
+            if let Some(handle) = adv_handle.take() {
+                drop(handle); // ensures previous advertisement stops
+            }
+            if let Some(handle) = btle_handle.take() {
+                drop(handle); // ensures previous advertisement stops
+            }
+            if let Some(handle) = bt_state.take() {
+                drop(handle); // ensures previous advertisement stops
+            }
+
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
 }
 
 async fn power_up_and_wait_for_connection(
