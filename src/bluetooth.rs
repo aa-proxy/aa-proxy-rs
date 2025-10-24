@@ -6,9 +6,9 @@ use crate::web::AppState;
 use anyhow::anyhow;
 use backon::{ExponentialBuilder, Retryable};
 use bluer::{
-    agent::{Agent, AgentHandle},
+    agent::Agent,
     rfcomm::{Profile, ProfileHandle, Role, Stream},
-    Adapter, Address, Device, Session, Uuid,
+    Adapter, Address, Device, Uuid,
 };
 use futures::StreamExt;
 use simplelog::*;
@@ -17,7 +17,6 @@ use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Notify;
-use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 include!(concat!(env!("OUT_DIR"), "/protos/mod.rs"));
@@ -55,12 +54,8 @@ enum MessageId {
 }
 
 pub struct Bluetooth {
-    session: Session,
     adapter: Adapter,
     handle_aa: ProfileHandle,
-    handle_hsp: Option<ProfileHandle>,
-    task_hsp: Option<JoinHandle<()>>,
-    handle_agent: AgentHandle,
     btle_handle: Option<bluer::gatt::local::ApplicationHandle>,
     adv_handle: Option<bluer::adv::AdvertisementHandle>,
 }
@@ -101,7 +96,7 @@ pub async fn init(
 
     // Default agent is probably needed when pairing for the first time
     let agent = Agent::default();
-    let handle_agent = session.register_agent(agent).await?;
+    let _ = session.register_agent(agent).await?;
 
     // AA Wireless profile
     let profile = Profile {
@@ -116,8 +111,6 @@ pub async fn init(
     let handle_aa = session.register_profile(profile).await?;
     info!("{} 📱 AA Wireless Profile: registered", NAME);
 
-    let handle_hsp = None;
-    let mut task_hsp = None;
     if !dongle_mode {
         // Headset profile
         let profile = Profile {
@@ -132,7 +125,7 @@ pub async fn init(
                 info!("{} 🎧 Headset Profile (HSP): registered", NAME);
                 // handling connection to headset profile in own task
                 // it only accepts each incoming connection
-                task_hsp = Some(tokio::spawn(async move {
+                let _ = Some(tokio::spawn(async move {
                     loop {
                         let req = handle.next().await.expect("received no connect request");
                         info!(
@@ -154,12 +147,8 @@ pub async fn init(
     }
 
     Ok(Bluetooth {
-        session,
         adapter,
         handle_aa,
-        handle_hsp,
-        task_hsp,
-        handle_agent,
         btle_handle: None,
         adv_handle: None,
     })
