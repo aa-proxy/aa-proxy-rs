@@ -287,7 +287,7 @@ impl Bluetooth {
         Ok(())
     }
 
-    async fn power_up_and_wait_for_connection(
+    async fn get_aa_profile_connection(
         &mut self,
         dongle_mode: bool,
         connect: BluetoothAddressList,
@@ -370,7 +370,6 @@ impl Bluetooth {
     }
 
     async fn try_connect_bluetooth_addresses(
-        //&self,
         adapter: &Adapter,
         dongle_mode: bool,
         addresses: &Vec<Address>,
@@ -563,7 +562,7 @@ impl Bluetooth {
 
         // Use the provided session and adapter instead of creating new ones
         let (address, mut stream) = self
-            .power_up_and_wait_for_connection(dongle_mode, connect, bt_timeout, state, stopped)
+            .get_aa_profile_connection(dongle_mode, connect, bt_timeout, state, stopped)
             .await?;
 
         info!("{} 📲 Sending parameters via bluetooth to phone...", NAME);
