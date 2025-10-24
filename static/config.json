@@ -104,7 +104,7 @@
       "values": {
         "advertise": {
           "typ": "boolean",
-          "description": "BLE advertising"
+          "description": "BLE advertising. This also includes BLE/GATT server for companion app."
         },
         "dongle_mode": {
           "typ": "boolean",
@@ -112,7 +112,7 @@
         },
         "btalias": {
           "typ": "string",
-          "description": "BLE device name (how your bluetooth device is visible)\nby default it is `aa-proxy-CPUSERIAL`\nfor dongle mode you need to set it to: `AndroidAuto-xxxxx`"
+          "description": "Bluetooth device name/alias (how your bluetooth device is visible)\nby default it is `aa-proxy-CPUSERIAL`\nfor dongle mode you need to set it to: `AndroidAuto-xxxxx`"
         },
         "connect": {
           "typ": "string",
