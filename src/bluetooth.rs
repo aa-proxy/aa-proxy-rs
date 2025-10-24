@@ -534,15 +534,6 @@ impl Bluetooth {
         Ok(())
     }
 
-    pub async fn bluetooth_stop(&mut self) -> Result<()> {
-        //info!("{} 🥷 Unregistering default agent", NAME);
-        //drop(state.handle_agent);
-        //info!("{} 📱 Removing AA profile", NAME);
-        //drop(state.handle_aa);
-        Ok(())
-    }
-
-    // New function that accepts pre-created session and adapter
     pub async fn aa_handshake(
         &mut self,
         dongle_mode: bool,
