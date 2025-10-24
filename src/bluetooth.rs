@@ -54,34 +54,23 @@ enum MessageId {
     WifiStartResponse = 7,
 }
 
-pub struct BluetoothState {
+pub struct Bluetooth {
+    session: Session,
+    adapter: Adapter,
     handle_aa: ProfileHandle,
-    handle_hsp: Option<JoinHandle<Result<ProfileHandle>>>,
+    handle_hsp: Option<ProfileHandle>,
+    task_hsp: Option<JoinHandle<Result<ProfileHandle>>>,
     handle_agent: AgentHandle,
-}
-
-pub struct BluetoothResources {
-    pub bt_state: Option<BluetoothState>,
-    pub btle_handle: Option<bluer::gatt::local::ApplicationHandle>,
-    pub adv_handle: Option<bluer::adv::AdvertisementHandle>,
-}
-
-pub async fn get_cpu_serial_number_suffix() -> Result<String> {
-    let mut serial = String::new();
-    let contents = tokio::fs::read_to_string("/sys/firmware/devicetree/base/serial-number").await?;
-    let trimmed = contents.trim_end_matches(char::from(0)).trim();
-    // check if we read the serial number with correct length
-    if trimmed.len() >= 6 {
-        serial = trimmed[trimmed.len() - 6..].to_string();
-    }
-    Ok(serial)
+    btle_handle: Option<bluer::gatt::local::ApplicationHandle>,
+    adv_handle: Option<bluer::adv::AdvertisementHandle>,
 }
 
 // Create and configure the Bluetooth adapter
-pub async fn setup_bluetooth_adapter(
+pub async fn init(
     btalias: Option<String>,
     advertise: bool,
-) -> Result<(Session, Adapter)> {
+    dongle_mode: bool,
+) -> Result<Bluetooth> {
     let session = bluer::Session::new().await?;
     let adapter = session.default_adapter().await?;
 
@@ -110,201 +99,6 @@ pub async fn setup_bluetooth_adapter(
         adapter.set_discoverable_timeout(0).await?;
     }
 
-    Ok((session, adapter))
-}
-
-pub async fn setup_bluetooth_and_btle(
-    btalias: Option<String>,
-    enable_btle: bool,
-    advertise: bool,
-    bluetooth_enabled: bool,
-    dongle_mode: bool,
-    connect: BluetoothAddressList,
-    wifi_conf: Option<WifiConfig>,
-    tcp_start: Arc<Notify>,
-    bt_timeout: Duration,
-    state: AppState,
-    stopped: bool,
-) -> Result<Option<BluetoothResources>> {
-    loop {
-        let mut bt_state = None;
-        let mut btle_handle = None;
-        let mut adv_handle = None;
-        let mut success = true;
-
-        if bluetooth_enabled || enable_btle {
-            match setup_bluetooth_adapter(btalias.clone(), advertise).await {
-                Ok((session, adapter)) => {
-                    // --- Start BLE GATT server first ---
-                    if enable_btle {
-                        match btle::run_btle_server(&adapter, state.clone()).await {
-                            Ok(handle) => {
-                                info!("{} 🥏 BLE GATT server started successfully", NAME);
-                                btle_handle = Some(handle);
-                            }
-                            Err(e) => {
-                                error!("{} 🥏 Failed to start BLE server: {}", NAME, e);
-                                success = false;
-                            }
-                        }
-                    }
-
-                    // --- Prepare UUIDs ---
-                    let mut uuids: std::collections::BTreeSet<bluer::Uuid> =
-                        std::collections::BTreeSet::new();
-                    uuids.insert(BTLE_PROFILE_UUID);
-
-                    // --- BLE advertisement ---
-                    if !uuids.is_empty() {
-                        // Stop any previous advertisement first
-                        if let Some(handle) = adv_handle.take() {
-                            drop(handle);
-                        }
-
-                        let mut le_advertisement = bluer::adv::Advertisement {
-                            advertisement_type: bluer::adv::Type::Peripheral,
-                            service_uuids: uuids.clone(),
-                            discoverable: Some(true), // temporarily true for stable discovery
-                            local_name: Some(adapter.alias().await?),
-                            ..Default::default()
-                        };
-
-                        let mut adv_success = false;
-                        for attempt in 0..3 {
-                            match adapter.advertise(le_advertisement.clone()).await {
-                                Ok(handle) => {
-                                    info!(
-                                        "{} 📣 BLE advertisement started with UUIDs (attempt {})",
-                                        NAME,
-                                        attempt + 1
-                                    );
-                                    adv_handle = Some(handle);
-                                    adv_success = true;
-                                    break;
-                                }
-                                Err(e) => {
-                                    warn!(
-                                        "{} 🥏 Advertising attempt {} failed: {}",
-                                        NAME,
-                                        attempt + 1,
-                                        e
-                                    );
-                                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                                }
-                            }
-                        }
-
-                        if !adv_success {
-                            warn!(
-                                "{} 🥏 Advertising with UUIDs failed, fallback to local name only",
-                                NAME
-                            );
-
-                            // Retry only with local name
-                            if let Some(handle) = adv_handle.take() {
-                                drop(handle);
-                            }
-
-                            le_advertisement.service_uuids = Default::default();
-
-                            for attempt in 0..3 {
-                                match adapter.advertise(le_advertisement.clone()).await {
-                                    Ok(handle) => {
-                                        info!("{} 📣 BLE advertisement started with local name only (attempt {})", NAME, attempt + 1);
-                                        adv_handle = Some(handle);
-                                        adv_success = true;
-                                        break;
-                                    }
-                                    Err(e) => {
-                                        warn!("{} 🥏 Local-name-only advertising attempt {} failed: {}", NAME, attempt + 1, e);
-                                        tokio::time::sleep(std::time::Duration::from_millis(200))
-                                            .await;
-                                    }
-                                }
-                            }
-
-                            if !adv_success {
-                                error!(
-                                    "{} 🥏 BLE advertisement completely failed after retries",
-                                    NAME
-                                );
-                                success = false;
-                            }
-                        }
-                    }
-
-                    // --- Classic Bluetooth setup ---
-                    if bluetooth_enabled {
-                        if let Some(ref wifi_config) = wifi_conf {
-                            match bluetooth_setup_connection_with_adapter(
-                                session,
-                                adapter,
-                                dongle_mode,
-                                connect.clone(),
-                                wifi_config.clone(),
-                                tcp_start.clone(),
-                                bt_timeout,
-                                stopped,
-                            )
-                            .await
-                            {
-                                Ok(state) => {
-                                    info!("{} 🥏 Classic Bluetooth started successfully", NAME);
-                                    bt_state = Some(state);
-                                }
-                                Err(e) => {
-                                    error!("{} 🥏 Failed to start classic Bluetooth: {}", NAME, e);
-                                    success = false;
-                                }
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("{} 🥏 Failed to setup Bluetooth adapter: {}", NAME, e);
-                    success = false;
-                }
-            }
-        } else {
-            return Ok(None);
-        }
-
-        if success {
-            return Ok(Some(BluetoothResources {
-                bt_state,
-                btle_handle,
-                adv_handle,
-            }));
-        } else {
-            error!(
-                "{} Bluetooth setup failed, cleaning up and retrying...",
-                NAME
-            );
-
-            // Drop any stale handles
-            if let Some(handle) = adv_handle.take() {
-                drop(handle); // ensures previous advertisement stops
-            }
-            if let Some(handle) = btle_handle.take() {
-                drop(handle); // ensures previous advertisement stops
-            }
-            if let Some(handle) = bt_state.take() {
-                drop(handle); // ensures previous advertisement stops
-            }
-
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-    }
-}
-
-async fn power_up_and_wait_for_connection(
-    session: Session,
-    adapter: Adapter,
-    dongle_mode: bool,
-    connect: BluetoothAddressList,
-    bt_timeout: Duration,
-    stopped: bool,
-) -> Result<(BluetoothState, Stream)> {
     // Default agent is probably needed when pairing for the first time
     let agent = Agent::default();
     let handle_agent = session.register_agent(agent).await?;
@@ -319,7 +113,7 @@ async fn power_up_and_wait_for_connection(
         require_authorization: Some(false),
         ..Default::default()
     };
-    let mut handle_aa = session.register_profile(profile).await?;
+    let handle_aa = session.register_profile(profile).await?;
     info!("{} 📱 AA Wireless Profile: registered", NAME);
 
     let mut handle_hsp = None;
@@ -346,221 +140,366 @@ async fn power_up_and_wait_for_connection(
         }
     }
 
-    info!("{} ⏳ Waiting for phone to connect via bluetooth...", NAME);
+    Ok(Bluetooth {
+        session,
+        adapter,
+        handle_aa,
+        handle_hsp,
+        task_hsp: None,
+        handle_agent,
+        btle_handle: None,
+        adv_handle: None,
+    })
+}
 
-    // try to connect to saved devices or provided one via command line
-    let mut connect_task: Option<JoinHandle<Result<()>>> = None;
-    if let Some(addresses_to_connect) = connect.0 {
-        if !stopped {
-            let adapter_cloned = adapter.clone();
+pub async fn get_cpu_serial_number_suffix() -> Result<String> {
+    let mut serial = String::new();
+    let contents = tokio::fs::read_to_string("/sys/firmware/devicetree/base/serial-number").await?;
+    let trimmed = contents.trim_end_matches(char::from(0)).trim();
+    // check if we read the serial number with correct length
+    if trimmed.len() >= 6 {
+        serial = trimmed[trimmed.len() - 6..].to_string();
+    }
+    Ok(serial)
+}
 
-            connect_task = Some(tokio::spawn(async move {
-                let addresses: Vec<Address> = if addresses_to_connect
-                    .iter()
-                    .any(|addr| *addr == Address::any())
-                {
-                    info!("{} 🥏 Enumerating known bluetooth devices...", NAME);
-                    adapter_cloned.device_addresses().await?
-                } else {
-                    addresses_to_connect
-                };
-                // exit if we don't have anything to connect to
-                if addresses.is_empty() {
-                    return Ok(());
+impl Bluetooth {
+    pub async fn start_ble(&mut self, state: AppState, enable_btle: bool) -> Result<()> {
+        let mut success;
+        // --- Start BLE GATT server first ---
+        if enable_btle {
+            match btle::run_btle_server(&self.adapter, state.clone()).await {
+                Ok(handle) => {
+                    info!("{} 🥏 BLE GATT server started successfully", NAME);
+                    self.btle_handle = Some(handle);
+                }
+                Err(e) => {
+                    error!("{} 🥏 Failed to start BLE server: {}", NAME, e);
+                    success = false;
+                }
+            }
+        }
+
+        // --- Prepare UUIDs ---
+        let mut uuids: std::collections::BTreeSet<bluer::Uuid> = std::collections::BTreeSet::new();
+        uuids.insert(BTLE_PROFILE_UUID);
+
+        // --- BLE advertisement ---
+        if !uuids.is_empty() {
+            // Stop any previous advertisement first
+            if let Some(handle) = self.adv_handle.take() {
+                drop(handle);
+            }
+
+            let mut le_advertisement = bluer::adv::Advertisement {
+                advertisement_type: bluer::adv::Type::Peripheral,
+                service_uuids: uuids.clone(),
+                discoverable: Some(true), // temporarily true for stable discovery
+                local_name: Some(self.adapter.alias().await?),
+                ..Default::default()
+            };
+
+            let mut adv_success = false;
+            for attempt in 0..3 {
+                match self.adapter.advertise(le_advertisement.clone()).await {
+                    Ok(handle) => {
+                        info!(
+                            "{} 📣 BLE advertisement started with UUIDs (attempt {})",
+                            NAME,
+                            attempt + 1
+                        );
+                        self.adv_handle = Some(handle);
+                        adv_success = true;
+                        break;
+                    }
+                    Err(e) => {
+                        warn!(
+                            "{} 🥏 Advertising attempt {} failed: {}",
+                            NAME,
+                            attempt + 1,
+                            e
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    }
+                }
+            }
+
+            if !adv_success {
+                warn!(
+                    "{} 🥏 Advertising with UUIDs failed, fallback to local name only",
+                    NAME
+                );
+
+                // Retry only with local name
+                if let Some(handle) = self.adv_handle.take() {
+                    drop(handle);
                 }
 
-                info!("{} 🧲 Attempting to start an AndroidAuto session via bluetooth with the following devices, in this order: {:?}", NAME, addresses);
-                let try_connect_bluetooth_addresses_retry =
-                    || try_connect_bluetooth_addresses(dongle_mode, &adapter_cloned, &addresses);
+                le_advertisement.service_uuids = Default::default();
 
-                let retry_policy = ExponentialBuilder::default()
-                    .with_min_delay(Duration::from_secs(1))
-                    .with_max_delay(Duration::from_secs(15))
-                    .without_max_times();
-
-                let _connect = try_connect_bluetooth_addresses_retry
-                    // Retry with exponential backoff
-                    .retry(retry_policy)
-                    // Sleep implementation, required if no feature has been enabled
-                    .sleep(tokio::time::sleep)
-                    // Notify when retrying;
-                    .notify(
-                        |err: &Box<dyn std::error::Error + Send + Sync + 'static>,
-                         dur: Duration| {
-                            debug!("{} Retrying due to error: {:?} after {:?}", NAME, err, dur);
-                        },
-                    )
-                    .await?;
-                return Ok(());
-            }));
-        }
-    }
-
-    // handling connection to headset profile in own task
-    let mut task_hsp = {
-        if let Some(mut handle_hsp) = handle_hsp {
-            Some(tokio::spawn(async move {
-                let req = handle_hsp
-                    .next()
-                    .await
-                    .expect("received no connect request");
-                info!(
-                    "{} 🎧 Headset Profile (HSP): connect from: <b>{}</>",
-                    NAME,
-                    req.device()
-                );
-                req.accept()?;
-
-                Ok(handle_hsp)
-            }))
-        } else {
-            None
-        }
-    };
-
-    /// we might have a tasks which should be aborted on errors
-    /// this function is taking care of this before next bluetooth
-    /// connection attempts
-    fn abort_tasks(
-        t1: &mut Option<JoinHandle<Result<()>>>,
-        t2: &mut Option<JoinHandle<Result<ProfileHandle>>>,
-    ) {
-        if let Some(task) = t1 {
-            task.abort();
-        }
-        if let Some(task) = t2 {
-            task.abort();
-        }
-    }
-
-    let req = timeout(bt_timeout, handle_aa.next())
-        .await
-        .map_err(|e| {
-            abort_tasks(&mut connect_task, &mut task_hsp);
-            e
-        })?
-        .expect("received no connect request");
-    info!(
-        "{} 📱 AA Wireless Profile: connect from: <b>{}</>",
-        NAME,
-        req.device()
-    );
-    let stream = req.accept().map_err(|e| {
-        abort_tasks(&mut connect_task, &mut task_hsp);
-        e
-    })?;
-
-    // we have a connection from phone, stop connect_task
-    if let Some(task) = connect_task {
-        task.abort();
-    }
-
-    // generate structure with adapter and handlers for graceful shutdown later
-    let state = BluetoothState {
-        handle_aa,
-        handle_hsp: task_hsp,
-        handle_agent,
-    };
-
-    Ok((state, stream))
-}
-
-async fn cleanup_failed_bluetooth_connect(device: &Device) -> Result<()> {
-    let cleanup_delay = Duration::from_secs(2);
-    let _ = timeout(cleanup_delay, device.disconnect()).await;
-    debug!(
-        "{} Cleaned up bluetooth connection for device: {:?}",
-        NAME,
-        device.name().await
-    );
-    Ok(())
-}
-
-async fn try_connect_bluetooth_addresses(
-    dongle_mode: bool,
-    adapter: &Adapter,
-    addresses: &Vec<Address>,
-) -> Result<()> {
-    for addr in addresses {
-        let device = adapter.device(*addr)?;
-        let dev_name = match device.name().await {
-            Ok(Some(name)) => format!(" (<b><blue>{}</>)", name),
-            _ => String::new(),
-        };
-        info!("{} 🧲 Trying to connect to: {}{}", NAME, addr, dev_name);
-        if let Ok(true) = adapter.device(*addr)?.is_paired().await {
-            let supported_uuids = device.uuids().await?.unwrap_or_default();
-            debug!(
-                "{} Discovered device {} with service UUIDs {:?}",
-                NAME, addr, &supported_uuids
-            );
-
-            if supported_uuids.contains(&AV_REMOTE_CONTROL_TARGET_UUID)
-                && supported_uuids.contains(&AV_REMOTE_CONTROL_UUID)
-            {
-                if !dongle_mode {
-                    match device.connect_profile(&HSP_AG_UUID).await {
-                        Ok(_) => {
+                for attempt in 0..3 {
+                    match self.adapter.advertise(le_advertisement.clone()).await {
+                        Ok(handle) => {
                             info!(
-                                "{} 🔗 Successfully connected to device: {}{}",
-                                NAME, addr, dev_name
+                                "{} 📣 BLE advertisement started with local name only (attempt {})",
+                                NAME,
+                                attempt + 1
                             );
-                            return Ok(());
+                            self.adv_handle = Some(handle);
+                            adv_success = true;
+                            break;
                         }
                         Err(e) => {
-                            warn!("{} 🔇 {}{}: Error connecting: {}", NAME, addr, dev_name, e)
+                            warn!(
+                                "{} 🥏 Local-name-only advertising attempt {} failed: {}",
+                                NAME,
+                                attempt + 1,
+                                e
+                            );
+                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                         }
                     }
-                } else {
-                    match device.connect().await {
-                        Ok(_) => {
-                            info!(
-                                "{} 🔗 Successfully connected to device: {}{}",
-                                NAME, addr, dev_name
-                            );
-                            return Ok(());
-                        }
-                        Err(e) => {
-                            // should be handled with the following code:
-                            // match e.kind {bluer::ErrorKind::ConnectionAttemptFailed} ...
-                            // but the problem is that not all errors are defined in bluer,
-                            // so just fallback for text-searching in error :(
-                            let error_text = e.to_string();
+                }
 
-                            if let Some(code) = error_text.splitn(2, ':').nth(1).map(|s| s.trim()) {
-                                if code == "br-connection-page-timeout"
-                                    || code == "br-connection-canceled"
+                if !adv_success {
+                    error!(
+                        "{} 🥏 BLE advertisement completely failed after retries",
+                        NAME
+                    );
+                    success = false;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn power_up_and_wait_for_connection(
+        &mut self,
+        dongle_mode: bool,
+        connect: BluetoothAddressList,
+        bt_timeout: Duration,
+        state: AppState,
+        stopped: bool,
+    ) -> Result<Stream> {
+        info!("{} ⏳ Waiting for phone to connect via bluetooth...", NAME);
+
+        // try to connect to saved devices or provided one via command line
+        let mut connect_task: Option<JoinHandle<Result<()>>> = None;
+        if let Some(addresses_to_connect) = connect.0 {
+            if !stopped {
+                let adapter_cloned = self.adapter.clone();
+
+                connect_task = Some(tokio::spawn(async move {
+                    let addresses: Vec<Address> = if addresses_to_connect
+                        .iter()
+                        .any(|addr| *addr == Address::any())
+                    {
+                        info!("{} 🥏 Enumerating known bluetooth devices...", NAME);
+                        adapter_cloned.device_addresses().await?
+                    } else {
+                        addresses_to_connect
+                    };
+                    // exit if we don't have anything to connect to
+                    if addresses.is_empty() {
+                        return Ok(());
+                    }
+
+                    info!("{} 🧲 Attempting to start an AndroidAuto session via bluetooth with the following devices, in this order: {:?}", NAME, addresses);
+                    let try_connect_bluetooth_addresses_retry = || {
+                        Bluetooth::try_connect_bluetooth_addresses(
+                            &adapter_cloned,
+                            dongle_mode,
+                            &addresses,
+                        )
+                    };
+
+                    let retry_policy = ExponentialBuilder::default()
+                        .with_min_delay(Duration::from_secs(1))
+                        .with_max_delay(Duration::from_secs(15))
+                        .without_max_times();
+
+                    let _connect = try_connect_bluetooth_addresses_retry
+                        // Retry with exponential backoff
+                        .retry(retry_policy)
+                        // Sleep implementation, required if no feature has been enabled
+                        .sleep(tokio::time::sleep)
+                        // Notify when retrying;
+                        .notify(
+                            |err: &Box<dyn std::error::Error + Send + Sync + 'static>,
+                             dur: Duration| {
+                                debug!("{} Retrying due to error: {:?} after {:?}", NAME, err, dur);
+                            },
+                        )
+                        .await?;
+                    return Ok(());
+                }));
+            }
+        }
+
+        // handling connection to headset profile in own task
+        let mut task_hsp = {
+            if let Some(mut handle_hsp) = self.handle_hsp.take() {
+                Some(tokio::spawn(async move {
+                    let req = handle_hsp
+                        .next()
+                        .await
+                        .expect("received no connect request");
+                    info!(
+                        "{} 🎧 Headset Profile (HSP): connect from: <b>{}</>",
+                        NAME,
+                        req.device()
+                    );
+                    req.accept()?;
+
+                    Ok(handle_hsp)
+                }))
+            } else {
+                None
+            }
+        };
+
+        /// we might have a tasks which should be aborted on errors
+        /// this function is taking care of this before next bluetooth
+        /// connection attempts
+        fn abort_tasks(
+            t1: &mut Option<JoinHandle<Result<()>>>,
+            t2: &mut Option<JoinHandle<Result<ProfileHandle>>>,
+        ) {
+            if let Some(task) = t1 {
+                task.abort();
+            }
+            if let Some(task) = t2 {
+                task.abort();
+            }
+        }
+
+        let req = timeout(bt_timeout, self.handle_aa.next())
+            .await
+            .map_err(|e| {
+                abort_tasks(&mut connect_task, &mut task_hsp);
+                e
+            })?
+            .expect("received no connect request");
+        info!(
+            "{} 📱 AA Wireless Profile: connect from: <b>{}</>",
+            NAME,
+            req.device()
+        );
+        let stream = req.accept().map_err(|e| {
+            abort_tasks(&mut connect_task, &mut task_hsp);
+            e
+        })?;
+
+        // we have a connection from phone, stop connect_task
+        if let Some(task) = connect_task {
+            task.abort();
+        }
+
+        Ok(stream)
+    }
+
+    async fn cleanup_failed_bluetooth_connect(device: &Device) -> Result<()> {
+        let cleanup_delay = Duration::from_secs(2);
+        let _ = timeout(cleanup_delay, device.disconnect()).await;
+        debug!(
+            "{} Cleaned up bluetooth connection for device: {:?}",
+            NAME,
+            device.name().await
+        );
+        Ok(())
+    }
+
+    async fn try_connect_bluetooth_addresses(
+        //&self,
+        adapter: &Adapter,
+        dongle_mode: bool,
+        addresses: &Vec<Address>,
+    ) -> Result<()> {
+        for addr in addresses {
+            let device = adapter.device(*addr)?;
+            let dev_name = match device.name().await {
+                Ok(Some(name)) => format!(" (<b><blue>{}</>)", name),
+                _ => String::new(),
+            };
+            info!("{} 🧲 Trying to connect to: {}{}", NAME, addr, dev_name);
+            if let Ok(true) = adapter.device(*addr)?.is_paired().await {
+                let supported_uuids = device.uuids().await?.unwrap_or_default();
+                debug!(
+                    "{} Discovered device {} with service UUIDs {:?}",
+                    NAME, addr, &supported_uuids
+                );
+
+                if supported_uuids.contains(&AV_REMOTE_CONTROL_TARGET_UUID)
+                    && supported_uuids.contains(&AV_REMOTE_CONTROL_UUID)
+                {
+                    if !dongle_mode {
+                        match device.connect_profile(&HSP_AG_UUID).await {
+                            Ok(_) => {
+                                info!(
+                                    "{} 🔗 Successfully connected to device: {}{}",
+                                    NAME, addr, dev_name
+                                );
+                                return Ok(());
+                            }
+                            Err(e) => {
+                                warn!("{} 🔇 {}{}: Error connecting: {}", NAME, addr, dev_name, e)
+                            }
+                        }
+                    } else {
+                        match device.connect().await {
+                            Ok(_) => {
+                                info!(
+                                    "{} 🔗 Successfully connected to device: {}{}",
+                                    NAME, addr, dev_name
+                                );
+                                return Ok(());
+                            }
+                            Err(e) => {
+                                // should be handled with the following code:
+                                // match e.kind {bluer::ErrorKind::ConnectionAttemptFailed} ...
+                                // but the problem is that not all errors are defined in bluer,
+                                // so just fallback for text-searching in error :(
+                                let error_text = e.to_string();
+
+                                if let Some(code) =
+                                    error_text.splitn(2, ':').nth(1).map(|s| s.trim())
                                 {
-                                    warn!(
-                                        "{} 🔇 {}{}: Error connecting: {}",
-                                        NAME, addr, dev_name, e
-                                    );
-                                    cleanup_failed_bluetooth_connect(&device).await?;
-                                } else {
-                                    info!(
+                                    if code == "br-connection-page-timeout"
+                                        || code == "br-connection-canceled"
+                                    {
+                                        warn!(
+                                            "{} 🔇 {}{}: Error connecting: {}",
+                                            NAME, addr, dev_name, e
+                                        );
+                                        Bluetooth::cleanup_failed_bluetooth_connect(&device)
+                                            .await?;
+                                    } else {
+                                        info!(
                                     "{} 🔗 Connection success, waiting for AA profile connection: {}{}, ignored error: {}",
                                     NAME, addr, dev_name, e
                                 );
-                                    return Ok(());
+                                        return Ok(());
+                                    }
+                                } else {
+                                    warn!("{} Unknown bluetooth error: {}", NAME, e);
+                                    Bluetooth::cleanup_failed_bluetooth_connect(&device).await?;
                                 }
-                            } else {
-                                warn!("{} Unknown bluetooth error: {}", NAME, e);
-                                cleanup_failed_bluetooth_connect(&device).await?;
                             }
                         }
                     }
+                } else {
+                    warn!("{} 🧲 Will not try to connect to: {}{} device does not have the required Android Auto device profiles", NAME, addr, dev_name);
                 }
             } else {
-                warn!("{} 🧲 Will not try to connect to: {}{} device does not have the required Android Auto device profiles", NAME, addr, dev_name);
+                warn!(
+                    "{} 🧲 Unable to connect to: {}{} device not paired",
+                    NAME, addr, dev_name
+                );
             }
-        } else {
-            warn!(
-                "{} 🧲 Unable to connect to: {}{} device not paired",
-                NAME, addr, dev_name
-            );
         }
+        Err(anyhow!("Unable to connect to the provided addresses").into())
     }
-    Err(anyhow!("Unable to connect to the provided addresses").into())
 }
 
 async fn send_message(
@@ -638,95 +577,91 @@ async fn read_message(
     Ok(HEADER_LEN + len)
 }
 
-pub async fn bluetooth_stop(state: BluetoothState) -> Result<()> {
-    info!("{} 🥷 Unregistering default agent", NAME);
-    drop(state.handle_agent);
-    info!("{} 📱 Removing AA profile", NAME);
-    drop(state.handle_aa);
+impl Bluetooth {
+    pub async fn bluetooth_stop(&mut self) -> Result<()> {
+        //info!("{} 🥷 Unregistering default agent", NAME);
+        //drop(state.handle_agent);
+        //info!("{} 📱 Removing AA profile", NAME);
+        //drop(state.handle_aa);
 
-    // HSP profile is/was running in own task
-    if let Some(handle) = state.handle_hsp {
-        match timeout(Duration::from_secs_f32(2.5), handle).await {
-            Ok(task_handle) => match task_handle? {
-                Ok(handle_hsp) => {
-                    info!("{} 🎧 Removing HSP profile", NAME);
-                    drop(handle_hsp);
-                }
+        // HSP profile is/was running in own task
+        if let Some(handle) = self.task_hsp.take() {
+            match timeout(Duration::from_secs_f32(2.5), handle).await {
+                Ok(task_handle) => match task_handle? {
+                    Ok(handle_hsp) => {
+                        info!("{} 🎧 Removing HSP profile", NAME);
+                        drop(handle_hsp);
+                    }
+                    Err(e) => {
+                        warn!("{} 🎧 HSP profile error: {}", NAME, e);
+                    }
+                },
                 Err(e) => {
-                    warn!("{} 🎧 HSP profile error: {}", NAME, e);
+                    warn!("{} 🎧 Error waiting for HSP profile task: {}", NAME, e);
                 }
-            },
-            Err(e) => {
-                warn!("{} 🎧 Error waiting for HSP profile task: {}", NAME, e);
             }
         }
+
+        Ok(())
     }
 
-    Ok(())
-}
+    // New function that accepts pre-created session and adapter
+    pub async fn aa_handshake(
+        &mut self,
+        dongle_mode: bool,
+        connect: BluetoothAddressList,
+        wifi_config: WifiConfig,
+        tcp_start: Arc<Notify>,
+        bt_timeout: Duration,
+        state: AppState,
+        stopped: bool,
+    ) -> Result<()> {
+        use WifiInfoResponse::WifiInfoResponse;
+        use WifiStartRequest::WifiStartRequest;
+        let mut stage = 1;
+        let mut started;
 
-// New function that accepts pre-created session and adapter
-pub async fn bluetooth_setup_connection_with_adapter(
-    session: Session,
-    adapter: Adapter,
-    dongle_mode: bool,
-    connect: BluetoothAddressList,
-    wifi_config: WifiConfig,
-    tcp_start: Arc<Notify>,
-    bt_timeout: Duration,
-    stopped: bool,
-) -> Result<BluetoothState> {
-    use WifiInfoResponse::WifiInfoResponse;
-    use WifiStartRequest::WifiStartRequest;
-    let mut stage = 1;
-    let mut started;
+        // Use the provided session and adapter instead of creating new ones
+        let mut stream = self
+            .power_up_and_wait_for_connection(dongle_mode, connect, bt_timeout, state, stopped)
+            .await?;
 
-    // Use the provided session and adapter instead of creating new ones
-    let (state, mut stream) = power_up_and_wait_for_connection(
-        session,
-        adapter,
-        dongle_mode,
-        connect,
-        bt_timeout,
-        stopped,
-    )
-    .await?;
+        info!("{} 📲 Sending parameters via bluetooth to phone...", NAME);
+        let mut start_req = WifiStartRequest::new();
+        info!(
+            "{} 🛜 Sending Host IP Address: {}",
+            NAME, wifi_config.ip_addr
+        );
+        start_req.set_ip_address(wifi_config.ip_addr);
+        start_req.set_port(wifi_config.port);
+        send_message(&mut stream, stage, MessageId::WifiStartRequest, start_req).await?;
+        stage += 1;
+        started = Instant::now();
+        read_message(&mut stream, stage, MessageId::WifiInfoRequest, started).await?;
 
-    info!("{} 📲 Sending parameters via bluetooth to phone...", NAME);
-    let mut start_req = WifiStartRequest::new();
-    info!(
-        "{} 🛜 Sending Host IP Address: {}",
-        NAME, wifi_config.ip_addr
-    );
-    start_req.set_ip_address(wifi_config.ip_addr);
-    start_req.set_port(wifi_config.port);
-    send_message(&mut stream, stage, MessageId::WifiStartRequest, start_req).await?;
-    stage += 1;
-    started = Instant::now();
-    read_message(&mut stream, stage, MessageId::WifiInfoRequest, started).await?;
+        let mut info = WifiInfoResponse::new();
+        info!(
+            "{} 🛜 Sending Host SSID and Password: {}, {}",
+            NAME, wifi_config.ssid, wifi_config.wpa_key
+        );
+        info.set_ssid(wifi_config.ssid);
+        info.set_key(wifi_config.wpa_key);
+        info.set_bssid(wifi_config.bssid);
+        info.set_security_mode(SecurityMode::WPA2_PERSONAL);
+        info.set_access_point_type(AccessPointType::DYNAMIC);
+        stage += 1;
+        send_message(&mut stream, stage, MessageId::WifiInfoResponse, info).await?;
+        stage += 1;
+        started = Instant::now();
+        read_message(&mut stream, stage, MessageId::WifiStartResponse, started).await?;
+        stage += 1;
+        started = Instant::now();
+        read_message(&mut stream, stage, MessageId::WifiConnectStatus, started).await?;
+        tcp_start.notify_one();
+        let _ = stream.shutdown().await?;
 
-    let mut info = WifiInfoResponse::new();
-    info!(
-        "{} 🛜 Sending Host SSID and Password: {}, {}",
-        NAME, wifi_config.ssid, wifi_config.wpa_key
-    );
-    info.set_ssid(wifi_config.ssid);
-    info.set_key(wifi_config.wpa_key);
-    info.set_bssid(wifi_config.bssid);
-    info.set_security_mode(SecurityMode::WPA2_PERSONAL);
-    info.set_access_point_type(AccessPointType::DYNAMIC);
-    stage += 1;
-    send_message(&mut stream, stage, MessageId::WifiInfoResponse, info).await?;
-    stage += 1;
-    started = Instant::now();
-    read_message(&mut stream, stage, MessageId::WifiStartResponse, started).await?;
-    stage += 1;
-    started = Instant::now();
-    read_message(&mut stream, stage, MessageId::WifiConnectStatus, started).await?;
-    tcp_start.notify_one();
-    let _ = stream.shutdown().await?;
+        info!("{} 🚀 Bluetooth launch sequence completed", NAME);
 
-    info!("{} 🚀 Bluetooth launch sequence completed", NAME);
-
-    Ok(state)
+        Ok(())
+    }
 }

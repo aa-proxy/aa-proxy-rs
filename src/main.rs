@@ -1,5 +1,4 @@
 use aa_proxy_rs::bluetooth;
-use aa_proxy_rs::bluetooth::setup_bluetooth_and_btle;
 use aa_proxy_rs::config::SharedConfig;
 use aa_proxy_rs::config::SharedConfigJson;
 use aa_proxy_rs::config::WifiConfig;
@@ -253,6 +252,40 @@ async fn tokio_main(
         }
     });
 
+    let mut bluetooth;
+    loop {
+        match bluetooth::init(
+            cfg.btalias.clone(),
+            //            true, // enable BLE
+            cfg.advertise,
+            //            true, // enable classic BT
+            cfg.dongle_mode,
+            //            cfg.connect,
+            //            wifi_conf.clone(),
+            //            tcp_start.clone(),
+            //            Duration::from_secs(cfg.bt_timeout_secs.into()),
+            //            state.clone(),
+            //            stopped,
+        )
+        .await
+        {
+            Ok(result) => {
+                bluetooth = result;
+                break;
+            }
+            Err(e) => {
+                error!("{} Fatal error in Bluetooth setup: {}", NAME, e);
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                continue;
+            }
+        }
+    }
+    if cfg.advertise {
+        if let Err(e) = bluetooth.start_ble(state.clone(), true).await {
+            info!("{} Error starting BLE: {}", NAME, e);
+        }
+    }
+
     let change_usb_order = cfg.change_usb_order;
     loop {
         if let Some(ref mut leds) = led_manager {
@@ -273,62 +306,56 @@ async fn tokio_main(
         let cfg = config.read().await.clone();
         let stopped = cfg.action_requested == Some(Action::Stop);
 
-        let bluetooth_resources = match setup_bluetooth_and_btle(
-            cfg.btalias,
-            true, // enable BLE
-            cfg.advertise,
-            true, // enable classic BT
-            cfg.dongle_mode,
-            cfg.connect,
-            wifi_conf.clone(),
-            tcp_start.clone(),
-            Duration::from_secs(cfg.bt_timeout_secs.into()),
-            state.clone(),
-            stopped,
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(e) => {
-                error!("{} Fatal error in Bluetooth setup: {}", NAME, e);
-                None
-            }
-        };
-
         // --- Keep BLE advertisement and GATT server alive ---
-        let mut bt_stop = None;
-        let mut btle_keepalive = None;
-        let mut adv_keepalive = None;
+        //let mut bt_stop = None;
+        //let mut btle_keepalive = None;
+        //let mut adv_keepalive = None;
 
-        if let Some(resources) = bluetooth_resources {
-            if let Some(state) = resources.bt_state {
-                bt_stop = Some(tokio::spawn(async move {
-                    bluetooth::bluetooth_stop(state).await.unwrap_or_else(|e| {
-                        error!("{} Error stopping Bluetooth: {}", NAME, e);
-                    })
-                }));
-            }
+        //if let Some(resources) = bluetooth_resources {
+        //    if let Some(state) = resources.bt_state {
+        //        bt_stop = Some(tokio::spawn(async move {
+        //            bluetooth::bluetooth_stop(state).await.unwrap_or_else(|e| {
+        //                error!("{} Error stopping Bluetooth: {}", NAME, e);
+        //            })
+        //        }));
+        //    }
 
-            // keep BLE handles alive for the lifetime of this loop iteration
-            btle_keepalive = resources.btle_handle;
-            adv_keepalive = resources.adv_handle;
+        //    // keep BLE handles alive for the lifetime of this loop iteration
+        //    btle_keepalive = resources.btle_handle;
+        //    adv_keepalive = resources.adv_handle;
+        //}
+        if let Err(e) = bluetooth
+            .aa_handshake(
+                cfg.dongle_mode,
+                cfg.connect,
+                wifi_conf.clone().unwrap(),
+                tcp_start.clone(),
+                Duration::from_secs(cfg.bt_timeout_secs.into()),
+                state.clone(),
+                stopped,
+            )
+            .await
+        {
+            error!("{} bluetooth AA handshake error: {}", NAME, e);
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            continue;
         }
 
         if !change_usb_order {
             enable_usb_if_present(&mut usb, accessory_started.clone()).await;
         }
 
-        if let Some(bt_stop) = bt_stop {
-            // wait for bluetooth stop properly
-            let _ = bt_stop.await;
-        }
+        //if let Some(bt_stop) = bt_stop {
+        //    // wait for bluetooth stop properly
+        //    let _ = bt_stop.await;
+        //}
         // --- Clean up previous BLE resources ---
-        if let Some(handle) = btle_keepalive.take() {
-            drop(handle); // or handle.stop().await if your library supports it
-        }
-        if let Some(handle) = adv_keepalive.take() {
-            drop(handle); // stops advertising
-        }
+        //if let Some(handle) = btle_keepalive.take() {
+        //    drop(handle); // or handle.stop().await if your library supports it
+        //}
+        //if let Some(handle) = adv_keepalive.take() {
+        //    drop(handle); // stops advertising
+        //}
 
         // inform via LED about successful connection
         if let Some(ref mut leds) = led_manager {
