@@ -294,7 +294,7 @@ impl Bluetooth {
         bt_timeout: Duration,
         state: AppState,
         stopped: bool,
-    ) -> Result<Stream> {
+    ) -> Result<(Address, Stream)> {
         info!("{} ⏳ Waiting for phone to connect via bluetooth...", NAME);
 
         // try to connect to saved devices or provided one via command line
@@ -352,9 +352,10 @@ impl Bluetooth {
             NAME,
             req.device()
         );
+        let addr = req.device().clone();
         let stream = req.accept()?;
 
-        Ok(stream)
+        Ok((addr, stream))
     }
 
     async fn cleanup_failed_bluetooth_connect(device: &Device) -> Result<()> {
@@ -561,7 +562,7 @@ impl Bluetooth {
         let mut started;
 
         // Use the provided session and adapter instead of creating new ones
-        let mut stream = self
+        let (address, mut stream) = self
             .power_up_and_wait_for_connection(dongle_mode, connect, bt_timeout, state, stopped)
             .await?;
 
@@ -597,7 +598,11 @@ impl Bluetooth {
         started = Instant::now();
         read_message(&mut stream, stage, MessageId::WifiConnectStatus, started).await?;
         tcp_start.notify_one();
-        let _ = stream.shutdown().await?;
+
+        // handshake complete, now disconnect the device so it should
+        // connect to real HU for calls
+        let device = self.adapter.device(bluer::Address(*address))?;
+        let _ = device.disconnect().await;
 
         info!("{} 🚀 Bluetooth launch sequence completed", NAME);
 
