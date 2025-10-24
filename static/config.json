@@ -64,10 +64,6 @@
           "typ": "string",
           "description": "Enable wired USB connection to phone (VID:PID should be specified, zero is wildcard and can be used for single or both fields)\nyou can obtain it e.g. using `lsusb` after connecting phone,\nand then use e.g. \"18d1:0\" which will handle specified phone vendor ID (Google Pixel in this example)"
         },
-        "dhu": {
-          "typ": "boolean",
-          "description": "Use a Google Android Auto Desktop Head Unit emulator instead of real HU device (will listen on TCP 5277 port)"
-        },
         "udc": {
           "typ": "string",
           "description": "UDC Controller name (used in special configurations)"
@@ -213,6 +209,10 @@
     {
       "title": "🧰 DEVELOPER OPTIONS",
       "values": {
+        "dhu": {
+          "typ": "boolean",
+          "description": "Use a Google Android Auto Desktop Head Unit emulator instead of real HU device (will listen on TCP 5277 port). For usage without a real SBC!"
+        },
         "eth_mode": {
           "typ": "string",
           "description": "Configure Ethernet mode (optional). Options:\n- `DHCP` (case-insensitive): dynamic IP assignment\n- Static IP: e.g. `192.168.100.1/24`\n- Leave blank to disable"
