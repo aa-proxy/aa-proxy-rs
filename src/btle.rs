@@ -60,8 +60,8 @@ pub async fn run_btle_server(
     adapter: &Adapter,
     state: AppState,
 ) -> bluer::Result<bluer::gatt::local::ApplicationHandle> {
-    info!("{} 🥏 BLE Starting", NAME);
-    info!(
+    debug!("{} 🥏 BLE Starting", NAME);
+    debug!(
         "{} 🥏 BLE Started alias: <bold><green>{}</>",
         NAME,
         adapter.name()
@@ -102,7 +102,7 @@ pub async fn run_btle_server(
 
         match adapter.serve_gatt_application(app).await {
             Ok(h) => {
-                info!("GATT registered successfully");
+                debug!("GATT registered successfully");
                 // move `new_char_control` out so caller can use it
                 break (h, new_char_control);
             }
@@ -114,12 +114,12 @@ pub async fn run_btle_server(
         }
     };
 
-    info!("{} 🥏 GATT server running", NAME);
+    debug!("{} 🥏 GATT server running", NAME);
 
     let mut char_control = char_control;
 
     tokio::spawn(async move {
-        info!("{} 🥏 char_control task starting", NAME);
+        debug!("{} 🥏 char_control task starting", NAME);
 
         let mut reader_opt = None;
         let mut writer_opt = None;
@@ -128,14 +128,14 @@ pub async fn run_btle_server(
         loop {
             match char_control.next().await {
                 Some(evt) => {
-                    info!("{} 🥏 Event received: {:?}", NAME, evt);
+                    debug!("{} 🥏 Event received: {:?}", NAME, evt);
 
                     match evt {
                         bluer::gatt::local::CharacteristicControlEvent::Write(req) => {
-                            info!("{} 🥏 Got Write event (mtu={})", NAME, req.mtu());
+                            debug!("{} 🥏 Got Write event (mtu={})", NAME, req.mtu());
                             match req.accept() {
                                 Ok(reader) => {
-                                    info!(
+                                    debug!(
                                         "{} 🥏 Accepted write request (reader mtu={})",
                                         NAME,
                                         reader.mtu()
@@ -149,7 +149,7 @@ pub async fn run_btle_server(
                         }
 
                         bluer::gatt::local::CharacteristicControlEvent::Notify(notifier) => {
-                            info!(
+                            debug!(
                                 "{} 🥏 Got Notify subscription event (mtu={})",
                                 NAME,
                                 notifier.mtu()
@@ -169,19 +169,19 @@ pub async fn run_btle_server(
                                     break;
                                 }
                                 Ok(n) => {
-                                    info!("{} 🥏 Read {} bytes from client (drain)", NAME, n);
+                                    debug!("{} 🥏 Read {} bytes from client (drain)", NAME, n);
                                     buf.extend_from_slice(&tmp[..n]);
 
                                     // Debug print tail
                                     if buf.len() > 64 {
                                         let tail = &buf[buf.len() - 64..];
-                                        info!(
+                                        debug!(
                                             "{} 🥏 Buffer tail (hex): {}",
                                             NAME,
                                             hex::encode(tail)
                                         );
                                     } else {
-                                        info!("{} 🥏 Buffer (hex): {}", NAME, hex::encode(&buf));
+                                        debug!("{} 🥏 Buffer (hex): {}", NAME, hex::encode(&buf));
                                     }
 
                                     // Check for finish marker at end
@@ -193,7 +193,7 @@ pub async fn run_btle_server(
                                         {
                                             // Found finish. Remove marker and process request.
                                             buf.truncate(len - 4);
-                                            info!("{} 🥏 Finish marker detected; total payload {} bytes", NAME, buf.len());
+                                            debug!("{} 🥏 Finish marker detected; total payload {} bytes", NAME, buf.len());
 
                                             // Decompress & parse safely
                                             let parsed_req = match std::panic::catch_unwind(|| {
@@ -207,7 +207,7 @@ pub async fn run_btle_server(
                                                 }
                                             };
 
-                                            info!("{} 🥏 Parsed request: {:?}", NAME, parsed_req);
+                                            debug!("{} 🥏 Parsed request: {:?}", NAME, parsed_req);
 
                                             // Build response (may use blocking inside craft_response; it already blocks internally)
                                             let resp =
@@ -227,10 +227,10 @@ pub async fn run_btle_server(
 
                                             // Send response if we have a writer (notify subscription)
                                             if let Some(writer) = writer_opt.as_mut() {
-                                                info!("{} 🥏 Writing {} compressed bytes back (writer mtu={})", NAME, compressed.len(), writer.mtu());
+                                                debug!("{} 🥏 Writing {} compressed bytes back (writer mtu={})", NAME, compressed.len(), writer.mtu());
                                                 for c in compressed.chunks(writer.mtu() - 4) {
                                                     match writer.write_all(c).await {
-                                                        Ok(_) => info!(
+                                                        Ok(_) => debug!(
                                                             "{} 🥏 wrote chunk {} bytes",
                                                             NAME,
                                                             c.len()
@@ -248,7 +248,7 @@ pub async fn run_btle_server(
                                                     .write_all(&FINISH_SIGNAL.to_le_bytes())
                                                     .await
                                                 {
-                                                    Ok(_) => info!(
+                                                    Ok(_) => debug!(
                                                         "{} 🥏 Finish marker written to client",
                                                         NAME
                                                     ),
@@ -282,13 +282,13 @@ pub async fn run_btle_server(
                 }
 
                 None => {
-                    info!("{} 🥏 char_control.next() returned None - control stream closed; exiting task", NAME);
+                    debug!("{} 🥏 char_control.next() returned None - control stream closed; exiting task", NAME);
                     break;
                 }
             } // end match char_control.next()
         } // end outer loop
 
-        info!("{} 🥏 char_control task ended", NAME);
+        debug!("{} 🥏 char_control task ended", NAME);
     });
 
     Ok(app_handle)
@@ -341,7 +341,7 @@ async fn craft_response(req: &Request, state: AppState) -> Response {
             let cfg_guard = state.config_json.read().await;
             let cfg_str = serde_json::to_string(&*cfg_guard).unwrap_or_default();
 
-            info!("{} 🥏 /get-config-data response: {}", NAME, cfg_str);
+            debug!("{} 🥏 /get-config-data response: {}", NAME, cfg_str);
 
             Response {
                 s: 200,
@@ -354,7 +354,7 @@ async fn craft_response(req: &Request, state: AppState) -> Response {
             let cfg_guard = state.config.read().await;
             let cfg_str = serde_json::to_string(&*cfg_guard).unwrap_or_default();
 
-            info!("{} 🥏 /get-config response: {}", NAME, cfg_str);
+            debug!("{} 🥏 /get-config response: {}", NAME, cfg_str);
 
             Response {
                 s: 200,
@@ -399,7 +399,7 @@ async fn craft_response(req: &Request, state: AppState) -> Response {
                 cfg.save((&state.config_file).to_path_buf());
             }
 
-            info!(
+            debug!(
                 "{} 🥏 /update-config response: {}",
                 NAME,
                 "{ \"status\": 1 }".to_string()
@@ -500,7 +500,7 @@ async fn craft_response(req: &Request, state: AppState) -> Response {
                 }
             }
 
-            info!("{} Received battery data: {:?}", NAME, data);
+            debug!("{} Received battery data: {:?}", NAME, data);
 
             if let Some(ch) = *state.sensor_channel.lock().await {
                 if let Some(tx) = state.tx.lock().await.clone() {
