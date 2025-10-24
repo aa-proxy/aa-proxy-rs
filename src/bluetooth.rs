@@ -176,6 +176,81 @@ pub async fn get_cpu_serial_number_suffix() -> Result<String> {
     Ok(serial)
 }
 
+async fn send_message(
+    stream: &mut Stream,
+    stage: u8,
+    id: MessageId,
+    message: impl Message,
+) -> Result<usize> {
+    let mut packet: Vec<u8> = vec![];
+    let mut data = message.write_to_bytes()?;
+
+    // create header: 2 bytes message length + 2 bytes MessageID
+    packet.write_u16(data.len() as u16).await?;
+    packet.write_u16(id.clone() as u16).await?;
+
+    // append data and send
+    packet.append(&mut data);
+
+    info!(
+        "{} 📨 stage #{} of {}: Sending <yellow>{:?}</> frame to phone...",
+        NAME, stage, STAGES, id
+    );
+
+    Ok(stream.write(&packet).await?)
+}
+
+async fn read_message(
+    stream: &mut Stream,
+    stage: u8,
+    id: MessageId,
+    started: Instant,
+) -> Result<usize> {
+    let mut buf = vec![0; HEADER_LEN];
+    let n = stream.read_exact(&mut buf).await?;
+    debug!("received {} bytes: {:02X?}", n, buf);
+    let elapsed = started.elapsed();
+
+    let len: usize = u16::from_be_bytes(buf[0..=1].try_into()?).into();
+    let message_id = u16::from_be_bytes(buf[2..=3].try_into()?);
+    debug!("MessageID = {}, len = {}", message_id, len);
+
+    if message_id != id.clone() as u16 {
+        warn!(
+            "Received data has invalid MessageID: got: {:?}, expected: {:?}",
+            message_id, id
+        );
+    }
+    info!(
+        "{} 📨 stage #{} of {}: Received <yellow>{:?}</> frame from phone (⏱️ {} ms)",
+        NAME,
+        stage,
+        STAGES,
+        id,
+        (elapsed.as_secs() * 1_000) + (elapsed.subsec_nanos() / 1_000_000) as u64,
+    );
+
+    // read and discard the remaining bytes
+    if len > 0 {
+        let mut buf = vec![0; len];
+        let n = stream.read_exact(&mut buf).await?;
+        debug!("remaining {} bytes: {:02X?}", n, buf);
+
+        // analyzing WifiConnectStatus
+        // this is a frame where phone cannot connect to WiFi:
+        // [08, FD, FF, FF, FF, FF, FF, FF, FF, FF, 01] -> which is -i64::MAX
+        // and this is where all is fine:
+        // [08, 00]
+        if id == MessageId::WifiConnectStatus && n >= 2 {
+            if buf[1] != 0 {
+                return Err("phone cannot connect to our WiFi AP...".into());
+            }
+        }
+    }
+
+    Ok(HEADER_LEN + len)
+}
+
 impl Bluetooth {
     pub async fn start_ble(&mut self, state: AppState, enable_btle: bool) -> Result<()> {
         let mut success;
@@ -358,17 +433,6 @@ impl Bluetooth {
         Ok((addr, stream))
     }
 
-    async fn cleanup_failed_bluetooth_connect(device: &Device) -> Result<()> {
-        let cleanup_delay = Duration::from_secs(2);
-        let _ = timeout(cleanup_delay, device.disconnect()).await;
-        debug!(
-            "{} Cleaned up bluetooth connection for device: {:?}",
-            NAME,
-            device.name().await
-        );
-        Ok(())
-    }
-
     async fn try_connect_bluetooth_addresses(
         adapter: &Adapter,
         dongle_mode: bool,
@@ -458,84 +522,18 @@ impl Bluetooth {
         }
         Err(anyhow!("Unable to connect to the provided addresses").into())
     }
-}
 
-async fn send_message(
-    stream: &mut Stream,
-    stage: u8,
-    id: MessageId,
-    message: impl Message,
-) -> Result<usize> {
-    let mut packet: Vec<u8> = vec![];
-    let mut data = message.write_to_bytes()?;
-
-    // create header: 2 bytes message length + 2 bytes MessageID
-    packet.write_u16(data.len() as u16).await?;
-    packet.write_u16(id.clone() as u16).await?;
-
-    // append data and send
-    packet.append(&mut data);
-
-    info!(
-        "{} 📨 stage #{} of {}: Sending <yellow>{:?}</> frame to phone...",
-        NAME, stage, STAGES, id
-    );
-
-    Ok(stream.write(&packet).await?)
-}
-
-async fn read_message(
-    stream: &mut Stream,
-    stage: u8,
-    id: MessageId,
-    started: Instant,
-) -> Result<usize> {
-    let mut buf = vec![0; HEADER_LEN];
-    let n = stream.read_exact(&mut buf).await?;
-    debug!("received {} bytes: {:02X?}", n, buf);
-    let elapsed = started.elapsed();
-
-    let len: usize = u16::from_be_bytes(buf[0..=1].try_into()?).into();
-    let message_id = u16::from_be_bytes(buf[2..=3].try_into()?);
-    debug!("MessageID = {}, len = {}", message_id, len);
-
-    if message_id != id.clone() as u16 {
-        warn!(
-            "Received data has invalid MessageID: got: {:?}, expected: {:?}",
-            message_id, id
+    async fn cleanup_failed_bluetooth_connect(device: &Device) -> Result<()> {
+        let cleanup_delay = Duration::from_secs(2);
+        let _ = timeout(cleanup_delay, device.disconnect()).await;
+        debug!(
+            "{} Cleaned up bluetooth connection for device: {:?}",
+            NAME,
+            device.name().await
         );
-    }
-    info!(
-        "{} 📨 stage #{} of {}: Received <yellow>{:?}</> frame from phone (⏱️ {} ms)",
-        NAME,
-        stage,
-        STAGES,
-        id,
-        (elapsed.as_secs() * 1_000) + (elapsed.subsec_nanos() / 1_000_000) as u64,
-    );
-
-    // read and discard the remaining bytes
-    if len > 0 {
-        let mut buf = vec![0; len];
-        let n = stream.read_exact(&mut buf).await?;
-        debug!("remaining {} bytes: {:02X?}", n, buf);
-
-        // analyzing WifiConnectStatus
-        // this is a frame where phone cannot connect to WiFi:
-        // [08, FD, FF, FF, FF, FF, FF, FF, FF, FF, 01] -> which is -i64::MAX
-        // and this is where all is fine:
-        // [08, 00]
-        if id == MessageId::WifiConnectStatus && n >= 2 {
-            if buf[1] != 0 {
-                return Err("phone cannot connect to our WiFi AP...".into());
-            }
-        }
+        Ok(())
     }
 
-    Ok(HEADER_LEN + len)
-}
-
-impl Bluetooth {
     pub async fn bluetooth_stop(&mut self) -> Result<()> {
         //info!("{} 🥷 Unregistering default agent", NAME);
         //drop(state.handle_agent);
