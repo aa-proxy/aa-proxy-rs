@@ -59,7 +59,7 @@ pub struct Bluetooth {
     adapter: Adapter,
     handle_aa: ProfileHandle,
     handle_hsp: Option<ProfileHandle>,
-    task_hsp: Option<JoinHandle<Result<ProfileHandle>>>,
+    task_hsp: Option<JoinHandle<()>>,
     handle_agent: AgentHandle,
     btle_handle: Option<bluer::gatt::local::ApplicationHandle>,
     adv_handle: Option<bluer::adv::AdvertisementHandle>,
@@ -117,6 +117,7 @@ pub async fn init(
     info!("{} 📱 AA Wireless Profile: registered", NAME);
 
     let mut handle_hsp = None;
+    let mut task_hsp = None;
     if !dongle_mode {
         // Headset profile
         let profile = Profile {
@@ -127,9 +128,21 @@ pub async fn init(
             ..Default::default()
         };
         match session.register_profile(profile).await {
-            Ok(handle) => {
+            Ok(mut handle) => {
                 info!("{} 🎧 Headset Profile (HSP): registered", NAME);
-                handle_hsp = Some(handle);
+                // handling connection to headset profile in own task
+                // it only accepts each incoming connection
+                task_hsp = Some(tokio::spawn(async move {
+                    loop {
+                        let req = handle.next().await.expect("received no connect request");
+                        info!(
+                            "{} 🎧 Headset Profile (HSP): connect from: <b>{}</>",
+                            NAME,
+                            req.device()
+                        );
+                        let _ = req.accept();
+                    }
+                }));
             }
             Err(e) => {
                 warn!(
@@ -145,7 +158,7 @@ pub async fn init(
         adapter,
         handle_aa,
         handle_hsp,
-        task_hsp: None,
+        task_hsp,
         handle_agent,
         btle_handle: None,
         adv_handle: None,
@@ -285,26 +298,21 @@ impl Bluetooth {
         info!("{} ⏳ Waiting for phone to connect via bluetooth...", NAME);
 
         // try to connect to saved devices or provided one via command line
-        let mut connect_task: Option<JoinHandle<Result<()>>> = None;
         if let Some(addresses_to_connect) = connect.0 {
             if !stopped {
                 let adapter_cloned = self.adapter.clone();
 
-                connect_task = Some(tokio::spawn(async move {
-                    let addresses: Vec<Address> = if addresses_to_connect
-                        .iter()
-                        .any(|addr| *addr == Address::any())
-                    {
-                        info!("{} 🥏 Enumerating known bluetooth devices...", NAME);
-                        adapter_cloned.device_addresses().await?
-                    } else {
-                        addresses_to_connect
-                    };
-                    // exit if we don't have anything to connect to
-                    if addresses.is_empty() {
-                        return Ok(());
-                    }
-
+                let addresses: Vec<Address> = if addresses_to_connect
+                    .iter()
+                    .any(|addr| *addr == Address::any())
+                {
+                    info!("{} 🥏 Enumerating known bluetooth devices...", NAME);
+                    adapter_cloned.device_addresses().await?
+                } else {
+                    addresses_to_connect
+                };
+                // exit if we don't have anything to connect to
+                if !addresses.is_empty() {
                     info!("{} 🧲 Attempting to start an AndroidAuto session via bluetooth with the following devices, in this order: {:?}", NAME, addresses);
                     let try_connect_bluetooth_addresses_retry = || {
                         Bluetooth::try_connect_bluetooth_addresses(
@@ -332,69 +340,19 @@ impl Bluetooth {
                             },
                         )
                         .await?;
-                    return Ok(());
-                }));
-            }
-        }
-
-        // handling connection to headset profile in own task
-        let mut task_hsp = {
-            if let Some(mut handle_hsp) = self.handle_hsp.take() {
-                Some(tokio::spawn(async move {
-                    let req = handle_hsp
-                        .next()
-                        .await
-                        .expect("received no connect request");
-                    info!(
-                        "{} 🎧 Headset Profile (HSP): connect from: <b>{}</>",
-                        NAME,
-                        req.device()
-                    );
-                    req.accept()?;
-
-                    Ok(handle_hsp)
-                }))
-            } else {
-                None
-            }
-        };
-
-        /// we might have a tasks which should be aborted on errors
-        /// this function is taking care of this before next bluetooth
-        /// connection attempts
-        fn abort_tasks(
-            t1: &mut Option<JoinHandle<Result<()>>>,
-            t2: &mut Option<JoinHandle<Result<ProfileHandle>>>,
-        ) {
-            if let Some(task) = t1 {
-                task.abort();
-            }
-            if let Some(task) = t2 {
-                task.abort();
+                }
             }
         }
 
         let req = timeout(bt_timeout, self.handle_aa.next())
-            .await
-            .map_err(|e| {
-                abort_tasks(&mut connect_task, &mut task_hsp);
-                e
-            })?
+            .await?
             .expect("received no connect request");
         info!(
             "{} 📱 AA Wireless Profile: connect from: <b>{}</>",
             NAME,
             req.device()
         );
-        let stream = req.accept().map_err(|e| {
-            abort_tasks(&mut connect_task, &mut task_hsp);
-            e
-        })?;
-
-        // we have a connection from phone, stop connect_task
-        if let Some(task) = connect_task {
-            task.abort();
-        }
+        let stream = req.accept()?;
 
         Ok(stream)
     }
@@ -583,25 +541,6 @@ impl Bluetooth {
         //drop(state.handle_agent);
         //info!("{} 📱 Removing AA profile", NAME);
         //drop(state.handle_aa);
-
-        // HSP profile is/was running in own task
-        if let Some(handle) = self.task_hsp.take() {
-            match timeout(Duration::from_secs_f32(2.5), handle).await {
-                Ok(task_handle) => match task_handle? {
-                    Ok(handle_hsp) => {
-                        info!("{} 🎧 Removing HSP profile", NAME);
-                        drop(handle_hsp);
-                    }
-                    Err(e) => {
-                        warn!("{} 🎧 HSP profile error: {}", NAME, e);
-                    }
-                },
-                Err(e) => {
-                    warn!("{} 🎧 Error waiting for HSP profile task: {}", NAME, e);
-                }
-            }
-        }
-
         Ok(())
     }
 
