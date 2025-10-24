@@ -297,7 +297,6 @@ async fn tokio_main(
                 wifi_conf.clone().unwrap(),
                 tcp_start.clone(),
                 Duration::from_secs(cfg.bt_timeout_secs.into()),
-                state.clone(),
                 cfg.action_requested == Some(Action::Stop),
             )
             .await

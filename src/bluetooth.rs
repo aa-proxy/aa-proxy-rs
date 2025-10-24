@@ -116,7 +116,7 @@ pub async fn init(
     let handle_aa = session.register_profile(profile).await?;
     info!("{} 📱 AA Wireless Profile: registered", NAME);
 
-    let mut handle_hsp = None;
+    let handle_hsp = None;
     let mut task_hsp = None;
     if !dongle_mode {
         // Headset profile
@@ -253,7 +253,6 @@ async fn read_message(
 
 impl Bluetooth {
     pub async fn start_ble(&mut self, state: AppState, enable_btle: bool) -> Result<()> {
-        let mut success;
         // --- Start BLE GATT server first ---
         if enable_btle {
             match btle::run_btle_server(&self.adapter, state.clone()).await {
@@ -263,7 +262,6 @@ impl Bluetooth {
                 }
                 Err(e) => {
                     error!("{} 🥏 Failed to start BLE server: {}", NAME, e);
-                    success = false;
                 }
             }
         }
@@ -354,7 +352,6 @@ impl Bluetooth {
                         "{} 🥏 BLE advertisement completely failed after retries",
                         NAME
                     );
-                    success = false;
                 }
             }
         }
@@ -367,7 +364,6 @@ impl Bluetooth {
         dongle_mode: bool,
         connect: BluetoothAddressList,
         bt_timeout: Duration,
-        state: AppState,
         stopped: bool,
     ) -> Result<(Address, Stream)> {
         info!("{} ⏳ Waiting for phone to connect via bluetooth...", NAME);
@@ -541,7 +537,6 @@ impl Bluetooth {
         wifi_config: WifiConfig,
         tcp_start: Arc<Notify>,
         bt_timeout: Duration,
-        state: AppState,
         stopped: bool,
     ) -> Result<()> {
         use WifiInfoResponse::WifiInfoResponse;
@@ -551,7 +546,7 @@ impl Bluetooth {
 
         // Use the provided session and adapter instead of creating new ones
         let (address, mut stream) = self
-            .get_aa_profile_connection(dongle_mode, connect, bt_timeout, state, stopped)
+            .get_aa_profile_connection(dongle_mode, connect, bt_timeout, stopped)
             .await?;
 
         info!("{} 📲 Sending parameters via bluetooth to phone...", NAME);
