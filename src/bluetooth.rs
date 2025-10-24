@@ -6,7 +6,6 @@ use crate::web::AppState;
 use anyhow::anyhow;
 use backon::{ExponentialBuilder, Retryable};
 use bluer::{
-    agent::Agent,
     rfcomm::{Profile, ProfileHandle, Role, Stream},
     Adapter, Address, Device, Uuid,
 };
@@ -93,10 +92,6 @@ pub async fn init(
         adapter.set_discoverable(true).await?;
         adapter.set_discoverable_timeout(0).await?;
     }
-
-    // Default agent is probably needed when pairing for the first time
-    let agent = Agent::default();
-    let _ = session.register_agent(agent).await?;
 
     // AA Wireless profile
     let profile = Profile {
