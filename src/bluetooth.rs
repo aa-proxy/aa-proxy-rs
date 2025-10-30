@@ -514,24 +514,11 @@ impl Bluetooth {
         Ok(())
     }
 
-    pub async fn aa_handshake(
-        &mut self,
-        dongle_mode: bool,
-        connect: BluetoothAddressList,
-        wifi_config: WifiConfig,
-        tcp_start: Arc<Notify>,
-        bt_timeout: Duration,
-        stopped: bool,
-    ) -> Result<()> {
+    async fn send_params(wifi_config: WifiConfig, stream: &mut Stream) -> Result<()> {
         use WifiInfoResponse::WifiInfoResponse;
         use WifiStartRequest::WifiStartRequest;
         let mut stage = 1;
         let mut started;
-
-        // Use the provided session and adapter instead of creating new ones
-        let (address, mut stream) = self
-            .get_aa_profile_connection(dongle_mode, connect, bt_timeout, stopped)
-            .await?;
 
         info!("{} 📲 Sending parameters via bluetooth to phone...", NAME);
         let mut start_req = WifiStartRequest::new();
@@ -541,10 +528,10 @@ impl Bluetooth {
         );
         start_req.set_ip_address(wifi_config.ip_addr);
         start_req.set_port(wifi_config.port);
-        send_message(&mut stream, stage, MessageId::WifiStartRequest, start_req).await?;
+        send_message(stream, stage, MessageId::WifiStartRequest, start_req).await?;
         stage += 1;
         started = Instant::now();
-        read_message(&mut stream, stage, MessageId::WifiInfoRequest, started).await?;
+        read_message(stream, stage, MessageId::WifiInfoRequest, started).await?;
 
         let mut info = WifiInfoResponse::new();
         info!(
@@ -557,13 +544,31 @@ impl Bluetooth {
         info.set_security_mode(SecurityMode::WPA2_PERSONAL);
         info.set_access_point_type(AccessPointType::DYNAMIC);
         stage += 1;
-        send_message(&mut stream, stage, MessageId::WifiInfoResponse, info).await?;
+        send_message(stream, stage, MessageId::WifiInfoResponse, info).await?;
         stage += 1;
         started = Instant::now();
-        read_message(&mut stream, stage, MessageId::WifiStartResponse, started).await?;
+        read_message(stream, stage, MessageId::WifiStartResponse, started).await?;
         stage += 1;
         started = Instant::now();
-        read_message(&mut stream, stage, MessageId::WifiConnectStatus, started).await?;
+        read_message(stream, stage, MessageId::WifiConnectStatus, started).await?;
+
+        Ok(())
+    }
+
+    pub async fn aa_handshake(
+        &mut self,
+        dongle_mode: bool,
+        connect: BluetoothAddressList,
+        wifi_config: WifiConfig,
+        tcp_start: Arc<Notify>,
+        bt_timeout: Duration,
+        stopped: bool,
+    ) -> Result<()> {
+        // Use the provided session and adapter instead of creating new ones
+        let (address, mut stream) = self
+            .get_aa_profile_connection(dongle_mode, connect, bt_timeout, stopped)
+            .await?;
+        Self::send_params(wifi_config.clone(), &mut stream).await?;
         tcp_start.notify_one();
 
         // handshake complete, now disconnect the device so it should
