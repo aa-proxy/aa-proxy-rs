@@ -285,7 +285,7 @@ async fn tcp_wait_for_connection(listener: &mut TcpListener) -> Result<TcpStream
 }
 
 pub async fn io_loop(
-    need_restart: BroadcastSender<()>,
+    need_restart: BroadcastSender<Option<Action>>,
     tcp_start: Arc<Notify>,
     config: SharedConfig,
     tx: Arc<Mutex<Option<Sender<Packet>>>>,
@@ -334,7 +334,7 @@ pub async fn io_loop(
                     error!("{} 🔴 Enabling Android Auto: {}", NAME, e);
                     // notify main loop to restart
                     if !profile_connected.load(Ordering::Relaxed) {
-                        let _ = need_restart.send(());
+                        let _ = need_restart.send(None);
                     }
                     continue;
                 }
@@ -355,7 +355,7 @@ pub async fn io_loop(
             } else {
                 // notify main loop to restart
                 if !profile_connected.load(Ordering::Relaxed) {
-                    let _ = need_restart.send(());
+                    let _ = need_restart.send(None);
                 }
                 continue;
             }
@@ -371,7 +371,7 @@ pub async fn io_loop(
             } else {
                 // notify main loop to restart
                 if !profile_connected.load(Ordering::Relaxed) {
-                    let _ = need_restart.send(());
+                    let _ = need_restart.send(None);
                 }
                 continue;
             }
@@ -392,7 +392,7 @@ pub async fn io_loop(
                     error!("{} 🔴 Error opening USB accessory: {}", NAME, e);
                     // notify main loop to restart
                     if !profile_connected.load(Ordering::Relaxed) {
-                        let _ = need_restart.send(());
+                        let _ = need_restart.send(None);
                     }
                     continue;
                 }
@@ -552,8 +552,10 @@ pub async fn io_loop(
             NAME,
             format_duration(started.elapsed()).to_string()
         );
+        // obtain action for passing it to broadcast sender
+        let action = shared_config.read().await.action_requested.clone();
         // stream(s) closed, notify main loop to restart
-        let _ = need_restart.send(());
+        let _ = need_restart.send(action);
     }
 
     #[allow(unreachable_code)]

@@ -1,4 +1,5 @@
 use crate::btle;
+use crate::config::Action;
 use crate::config::WifiConfig;
 use crate::config::IDENTITY_NAME;
 use crate::config_types::BluetoothAddressList;
@@ -567,7 +568,7 @@ impl Bluetooth {
         bt_timeout: Duration,
         stopped: bool,
         quick_reconnect: bool,
-        mut need_restart: BroadcastReceiver<()>,
+        mut need_restart: BroadcastReceiver<Option<Action>>,
         profile_connected: Arc<AtomicBool>,
     ) -> Result<()> {
         // Use the provided session and adapter instead of creating new ones
@@ -580,11 +581,22 @@ impl Bluetooth {
         if quick_reconnect {
             // keep the bluetooth profile connection alive
             // and use it in a loop to restart handshake when necessary
+            let adapter_cloned = self.adapter.clone();
             let _ = Some(tokio::spawn(async move {
                 profile_connected.store(true, Ordering::Relaxed);
                 loop {
                     // wait for restart notification from main loop (eg when HU disconnected)
-                    let _ = need_restart.recv().await;
+                    let action = need_restart.recv().await;
+                    if let Ok(Some(action)) = action {
+                        // check if we need to stop now
+                        if action == Action::Stop {
+                            // disconnect and break
+                            if let Ok(device) = adapter_cloned.device(bluer::Address(*address)) {
+                                let _ = device.disconnect().await;
+                            }
+                            break;
+                        }
+                    }
 
                     // now restart handshake with the same params
                     match Self::send_params(wifi_config.clone(), &mut stream).await {

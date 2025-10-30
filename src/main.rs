@@ -183,7 +183,7 @@ async fn action_handler(config: &mut SharedConfig) {
 async fn tokio_main(
     config: SharedConfig,
     config_json: SharedConfigJson,
-    restart_tx: BroadcastSender<()>,
+    restart_tx: BroadcastSender<Option<Action>>,
     tcp_start: Arc<Notify>,
     config_file: PathBuf,
     tx: Arc<Mutex<Option<Sender<Packet>>>>,
@@ -296,7 +296,9 @@ async fn tokio_main(
         }
 
         // run only if not handling this in handshake task
-        if !(cfg.quick_reconnect && profile_connected.load(Ordering::Relaxed)) {
+        if !(cfg.quick_reconnect && profile_connected.load(Ordering::Relaxed))
+            || cfg.action_requested == Some(Action::Stop)
+        {
             // bluetooth handshake
             if let Err(e) = bluetooth
                 .aa_handshake(
