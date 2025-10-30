@@ -11,10 +11,13 @@ use bluer::{
 };
 use futures::StreamExt;
 use simplelog::*;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::broadcast::Receiver as BroadcastReceiver;
 use tokio::sync::Notify;
 use tokio::time::timeout;
 
@@ -563,6 +566,9 @@ impl Bluetooth {
         tcp_start: Arc<Notify>,
         bt_timeout: Duration,
         stopped: bool,
+        quick_reconnect: bool,
+        mut need_restart: BroadcastReceiver<()>,
+        profile_connected: Arc<AtomicBool>,
     ) -> Result<()> {
         // Use the provided session and adapter instead of creating new ones
         let (address, mut stream) = self
@@ -571,10 +577,40 @@ impl Bluetooth {
         Self::send_params(wifi_config.clone(), &mut stream).await?;
         tcp_start.notify_one();
 
-        // handshake complete, now disconnect the device so it should
-        // connect to real HU for calls
-        let device = self.adapter.device(bluer::Address(*address))?;
-        let _ = device.disconnect().await;
+        if quick_reconnect {
+            // keep the bluetooth profile connection alive
+            // and use it in a loop to restart handshake when necessary
+            let _ = Some(tokio::spawn(async move {
+                profile_connected.store(true, Ordering::Relaxed);
+                loop {
+                    // wait for restart notification from main loop (eg when HU disconnected)
+                    let _ = need_restart.recv().await;
+
+                    // now restart handshake with the same params
+                    match Self::send_params(wifi_config.clone(), &mut stream).await {
+                        Ok(_) => {
+                            tcp_start.notify_one();
+                            continue;
+                        }
+                        Err(e) => {
+                            error!(
+                                "{} handshake restart error: {}, doing full restart!",
+                                NAME, e
+                            );
+                            // this break should end this task
+                            break;
+                        }
+                    }
+                }
+                // we are now disconnected, redo bluetooth connection
+                profile_connected.store(false, Ordering::Relaxed);
+            }));
+        } else {
+            // handshake complete, now disconnect the device so it should
+            // connect to real HU for calls
+            let device = self.adapter.device(bluer::Address(*address))?;
+            let _ = device.disconnect().await;
+        }
 
         info!("{} 🚀 Bluetooth launch sequence completed", NAME);
 

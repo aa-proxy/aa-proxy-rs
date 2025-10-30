@@ -19,10 +19,14 @@ use std::fs;
 use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use tokio::runtime::Builder;
+use tokio::sync::broadcast;
+use tokio::sync::broadcast::Sender as BroadcastSender;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
@@ -179,12 +183,13 @@ async fn action_handler(config: &mut SharedConfig) {
 async fn tokio_main(
     config: SharedConfig,
     config_json: SharedConfigJson,
-    need_restart: Arc<Notify>,
+    restart_tx: BroadcastSender<()>,
     tcp_start: Arc<Notify>,
     config_file: PathBuf,
     tx: Arc<Mutex<Option<Sender<Packet>>>>,
     sensor_channel: Arc<Mutex<Option<u8>>>,
     led_support: bool,
+    profile_connected: Arc<AtomicBool>,
 ) -> Result<()> {
     let accessory_started = Arc::new(Notify::new());
     let accessory_started_cloned = accessory_started.clone();
@@ -275,6 +280,7 @@ async fn tokio_main(
 
     // main connection loop
     let change_usb_order = cfg.change_usb_order;
+    let mut need_restart = restart_tx.subscribe();
     loop {
         if let Some(ref mut leds) = led_manager {
             leds.set_led(LedColor::Green, LedMode::Heartbeat).await;
@@ -289,21 +295,27 @@ async fn tokio_main(
             enable_usb_if_present(&mut usb, accessory_started.clone()).await;
         }
 
-        // bluetooth handshake
-        if let Err(e) = bluetooth
-            .aa_handshake(
-                cfg.dongle_mode,
-                cfg.connect.clone(),
-                wifi_conf.clone().unwrap(),
-                tcp_start.clone(),
-                Duration::from_secs(cfg.bt_timeout_secs.into()),
-                cfg.action_requested == Some(Action::Stop),
-            )
-            .await
-        {
-            error!("{} bluetooth AA handshake error: {}", NAME, e);
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            continue;
+        // run only if not handling this in handshake task
+        if !(cfg.quick_reconnect && profile_connected.load(Ordering::Relaxed)) {
+            // bluetooth handshake
+            if let Err(e) = bluetooth
+                .aa_handshake(
+                    cfg.dongle_mode,
+                    cfg.connect.clone(),
+                    wifi_conf.clone().unwrap(),
+                    tcp_start.clone(),
+                    Duration::from_secs(cfg.bt_timeout_secs.into()),
+                    cfg.action_requested == Some(Action::Stop),
+                    cfg.quick_reconnect,
+                    restart_tx.subscribe(),
+                    profile_connected.clone(),
+                )
+                .await
+            {
+                error!("{} bluetooth AA handshake error: {}", NAME, e);
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                continue;
+            }
         }
 
         if !change_usb_order {
@@ -315,14 +327,21 @@ async fn tokio_main(
             leds.set_led(LedColor::Blue, LedMode::On).await;
         }
         // wait for restart notification
-        need_restart.notified().await;
+        let _ = need_restart.recv().await;
+        if !(cfg.quick_reconnect && profile_connected.load(Ordering::Relaxed)) {
+            info!(
+                "{} 📵 TCP/USB connection closed or not started, trying again...",
+                NAME
+            );
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        } else {
+            info!(
+                "{} 📵 TCP/USB connection closed or not started, quick restart...",
+                NAME
+            );
+        }
 
         // TODO: make proper main loop with cancelation
-        info!(
-            "{} 📵 TCP/USB connection closed or not started, trying again...",
-            NAME
-        );
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         // re-read config
         cfg = config.read().await.clone();
     }
@@ -525,8 +544,7 @@ fn main() -> Result<()> {
     }
 
     // notify for syncing threads
-    let need_restart = Arc::new(Notify::new());
-    let need_restart_cloned = need_restart.clone();
+    let (restart_tx, _) = broadcast::channel(1);
     let tcp_start = Arc::new(Notify::new());
     let tcp_start_cloned = tcp_start.clone();
     let config = Arc::new(RwLock::new(config));
@@ -536,30 +554,35 @@ fn main() -> Result<()> {
     let tx_cloned = tx.clone();
     let sensor_channel = Arc::new(Mutex::new(None));
     let sensor_channel_cloned = sensor_channel.clone();
+    let profile_connected = Arc::new(AtomicBool::new(false));
 
     // build and spawn main tokio runtime
     let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
+    let restart_tx_cloned = restart_tx.clone();
+    let profile_connected_cloned = profile_connected.clone();
     runtime.spawn(async move {
         tokio_main(
             config_cloned,
             config_json.clone(),
-            need_restart,
+            restart_tx_cloned,
             tcp_start,
             args.config.clone(),
             tx_cloned,
             sensor_channel_cloned,
             led_support,
+            profile_connected_cloned,
         )
         .await
     });
 
     // start tokio_uring runtime simultaneously
     let _ = tokio_uring::start(io_loop(
-        need_restart_cloned,
+        restart_tx,
         tcp_start_cloned,
         config,
         tx,
         sensor_channel,
+        profile_connected,
     ));
 
     info!(

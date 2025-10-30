@@ -4,11 +4,12 @@ use simplelog::*;
 use std::cell::RefCell;
 use std::marker::PhantomData;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::copy_bidirectional;
 use tokio::net::TcpStream as TokioTcpStream;
+use tokio::sync::broadcast::Sender as BroadcastSender;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, Mutex, Notify};
 use tokio::task::JoinHandle;
@@ -284,11 +285,12 @@ async fn tcp_wait_for_connection(listener: &mut TcpListener) -> Result<TcpStream
 }
 
 pub async fn io_loop(
-    need_restart: Arc<Notify>,
+    need_restart: BroadcastSender<()>,
     tcp_start: Arc<Notify>,
     config: SharedConfig,
     tx: Arc<Mutex<Option<Sender<Packet>>>>,
     sensor_channel: Arc<Mutex<Option<u8>>>,
+    profile_connected: Arc<AtomicBool>,
 ) -> Result<()> {
     let shared_config = config.clone();
     #[allow(unused_variables)]
@@ -331,7 +333,9 @@ pub async fn io_loop(
                 Err(e) => {
                     error!("{} 🔴 Enabling Android Auto: {}", NAME, e);
                     // notify main loop to restart
-                    need_restart.notify_one();
+                    if !profile_connected.load(Ordering::Relaxed) {
+                        let _ = need_restart.send(());
+                    }
                     continue;
                 }
                 Ok(s) => {
@@ -350,7 +354,9 @@ pub async fn io_loop(
                 md_tcp = Some(s);
             } else {
                 // notify main loop to restart
-                need_restart.notify_one();
+                if !profile_connected.load(Ordering::Relaxed) {
+                    let _ = need_restart.send(());
+                }
                 continue;
             }
         }
@@ -364,7 +370,9 @@ pub async fn io_loop(
                 hu_tcp = Some(s);
             } else {
                 // notify main loop to restart
-                need_restart.notify_one();
+                if !profile_connected.load(Ordering::Relaxed) {
+                    let _ = need_restart.send(());
+                }
                 continue;
             }
         } else {
@@ -383,7 +391,9 @@ pub async fn io_loop(
                 Err(e) => {
                     error!("{} 🔴 Error opening USB accessory: {}", NAME, e);
                     // notify main loop to restart
-                    need_restart.notify_one();
+                    if !profile_connected.load(Ordering::Relaxed) {
+                        let _ = need_restart.send(());
+                    }
                     continue;
                 }
             }
@@ -543,7 +553,7 @@ pub async fn io_loop(
             format_duration(started.elapsed()).to_string()
         );
         // stream(s) closed, notify main loop to restart
-        need_restart.notify_one();
+        let _ = need_restart.send(());
     }
 
     #[allow(unreachable_code)]
