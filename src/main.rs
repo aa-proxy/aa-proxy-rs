@@ -203,7 +203,7 @@ async fn tokio_main(
         None
     };
 
-    let cfg = config.read().await.clone();
+    let mut cfg = config.read().await.clone();
     if let Some(ref bindaddr) = cfg.webserver {
         // preparing AppState and starting webserver
         let app = web::app(state.clone().into());
@@ -323,6 +323,8 @@ async fn tokio_main(
             NAME
         );
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        // re-read config
+        cfg = config.read().await.clone();
     }
 }
 
