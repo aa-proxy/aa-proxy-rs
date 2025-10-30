@@ -60,6 +60,10 @@
           "typ": "boolean",
           "description": "Enable legacy USB mode (some HeadUnits/cars needs this enabled for compatibility)"
         },
+        "quick_reconnect": {
+          "typ": "boolean",
+          "description": "EXPERIMENTAL: Maintain persistent Bluetooth connection to enable faster reconnection with MD"
+        },
         "wired": {
           "typ": "string",
           "description": "Enable wired USB connection to phone (VID:PID should be specified, zero is wildcard and can be used for single or both fields)\nyou can obtain it e.g. using `lsusb` after connecting phone,\nand then use e.g. \"18d1:0\" which will handle specified phone vendor ID (Google Pixel in this example)"

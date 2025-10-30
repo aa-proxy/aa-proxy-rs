@@ -84,6 +84,7 @@ pub struct AppConfig {
     pub hexdump_level: HexdumpLevel,
     pub disable_console_debug: bool,
     pub legacy: bool,
+    pub quick_reconnect: bool,
     pub connect: BluetoothAddressList,
     pub logfile: PathBuf,
     pub stats_interval: u16,
@@ -224,6 +225,7 @@ impl Default for AppConfig {
             hexdump_level: HexdumpLevel::Disabled,
             disable_console_debug: false,
             legacy: true,
+            quick_reconnect: false,
             connect: BluetoothAddressList::default(),
             logfile: "/var/log/aa-proxy-rs.log".into(),
             stats_interval: 0,
@@ -315,6 +317,7 @@ impl AppConfig {
         doc["hexdump_level"] = value(format!("{:?}", self.hexdump_level));
         doc["disable_console_debug"] = value(self.disable_console_debug);
         doc["legacy"] = value(self.legacy);
+        doc["quick_reconnect"] = value(self.quick_reconnect);
         doc["connect"] = value(self.connect.to_string());
         doc["logfile"] = value(self.logfile.display().to_string());
         doc["stats_interval"] = value(self.stats_interval as i64);

@@ -1,4 +1,5 @@
 use crate::btle;
+use crate::config::Action;
 use crate::config::WifiConfig;
 use crate::config::IDENTITY_NAME;
 use crate::config_types::BluetoothAddressList;
@@ -11,10 +12,13 @@ use bluer::{
 };
 use futures::StreamExt;
 use simplelog::*;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::broadcast::Receiver as BroadcastReceiver;
 use tokio::sync::Notify;
 use tokio::time::timeout;
 
@@ -514,24 +518,11 @@ impl Bluetooth {
         Ok(())
     }
 
-    pub async fn aa_handshake(
-        &mut self,
-        dongle_mode: bool,
-        connect: BluetoothAddressList,
-        wifi_config: WifiConfig,
-        tcp_start: Arc<Notify>,
-        bt_timeout: Duration,
-        stopped: bool,
-    ) -> Result<()> {
+    async fn send_params(wifi_config: WifiConfig, stream: &mut Stream) -> Result<()> {
         use WifiInfoResponse::WifiInfoResponse;
         use WifiStartRequest::WifiStartRequest;
         let mut stage = 1;
         let mut started;
-
-        // Use the provided session and adapter instead of creating new ones
-        let (address, mut stream) = self
-            .get_aa_profile_connection(dongle_mode, connect, bt_timeout, stopped)
-            .await?;
 
         info!("{} 📲 Sending parameters via bluetooth to phone...", NAME);
         let mut start_req = WifiStartRequest::new();
@@ -541,10 +532,10 @@ impl Bluetooth {
         );
         start_req.set_ip_address(wifi_config.ip_addr);
         start_req.set_port(wifi_config.port);
-        send_message(&mut stream, stage, MessageId::WifiStartRequest, start_req).await?;
+        send_message(stream, stage, MessageId::WifiStartRequest, start_req).await?;
         stage += 1;
         started = Instant::now();
-        read_message(&mut stream, stage, MessageId::WifiInfoRequest, started).await?;
+        read_message(stream, stage, MessageId::WifiInfoRequest, started).await?;
 
         let mut info = WifiInfoResponse::new();
         info!(
@@ -557,19 +548,81 @@ impl Bluetooth {
         info.set_security_mode(SecurityMode::WPA2_PERSONAL);
         info.set_access_point_type(AccessPointType::DYNAMIC);
         stage += 1;
-        send_message(&mut stream, stage, MessageId::WifiInfoResponse, info).await?;
+        send_message(stream, stage, MessageId::WifiInfoResponse, info).await?;
         stage += 1;
         started = Instant::now();
-        read_message(&mut stream, stage, MessageId::WifiStartResponse, started).await?;
+        read_message(stream, stage, MessageId::WifiStartResponse, started).await?;
         stage += 1;
         started = Instant::now();
-        read_message(&mut stream, stage, MessageId::WifiConnectStatus, started).await?;
+        read_message(stream, stage, MessageId::WifiConnectStatus, started).await?;
+
+        Ok(())
+    }
+
+    pub async fn aa_handshake(
+        &mut self,
+        dongle_mode: bool,
+        connect: BluetoothAddressList,
+        wifi_config: WifiConfig,
+        tcp_start: Arc<Notify>,
+        bt_timeout: Duration,
+        stopped: bool,
+        quick_reconnect: bool,
+        mut need_restart: BroadcastReceiver<Option<Action>>,
+        profile_connected: Arc<AtomicBool>,
+    ) -> Result<()> {
+        // Use the provided session and adapter instead of creating new ones
+        let (address, mut stream) = self
+            .get_aa_profile_connection(dongle_mode, connect, bt_timeout, stopped)
+            .await?;
+        Self::send_params(wifi_config.clone(), &mut stream).await?;
         tcp_start.notify_one();
 
-        // handshake complete, now disconnect the device so it should
-        // connect to real HU for calls
-        let device = self.adapter.device(bluer::Address(*address))?;
-        let _ = device.disconnect().await;
+        if quick_reconnect {
+            // keep the bluetooth profile connection alive
+            // and use it in a loop to restart handshake when necessary
+            let adapter_cloned = self.adapter.clone();
+            let _ = Some(tokio::spawn(async move {
+                profile_connected.store(true, Ordering::Relaxed);
+                loop {
+                    // wait for restart notification from main loop (eg when HU disconnected)
+                    let action = need_restart.recv().await;
+                    if let Ok(Some(action)) = action {
+                        // check if we need to stop now
+                        if action == Action::Stop {
+                            // disconnect and break
+                            if let Ok(device) = adapter_cloned.device(bluer::Address(*address)) {
+                                let _ = device.disconnect().await;
+                            }
+                            break;
+                        }
+                    }
+
+                    // now restart handshake with the same params
+                    match Self::send_params(wifi_config.clone(), &mut stream).await {
+                        Ok(_) => {
+                            tcp_start.notify_one();
+                            continue;
+                        }
+                        Err(e) => {
+                            error!(
+                                "{} handshake restart error: {}, doing full restart!",
+                                NAME, e
+                            );
+                            // this break should end this task
+                            break;
+                        }
+                    }
+                }
+                // we are now disconnected, redo bluetooth connection
+                profile_connected.store(false, Ordering::Relaxed);
+            }));
+        } else {
+            // handshake complete, now disconnect the device so it should
+            // connect to real HU for calls
+            let device = self.adapter.device(bluer::Address(*address))?;
+            let _ = device.disconnect().await;
+        }
 
         info!("{} 🚀 Bluetooth launch sequence completed", NAME);
 
