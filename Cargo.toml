@@ -57,6 +57,9 @@ sha2 = "0.10.9"
 libc = "0.2.177"
 time = { version = "0.3", features = ["parsing"] }
 
+[patch.crates-io]
+tokio-uring = { git = "https://github.com/manio/tokio-uring", branch = "musl-riscv" }
+
 [build-dependencies]
 protoc-bin-vendored = "3.1.0"
 protobuf-codegen = "3.7.1"
