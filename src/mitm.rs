@@ -839,6 +839,9 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
             tokio::select! {
             // handling data from opposite device's thread, which needs to be transmitted
             Some(pkt) = rx.recv() => {
+                debug!("{} rx.recv", get_name(proxy_type));
+                let _ = pkt_debug(proxy_type, HexdumpLevel::RawOutput, hex_requested, &pkt).await;
+
                 pkt.transmit(&mut device)
                     .await
                     .with_context(|| format!("proxy/{}: transmit failed", get_name(proxy_type)))?;
@@ -850,6 +853,9 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
 
             // handling input data from the reader thread
             Some(pkt) = rxr.recv() => {
+                debug!("{} rxr.recv", get_name(proxy_type));
+                let _ = pkt_debug(proxy_type, HexdumpLevel::RawOutput, hex_requested, &pkt).await;
+
                 tx.send(pkt).await?;
             }
             }
