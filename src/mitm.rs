@@ -717,13 +717,15 @@ async fn ssl_builder(proxy_type: ProxyType) -> Result<Ssl> {
 async fn read_input_data<A: Endpoint<A>>(
     rbuf: &mut VecDeque<u8>,
     obj: &mut IoDevice<A>,
+    l: usize,
 ) -> Result<()> {
-    let mut newdata = vec![0u8; BUFFER_LEN];
-    let n;
-    let len;
+    let mut newdata;
+    let mut n;
+    let mut len;
 
     match obj {
         IoDevice::UsbReader(device, _) => {
+            newdata = vec![0u8; BUFFER_LEN];
             let mut dev = device.borrow_mut();
             let retval = dev.read(&mut newdata);
             len = retval
@@ -731,6 +733,26 @@ async fn read_input_data<A: Endpoint<A>>(
                 .context("read_input_data: UsbReader read error")?;
         }
         IoDevice::EndpointIo(device) => {
+            if l == 4 {
+                newdata = vec![0u8; l];
+                let retval = device.read(newdata);
+                (n, newdata) = timeout(Duration::from_millis(15000), retval)
+                    .await
+                    .context("read_input_data: EndpointIo timeout")?;
+                len = n.context("read_input_data: EndpointIo read error")?;
+                rbuf.write(&newdata.clone().slice(..len))?;
+                // compute message length
+                let mut message_length = (newdata[3] as u16 + ((newdata[2] as u16) << 8)) as usize;
+
+                if (newdata[1] & FRAME_TYPE_MASK) == FRAME_TYPE_FIRST {
+                    // This means the header is 8 bytes long, we need to read four more bytes.
+                    message_length += 4;
+                }
+                let mut remain = message_length;
+                newdata = vec![0u8; remain];
+            } else {
+                newdata = vec![0u8; l];
+            }
             let retval = device.read(newdata);
             (n, newdata) = timeout(Duration::from_millis(15000), retval)
                 .await
@@ -738,6 +760,7 @@ async fn read_input_data<A: Endpoint<A>>(
             len = n.context("read_input_data: EndpointIo read error")?;
         }
         IoDevice::TcpStreamIo(device) => {
+            newdata = vec![0u8; 1];
             let retval = device.read(newdata);
             (n, newdata) = timeout(Duration::from_millis(15000), retval)
                 .await
@@ -756,10 +779,16 @@ async fn read_input_data<A: Endpoint<A>>(
 pub async fn endpoint_reader<A: Endpoint<A>>(
     mut device: IoDevice<A>,
     tx: Sender<Packet>,
+    hu: bool,
 ) -> Result<()> {
     let mut rbuf: VecDeque<u8> = VecDeque::new();
+    let mut len = BUFFER_LEN;
     loop {
-        read_input_data(&mut rbuf, &mut device).await?;
+        if !hu {
+            len = 4;
+        } else {
+        }
+        read_input_data(&mut rbuf, &mut device, len).await?;
         // check if we have complete packet available
         loop {
             if rbuf.len() > HEADER_LENGTH {
