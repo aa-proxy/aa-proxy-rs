@@ -47,6 +47,9 @@ This project is currently tested and built for the following boards that support
 - Raspberry Pi 5
 - [AAWireless TWO](https://www.aawireless.io/en/products/aawireless-two)
 - [Radxa Zero 3W](https://radxa.com/products/zeros/zero3w/)
+- [MilkV DuoS](https://milkv.io/duo-s)
+
+More details: https://aa-proxy.github.io/docs/supported-hardware
 
 > [!NOTE]
 > **Raspberry Pi 3 B+ is _not_ supported** due to the lack of USB OTG support.
