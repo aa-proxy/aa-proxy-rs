@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::broadcast::Receiver as BroadcastReceiver;
+use tokio::sync::broadcast::Sender as BroadcastSender;
 use tokio::sync::Notify;
 use tokio::time::timeout;
 
@@ -569,6 +570,7 @@ impl Bluetooth {
         stopped: bool,
         quick_reconnect: bool,
         mut need_restart: BroadcastReceiver<Option<Action>>,
+        restart_tx: BroadcastSender<Option<Action>>,
         profile_connected: Arc<AtomicBool>,
     ) -> Result<()> {
         // Use the provided session and adapter instead of creating new ones
@@ -616,6 +618,8 @@ impl Bluetooth {
                 }
                 // we are now disconnected, redo bluetooth connection
                 profile_connected.store(false, Ordering::Relaxed);
+                // main loop could now wait so send an event to restart
+                let _ = restart_tx.send(None);
             }));
         } else {
             // handshake complete, now disconnect the device so it should
