@@ -585,7 +585,6 @@ fn main() -> Result<()> {
         config,
         tx,
         sensor_channel,
-        profile_connected,
     ));
 
     info!(

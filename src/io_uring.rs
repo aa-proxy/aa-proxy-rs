@@ -4,7 +4,7 @@ use simplelog::*;
 use std::cell::RefCell;
 use std::marker::PhantomData;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::copy_bidirectional;
@@ -290,7 +290,6 @@ pub async fn io_loop(
     config: SharedConfig,
     tx: Arc<Mutex<Option<Sender<Packet>>>>,
     sensor_channel: Arc<Mutex<Option<u8>>>,
-    profile_connected: Arc<AtomicBool>,
 ) -> Result<()> {
     let shared_config = config.clone();
     #[allow(unused_variables)]
@@ -333,9 +332,7 @@ pub async fn io_loop(
                 Err(e) => {
                     error!("{} 🔴 Enabling Android Auto: {}", NAME, e);
                     // notify main loop to restart
-                    if !profile_connected.load(Ordering::Relaxed) {
-                        let _ = need_restart.send(None);
-                    }
+                    let _ = need_restart.send(None);
                     continue;
                 }
                 Ok(s) => {
@@ -354,9 +351,7 @@ pub async fn io_loop(
                 md_tcp = Some(s);
             } else {
                 // notify main loop to restart
-                if !profile_connected.load(Ordering::Relaxed) {
-                    let _ = need_restart.send(None);
-                }
+                let _ = need_restart.send(None);
                 continue;
             }
         }
@@ -370,9 +365,7 @@ pub async fn io_loop(
                 hu_tcp = Some(s);
             } else {
                 // notify main loop to restart
-                if !profile_connected.load(Ordering::Relaxed) {
-                    let _ = need_restart.send(None);
-                }
+                let _ = need_restart.send(None);
                 continue;
             }
         } else {
@@ -391,9 +384,7 @@ pub async fn io_loop(
                 Err(e) => {
                     error!("{} 🔴 Error opening USB accessory: {}", NAME, e);
                     // notify main loop to restart
-                    if !profile_connected.load(Ordering::Relaxed) {
-                        let _ = need_restart.send(None);
-                    }
+                    let _ = need_restart.send(None);
                     continue;
                 }
             }
