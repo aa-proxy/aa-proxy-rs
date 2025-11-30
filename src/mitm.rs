@@ -61,6 +61,10 @@ pub const ENCRYPTED: u8 = 1 << 3;
 // location for hu_/md_ private keys and certificates:
 const KEYS_PATH: &str = "/etc/aa-proxy-rs";
 
+// DHU string consts for developer mode
+pub const DHU_MAKE: &str = "Google";
+pub const DHU_MODEL: &str = "Desktop Head Unit";
+
 pub struct ModifyContext {
     sensor_channel: Option<u8>,
     nav_channel: Option<u8>,
@@ -580,8 +584,16 @@ pub async fn pkt_modify_hook(
 
             // enabling developer mode
             if cfg.developer_mode {
-                msg.set_make("Google".into());
-                msg.set_model("Desktop Head Unit".into());
+                msg.set_make(DHU_MAKE.into());
+                msg.set_model(DHU_MODEL.into());
+                msg.set_head_unit_make(DHU_MAKE.into());
+                msg.set_head_unit_model(DHU_MODEL.into());
+                if let Some(info) = msg.headunit_info.as_mut() {
+                    info.set_make(DHU_MAKE.into());
+                    info.set_model(DHU_MODEL.into());
+                    info.set_head_unit_make(DHU_MAKE.into());
+                    info.set_head_unit_model(DHU_MODEL.into());
+                }
                 info!(
                     "{} <yellow>{:?}</>: enabling developer mode",
                     get_name(proxy_type),
