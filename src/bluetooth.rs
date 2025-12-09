@@ -41,8 +41,6 @@ pub const AAWG_PROFILE_UUID: Uuid = Uuid::from_u128(0x4de17a0052cb11e6bdf4080020
 pub const BTLE_PROFILE_UUID: Uuid = Uuid::from_u128(0x9b3f6c10a4d2418ea2b90700300de8f4);
 const HSP_HS_UUID: Uuid = Uuid::from_u128(0x0000110800001000800000805f9b34fb);
 const HSP_AG_UUID: Uuid = Uuid::from_u128(0x0000111200001000800000805f9b34fb);
-const AV_REMOTE_CONTROL_TARGET_UUID: Uuid = Uuid::from_u128(0x0000110c00001000800000805f9b34fb);
-const AV_REMOTE_CONTROL_UUID: Uuid = Uuid::from_u128(0x00110e00001000800000805f9b34fb);
 
 #[derive(Debug, Clone, PartialEq)]
 #[repr(u16)]
@@ -431,72 +429,57 @@ impl Bluetooth {
             };
             info!("{} 🧲 Trying to connect to: {}{}", NAME, addr, dev_name);
             if let Ok(true) = adapter.device(*addr)?.is_paired().await {
-                let supported_uuids = device.uuids().await?.unwrap_or_default();
-                debug!(
-                    "{} Discovered device {} with service UUIDs {:?}",
-                    NAME, addr, &supported_uuids
-                );
-
-                if supported_uuids.contains(&AV_REMOTE_CONTROL_TARGET_UUID)
-                    && supported_uuids.contains(&AV_REMOTE_CONTROL_UUID)
-                {
-                    if !dongle_mode {
-                        match device.connect_profile(&HSP_AG_UUID).await {
-                            Ok(_) => {
-                                info!(
-                                    "{} 🔗 Successfully connected to device: {}{}",
-                                    NAME, addr, dev_name
-                                );
-                                return Ok(());
-                            }
-                            Err(e) => {
-                                warn!("{} 🔇 {}{}: Error connecting: {}", NAME, addr, dev_name, e)
-                            }
+                if !dongle_mode {
+                    match device.connect_profile(&HSP_AG_UUID).await {
+                        Ok(_) => {
+                            info!(
+                                "{} 🔗 Successfully connected to device: {}{}",
+                                NAME, addr, dev_name
+                            );
+                            return Ok(());
                         }
-                    } else {
-                        match device.connect().await {
-                            Ok(_) => {
-                                info!(
-                                    "{} 🔗 Successfully connected to device: {}{}",
-                                    NAME, addr, dev_name
-                                );
-                                return Ok(());
-                            }
-                            Err(e) => {
-                                // should be handled with the following code:
-                                // match e.kind {bluer::ErrorKind::ConnectionAttemptFailed} ...
-                                // but the problem is that not all errors are defined in bluer,
-                                // so just fallback for text-searching in error :(
-                                let error_text = e.to_string();
-
-                                if let Some(code) =
-                                    error_text.splitn(2, ':').nth(1).map(|s| s.trim())
-                                {
-                                    if code == "br-connection-page-timeout"
-                                        || code == "br-connection-canceled"
-                                    {
-                                        warn!(
-                                            "{} 🔇 {}{}: Error connecting: {}",
-                                            NAME, addr, dev_name, e
-                                        );
-                                        Bluetooth::cleanup_failed_bluetooth_connect(&device)
-                                            .await?;
-                                    } else {
-                                        info!(
-                                    "{} 🔗 Connection success, waiting for AA profile connection: {}{}, ignored error: {}",
-                                    NAME, addr, dev_name, e
-                                );
-                                        return Ok(());
-                                    }
-                                } else {
-                                    warn!("{} Unknown bluetooth error: {}", NAME, e);
-                                    Bluetooth::cleanup_failed_bluetooth_connect(&device).await?;
-                                }
-                            }
+                        Err(e) => {
+                            warn!("{} 🔇 {}{}: Error connecting: {}", NAME, addr, dev_name, e)
                         }
                     }
                 } else {
-                    warn!("{} 🧲 Will not try to connect to: {}{} device does not have the required Android Auto device profiles", NAME, addr, dev_name);
+                    match device.connect().await {
+                        Ok(_) => {
+                            info!(
+                                "{} 🔗 Successfully connected to device: {}{}",
+                                NAME, addr, dev_name
+                            );
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            // should be handled with the following code:
+                            // match e.kind {bluer::ErrorKind::ConnectionAttemptFailed} ...
+                            // but the problem is that not all errors are defined in bluer,
+                            // so just fallback for text-searching in error :(
+                            let error_text = e.to_string();
+
+                            if let Some(code) = error_text.splitn(2, ':').nth(1).map(|s| s.trim()) {
+                                if code == "br-connection-page-timeout"
+                                    || code == "br-connection-canceled"
+                                {
+                                    warn!(
+                                        "{} 🔇 {}{}: Error connecting: {}",
+                                        NAME, addr, dev_name, e
+                                    );
+                                    Bluetooth::cleanup_failed_bluetooth_connect(&device).await?;
+                                } else {
+                                    info!(
+                                    "{} 🔗 Connection success, waiting for AA profile connection: {}{}, ignored error: {}",
+                                    NAME, addr, dev_name, e
+                                );
+                                    return Ok(());
+                                }
+                            } else {
+                                warn!("{} Unknown bluetooth error: {}", NAME, e);
+                                Bluetooth::cleanup_failed_bluetooth_connect(&device).await?;
+                            }
+                        }
+                    }
                 }
             } else {
                 warn!(
