@@ -302,7 +302,6 @@ async fn tokio_main(
             // bluetooth handshake
             if let Err(e) = bluetooth
                 .aa_handshake(
-                    cfg.dongle_mode,
                     cfg.connect.clone(),
                     wifi_conf.clone().unwrap(),
                     tcp_start.clone(),

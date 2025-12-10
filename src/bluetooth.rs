@@ -8,7 +8,7 @@ use anyhow::anyhow;
 use backon::{ExponentialBuilder, Retryable};
 use bluer::{
     rfcomm::{Profile, ProfileHandle, Role, Stream},
-    Adapter, Address, Device, Uuid,
+    Adapter, Address, Uuid,
 };
 use futures::StreamExt;
 use simplelog::*;
@@ -348,7 +348,6 @@ impl Bluetooth {
 
     async fn get_aa_profile_connection(
         &mut self,
-        dongle_mode: bool,
         connect: BluetoothAddressList,
         bt_timeout: Duration,
         stopped: bool,
@@ -372,13 +371,8 @@ impl Bluetooth {
                 // exit if we don't have anything to connect to
                 if !addresses.is_empty() {
                     info!("{} 🧲 Attempting to start an AndroidAuto session via bluetooth with the following devices, in this order: {:?}", NAME, addresses);
-                    let try_connect_bluetooth_addresses_retry = || {
-                        Bluetooth::try_connect_bluetooth_addresses(
-                            &adapter_cloned,
-                            dongle_mode,
-                            &addresses,
-                        )
-                    };
+                    let try_connect_bluetooth_addresses_retry =
+                        || Bluetooth::try_connect_bluetooth_addresses(&adapter_cloned, &addresses);
 
                     let retry_policy = ExponentialBuilder::default()
                         .with_min_delay(Duration::from_secs(1))
@@ -418,7 +412,6 @@ impl Bluetooth {
 
     async fn try_connect_bluetooth_addresses(
         adapter: &Adapter,
-        dongle_mode: bool,
         addresses: &Vec<Address>,
     ) -> Result<()> {
         for addr in addresses {
@@ -449,17 +442,6 @@ impl Bluetooth {
             }
         }
         Err(anyhow!("Unable to connect to the provided addresses").into())
-    }
-
-    async fn cleanup_failed_bluetooth_connect(device: &Device) -> Result<()> {
-        let cleanup_delay = Duration::from_secs(2);
-        let _ = timeout(cleanup_delay, device.disconnect()).await;
-        debug!(
-            "{} Cleaned up bluetooth connection for device: {:?}",
-            NAME,
-            device.name().await
-        );
-        Ok(())
     }
 
     async fn send_params(wifi_config: WifiConfig, stream: &mut Stream) -> Result<()> {
@@ -505,7 +487,6 @@ impl Bluetooth {
 
     pub async fn aa_handshake(
         &mut self,
-        dongle_mode: bool,
         connect: BluetoothAddressList,
         wifi_config: WifiConfig,
         tcp_start: Arc<Notify>,
@@ -518,7 +499,7 @@ impl Bluetooth {
     ) -> Result<()> {
         // Use the provided session and adapter instead of creating new ones
         let (address, mut stream) = self
-            .get_aa_profile_connection(dongle_mode, connect, bt_timeout, stopped)
+            .get_aa_profile_connection(connect, bt_timeout, stopped)
             .await?;
         Self::send_params(wifi_config.clone(), &mut stream).await?;
         tcp_start.notify_one();
