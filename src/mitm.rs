@@ -773,6 +773,7 @@ fn is_musl() -> bool {
 pub async fn endpoint_reader<A: Endpoint<A>>(
     mut device: IoDevice<A>,
     tx: Sender<Packet>,
+    hu: bool,
 ) -> Result<()> {
     let mut rbuf: VecDeque<u8> = VecDeque::new();
     loop {
