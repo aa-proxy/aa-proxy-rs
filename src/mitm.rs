@@ -764,6 +764,11 @@ async fn read_input_data<A: Endpoint<A>>(
     Ok(())
 }
 
+/// runtime musl detection
+fn is_musl() -> bool {
+    std::path::Path::new("/lib/ld-musl-riscv64.so.1").exists()
+}
+
 /// main reader thread for a device
 pub async fn endpoint_reader<A: Endpoint<A>>(
     mut device: IoDevice<A>,
