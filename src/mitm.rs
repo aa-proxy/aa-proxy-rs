@@ -729,10 +729,11 @@ async fn ssl_builder(proxy_type: ProxyType) -> Result<Ssl> {
 async fn read_input_data<A: Endpoint<A>>(
     rbuf: &mut VecDeque<u8>,
     obj: &mut IoDevice<A>,
+    incremental_read: bool,
 ) -> Result<()> {
     let mut newdata = vec![0u8; BUFFER_LEN];
-    let n;
-    let len;
+    let mut n;
+    let mut len;
 
     match obj {
         IoDevice::UsbReader(device, _) => {
@@ -743,6 +744,27 @@ async fn read_input_data<A: Endpoint<A>>(
                 .context("read_input_data: UsbReader read error")?;
         }
         IoDevice::EndpointIo(device) => {
+            if incremental_read {
+                // read header
+                newdata = vec![0u8; HEADER_LENGTH];
+                let retval = device.read(newdata);
+                (n, newdata) = timeout(Duration::from_millis(15000), retval)
+                    .await
+                    .context("read_input_data/header: EndpointIo timeout")?;
+                len = n.context("read_input_data/header: EndpointIo read error")?;
+
+                // fill the output/read buffer with the obtained header data
+                rbuf.write(&newdata.clone().slice(..len))?;
+
+                // compute payload size
+                let mut payload_size = (newdata[3] as u16 + ((newdata[2] as u16) << 8)) as usize;
+                if (newdata[1] & FRAME_TYPE_MASK) == FRAME_TYPE_FIRST {
+                    // header is 8 bytes; need to read 4 more bytes
+                    payload_size += 4;
+                }
+                // prepare buffer for the payload and continue normally
+                newdata = vec![0u8; payload_size];
+            }
             let retval = device.read(newdata);
             (n, newdata) = timeout(Duration::from_millis(15000), retval)
                 .await
@@ -776,8 +798,9 @@ pub async fn endpoint_reader<A: Endpoint<A>>(
     hu: bool,
 ) -> Result<()> {
     let mut rbuf: VecDeque<u8> = VecDeque::new();
+    let incremental_read = if !hu && is_musl() { true } else { false };
     loop {
-        read_input_data(&mut rbuf, &mut device).await?;
+        read_input_data(&mut rbuf, &mut device, incremental_read).await?;
         // check if we have complete packet available
         loop {
             if rbuf.len() > HEADER_LENGTH {
