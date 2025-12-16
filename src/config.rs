@@ -79,6 +79,7 @@ pub struct ConfigJson {
 #[serde(default)]
 pub struct AppConfig {
     pub advertise: bool,
+    pub enable_btle: bool,
     pub dongle_mode: bool,
     pub debug: bool,
     pub hexdump_level: HexdumpLevel,
@@ -221,6 +222,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             advertise: true,
+            enable_btle: true,
             dongle_mode: false,
             debug: false,
             hexdump_level: HexdumpLevel::Disabled,
@@ -314,6 +316,7 @@ impl AppConfig {
         });
 
         doc["advertise"] = value(self.advertise);
+        doc["enable_btle"] = value(self.enable_btle);
         doc["dongle_mode"] = value(self.dongle_mode);
         doc["debug"] = value(self.debug);
         doc["hexdump_level"] = value(format!("{:?}", self.hexdump_level));

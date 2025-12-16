@@ -108,7 +108,11 @@
       "values": {
         "advertise": {
           "typ": "boolean",
-          "description": "BLE advertising. This also includes BLE/GATT server for companion app."
+          "description": "BLE advertising"
+        },
+        "enable_btle": {
+          "typ": "boolean",
+          "description": "Enable BLE/GATT server for companion app"
         },
         "dongle_mode": {
           "typ": "boolean",

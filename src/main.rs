@@ -273,7 +273,7 @@ async fn tokio_main(
         }
     }
     if cfg.advertise {
-        if let Err(e) = bluetooth.start_ble(state.clone(), true).await {
+        if let Err(e) = bluetooth.start_ble(state.clone(), cfg.enable_btle).await {
             warn!("{} Error starting BLE: {}", NAME, e);
         }
     }
