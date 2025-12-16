@@ -137,6 +137,10 @@
         "change_usb_order": {
           "typ": "boolean",
           "description": "Connect to HU USB before Bluetooth handshake"
+        },
+        "bt_poweroff": {
+          "typ": "boolean",
+          "description": "Powers off the Bluetooth adapter after the handshake. Intended for use only in specific configurations"
         }
       }
     },
