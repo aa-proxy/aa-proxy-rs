@@ -308,6 +308,7 @@ async fn tokio_main(
                     Duration::from_secs(cfg.bt_timeout_secs.into()),
                     cfg.action_requested == Some(Action::Stop),
                     cfg.quick_reconnect,
+                    cfg.bt_poweroff,
                     restart_tx.subscribe(),
                     restart_tx.clone(),
                     profile_connected.clone(),

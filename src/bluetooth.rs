@@ -493,10 +493,14 @@ impl Bluetooth {
         bt_timeout: Duration,
         stopped: bool,
         quick_reconnect: bool,
+        bt_poweroff: bool,
         mut need_restart: BroadcastReceiver<Option<Action>>,
         restart_tx: BroadcastSender<Option<Action>>,
         profile_connected: Arc<AtomicBool>,
     ) -> Result<()> {
+        if bt_poweroff {
+            let _ = self.adapter.set_powered(true).await;
+        }
         // Use the provided session and adapter instead of creating new ones
         let (address, mut stream) = self
             .get_aa_profile_connection(connect, bt_timeout, stopped)
@@ -550,6 +554,9 @@ impl Bluetooth {
             // connect to real HU for calls
             let device = self.adapter.device(bluer::Address(*address))?;
             let _ = device.disconnect().await;
+            if bt_poweroff {
+                let _ = self.adapter.set_powered(false).await;
+            }
         }
 
         info!("{} 🚀 Bluetooth launch sequence completed", NAME);
