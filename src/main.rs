@@ -1,4 +1,5 @@
 use aa_proxy_rs::bluetooth;
+use aa_proxy_rs::button::button_handler;
 use aa_proxy_rs::config::SharedConfig;
 use aa_proxy_rs::config::SharedConfigJson;
 use aa_proxy_rs::config::WifiConfig;
@@ -189,6 +190,7 @@ async fn tokio_main(
     tx: Arc<Mutex<Option<Sender<Packet>>>>,
     sensor_channel: Arc<Mutex<Option<u8>>>,
     led_support: bool,
+    button_support: bool,
     profile_connected: Arc<AtomicBool>,
 ) -> Result<()> {
     let accessory_started = Arc::new(Notify::new());
@@ -246,6 +248,14 @@ async fn tokio_main(
             std::thread::spawn(|| uevent_listener(accessory_started_cloned));
         }
         usb = Some(UsbGadgetState::new(cfg.legacy, cfg.udc.clone()));
+    }
+
+    if button_support {
+        // spawn a background task for button events
+        let mut config_cloned = config.clone();
+        let _ = tokio::spawn(async move {
+            let _ = button_handler(&mut config_cloned).await;
+        });
     }
 
     // spawn a background task for reboot detection
@@ -504,10 +514,12 @@ fn main() -> Result<()> {
 
     // show SBC model
     let mut led_support = false;
+    let mut button_support = false;
     if let Ok(model) = get_sbc_model() {
         info!("{} 📟 host device: <bold><blue>{}</>", NAME, model);
         if model == "AAWireless 2B" {
             led_support = true;
+            button_support = true;
         }
     }
 
@@ -573,6 +585,7 @@ fn main() -> Result<()> {
             tx_cloned,
             sensor_channel_cloned,
             led_support,
+            button_support,
             profile_connected_cloned,
         )
         .await
