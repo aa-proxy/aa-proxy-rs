@@ -60,6 +60,7 @@ pub struct Bluetooth {
     handle_aa: ProfileHandle,
     btle_handle: Option<bluer::gatt::local::ApplicationHandle>,
     adv_handle: Option<bluer::adv::AdvertisementHandle>,
+    current_index: usize,
 }
 
 // Create and configure the Bluetooth adapter
@@ -149,6 +150,7 @@ pub async fn init(
         handle_aa,
         btle_handle: None,
         adv_handle: None,
+        current_index: 0,
     })
 }
 
@@ -371,15 +373,23 @@ impl Bluetooth {
                 // exit if we don't have anything to connect to
                 if !addresses.is_empty() {
                     info!("{} 🧲 Attempting to start an AndroidAuto session via bluetooth with the following devices, in this order: {:?}", NAME, addresses);
-                    let try_connect_bluetooth_addresses_retry =
-                        || Bluetooth::try_connect_bluetooth_addresses(&adapter_cloned, &addresses);
+                    let try_connect_bluetooth_addresses_retry = || async {
+                        let next_index = Bluetooth::try_connect_bluetooth_addresses(
+                            &adapter_cloned,
+                            &addresses,
+                            self.current_index,
+                        )
+                        .await?;
+
+                        Ok(next_index)
+                    };
 
                     let retry_policy = ExponentialBuilder::default()
                         .with_min_delay(Duration::from_secs(1))
                         .with_max_delay(Duration::from_secs(15))
                         .without_max_times();
 
-                    let _connect = try_connect_bluetooth_addresses_retry
+                    self.current_index = try_connect_bluetooth_addresses_retry
                         // Retry with exponential backoff
                         .retry(retry_policy)
                         // Sleep implementation, required if no feature has been enabled
@@ -413,22 +423,28 @@ impl Bluetooth {
     async fn try_connect_bluetooth_addresses(
         adapter: &Adapter,
         addresses: &Vec<Address>,
-    ) -> Result<()> {
-        for addr in addresses {
-            let device = adapter.device(*addr)?;
+        start_index: usize,
+    ) -> Result<usize> {
+        let n = addresses.len();
+        for i in 0..n {
+            // Calculate the actual index, taking start_index into account
+            let idx = (start_index + i) % n;
+            let addr = addresses[idx];
+            let device = adapter.device(addr)?;
+
             let dev_name = match device.name().await {
                 Ok(Some(name)) => format!(" (<b><blue>{}</>)", name),
                 _ => String::new(),
             };
             info!("{} 🧲 Trying to connect to: {}{}", NAME, addr, dev_name);
-            if let Ok(true) = adapter.device(*addr)?.is_paired().await {
+            if let Ok(true) = device.is_paired().await {
                 match device.connect_profile(&HSP_AG_UUID).await {
                     Ok(_) => {
                         info!(
                             "{} 🔗 Successfully connected to device: {}{}",
                             NAME, addr, dev_name
                         );
-                        return Ok(());
+                        return Ok((idx + 1) % n);
                     }
                     Err(e) => {
                         warn!("{} 🔇 {}{}: Error connecting: {}", NAME, addr, dev_name, e)
