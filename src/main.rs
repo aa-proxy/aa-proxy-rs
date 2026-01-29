@@ -517,7 +517,7 @@ fn main() -> Result<()> {
     let mut button_support = false;
     if let Ok(model) = get_sbc_model() {
         info!("{} 📟 host device: <bold><blue>{}</>", NAME, model);
-        if model == "AAWireless 2B" {
+        if model.starts_with("AAWireless") {
             led_support = true;
             button_support = true;
         }
