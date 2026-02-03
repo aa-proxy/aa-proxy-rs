@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use tokio::fs::File as TokioFile;
 use tokio::io::{self, copy_bidirectional, AsyncBufReadExt, BufReader};
 use tokio::net::TcpStream as TokioTcpStream;
+use tokio::process::Command;
 use tokio::sync::broadcast::Sender as BroadcastSender;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, Mutex, Notify};
@@ -343,6 +344,7 @@ pub async fn io_loop(
         };
         let read_timeout = Duration::from_secs(config.timeout_secs.into());
 
+        let mut client_mac: Option<MacAddress> = None;
         let mut md_tcp = None;
         let mut md_usb = None;
         let mut hu_tcp = None;
@@ -373,6 +375,8 @@ pub async fn io_loop(
             );
             if let Ok((s, ip)) = tcp_wait_for_connection(&mut md_listener.as_mut().unwrap()).await {
                 md_tcp = Some(s);
+                // Get MAC address of the connected client for later disassociation
+                client_mac = mac_from_ipv4(ip).await.unwrap_or(None);
             } else {
                 // notify main loop to restart
                 let _ = need_restart.send(None);
@@ -550,6 +554,19 @@ pub async fn io_loop(
         }
         if let Some(stream) = hu_tcp_stream {
             let _ = stream.shutdown(std::net::Shutdown::Both);
+        }
+
+        // Disassociate a client from the WiFi AP.
+        // Mainly needed when a button was used to switch to the next device,
+        // or when the stop_on_disconnect option was used.
+        // Otherwise, the WiFi/AA connection remains hanging and the phone
+        // won't switch back to the regular WiFi.
+        if let Some(mac) = client_mac {
+            info!("{} disassociating WiFi client: {}", NAME, mac);
+
+            let _ = Command::new("/usr/bin/hostapd_cli")
+                .args(&["disassociate", &mac.to_string()])
+                .spawn();
         }
 
         // set webserver context EV stuff to None
