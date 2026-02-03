@@ -1,4 +1,5 @@
 use bytesize::ByteSize;
+use core::net::SocketAddr;
 use humantime::format_duration;
 use simplelog::*;
 use std::cell::RefCell;
@@ -243,7 +244,7 @@ async fn tcp_bridge(remote_addr: &str, local_addr: &str) {
 
 /// Asynchronously wait for an inbound TCP connection
 /// returning TcpStream of first client connected
-async fn tcp_wait_for_connection(listener: &mut TcpListener) -> Result<TcpStream> {
+async fn tcp_wait_for_connection(listener: &mut TcpListener) -> Result<(TcpStream, SocketAddr)> {
     let retval = listener.accept();
     let (stream, addr) = match timeout(TCP_CLIENT_TIMEOUT, retval)
         .await
@@ -281,7 +282,7 @@ async fn tcp_wait_for_connection(listener: &mut TcpListener) -> Result<TcpStream
     // even if there is only a small amount of data
     stream.set_nodelay(true)?;
 
-    Ok(stream)
+    Ok((stream, addr))
 }
 
 pub async fn io_loop(
@@ -347,7 +348,7 @@ pub async fn io_loop(
                 "{} 🛰️ MD TCP server: listening for phone connection...",
                 NAME
             );
-            if let Ok(s) = tcp_wait_for_connection(&mut md_listener.as_mut().unwrap()).await {
+            if let Ok((s, ip)) = tcp_wait_for_connection(&mut md_listener.as_mut().unwrap()).await {
                 md_tcp = Some(s);
             } else {
                 // notify main loop to restart
@@ -361,7 +362,7 @@ pub async fn io_loop(
                 "{} 🛰️ DHU TCP server: listening for `Desktop Head Unit` connection...",
                 NAME
             );
-            if let Ok(s) = tcp_wait_for_connection(&mut dhu_listener.as_mut().unwrap()).await {
+            if let Ok((s, _)) = tcp_wait_for_connection(&mut dhu_listener.as_mut().unwrap()).await {
                 hu_tcp = Some(s);
             } else {
                 // notify main loop to restart
