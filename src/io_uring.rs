@@ -5,6 +5,7 @@ use mac_address::MacAddress;
 use simplelog::*;
 use std::cell::RefCell;
 use std::marker::PhantomData;
+use std::net::IpAddr;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -246,7 +247,12 @@ async fn tcp_bridge(remote_addr: &str, local_addr: &str) {
 }
 
 /// Async lookup MAC from IPv4 using /proc/net/arp
-pub async fn mac_from_ipv4(ip: SocketAddr) -> io::Result<Option<MacAddress>> {
+pub async fn mac_from_ipv4(addr: SocketAddr) -> io::Result<Option<MacAddress>> {
+    let ip = match addr.ip() {
+        IpAddr::V4(v4) => v4,
+        IpAddr::V6(_) => return Ok(None),
+    };
+
     let file = TokioFile::open("/proc/net/arp").await?;
     let reader = BufReader::new(file);
     let mut lines = reader.lines();
