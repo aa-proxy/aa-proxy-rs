@@ -1,11 +1,13 @@
 use crate::config::Action;
 use crate::config::SharedConfig;
+use anyhow::anyhow;
+use evdev::enumerate;
 use evdev::{Device, EventType, KeyCode};
 use simplelog::*;
 use std::time::Duration;
 use tokio::time::{sleep, Instant};
 
-const BUTTON_DEVICE: &str = "/dev/input/by-path/platform-gpio-keys-event";
+const DEVICE_NAME: &str = "gpio-keys";
 const KEY_CODE: KeyCode = KeyCode::KEY_F15;
 const PRESS_TIMEOUT: Duration = Duration::from_millis(1000);
 
@@ -16,8 +18,23 @@ const NAME: &str = "<i><bright-black> button: </>";
 // async contexts needs some extra restrictions
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
+fn find_button_device() -> Result<Device> {
+    for (_path, device) in enumerate() {
+        if device.name() == Some(DEVICE_NAME) {
+            return Ok(device);
+        }
+    }
+    Err(anyhow!("gpio-keys device not found").into())
+}
+
 pub async fn button_handler(config: &mut SharedConfig) -> Result<()> {
-    let dev = Device::open(BUTTON_DEVICE)?;
+    let dev = find_button_device()?;
+    info!(
+        "{} <b>{}</> opened <b>({})</>",
+        NAME,
+        dev.physical_path().unwrap_or_default(),
+        dev.name().unwrap_or_default(),
+    );
 
     let mut pressed = false;
     let mut presses: u32 = 0;
