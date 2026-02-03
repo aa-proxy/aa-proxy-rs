@@ -1,6 +1,7 @@
 use bytesize::ByteSize;
 use core::net::SocketAddr;
 use humantime::format_duration;
+use mac_address::MacAddress;
 use simplelog::*;
 use std::cell::RefCell;
 use std::marker::PhantomData;
@@ -8,7 +9,8 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::copy_bidirectional;
+use tokio::fs::File as TokioFile;
+use tokio::io::{self, copy_bidirectional, AsyncBufReadExt, BufReader};
 use tokio::net::TcpStream as TokioTcpStream;
 use tokio::sync::broadcast::Sender as BroadcastSender;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -240,6 +242,27 @@ async fn tcp_bridge(remote_addr: &str, local_addr: &str) {
 
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
+}
+
+/// Async lookup MAC from IPv4 using /proc/net/arp
+pub async fn mac_from_ipv4(ip: SocketAddr) -> io::Result<Option<MacAddress>> {
+    let file = TokioFile::open("/proc/net/arp").await?;
+    let reader = BufReader::new(file);
+    let mut lines = reader.lines();
+
+    // Skip header
+    lines.next_line().await?;
+
+    while let Some(line) = lines.next_line().await? {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() >= 4 && cols[0] == ip.to_string() {
+            if let Ok(mac) = cols[3].parse::<MacAddress>() {
+                return Ok(Some(mac));
+            }
+        }
+    }
+
+    Ok(None)
 }
 
 /// Asynchronously wait for an inbound TCP connection
