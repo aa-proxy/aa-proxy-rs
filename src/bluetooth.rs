@@ -29,6 +29,7 @@ use WifiInfoResponse::AccessPointType;
 use WifiInfoResponse::SecurityMode;
 const HEADER_LEN: usize = 4;
 const STAGES: u8 = 5;
+const ATTEMPTS: usize = 3;
 
 // module name for logging engine
 const NAME: &str = "<i><bright-black> bluetooth: </>";
@@ -436,25 +437,30 @@ impl Bluetooth {
                 Ok(Some(name)) => format!(" (<b><blue>{}</>)", name),
                 _ => String::new(),
             };
-            info!("{} 🧲 Trying to connect to: {}{}", NAME, addr, dev_name);
-            if let Ok(true) = device.is_paired().await {
-                match device.connect_profile(&HSP_AG_UUID).await {
-                    Ok(_) => {
-                        info!(
-                            "{} 🔗 Successfully connected to device: {}{}",
-                            NAME, addr, dev_name
-                        );
-                        return Ok((idx + 1) % n);
-                    }
-                    Err(e) => {
-                        warn!("{} 🔇 {}{}: Error connecting: {}", NAME, addr, dev_name, e)
-                    }
-                }
-            } else {
-                warn!(
-                    "{} 🧲 Unable to connect to: {}{} device not paired",
-                    NAME, addr, dev_name
+            for j in 1..=ATTEMPTS {
+                info!(
+                    "{} 🧲 Trying to connect to: {}{}, attempt: {}/{}",
+                    NAME, addr, dev_name, j, ATTEMPTS
                 );
+                if let Ok(true) = device.is_paired().await {
+                    match device.connect_profile(&HSP_AG_UUID).await {
+                        Ok(_) => {
+                            info!(
+                                "{} 🔗 Successfully connected to device: {}{}",
+                                NAME, addr, dev_name
+                            );
+                            return Ok((idx + 1) % n);
+                        }
+                        Err(e) => {
+                            warn!("{} 🔇 {}{}: Error connecting: {}", NAME, addr, dev_name, e)
+                        }
+                    }
+                } else {
+                    warn!(
+                        "{} 🧲 Unable to connect to: {}{} device not paired",
+                        NAME, addr, dev_name
+                    );
+                }
             }
         }
         Err(anyhow!("Unable to connect to the provided addresses").into())
