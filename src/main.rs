@@ -254,7 +254,9 @@ async fn tokio_main(
         // spawn a background task for button events
         let mut config_cloned = config.clone();
         let _ = tokio::spawn(async move {
-            let _ = button_handler(&mut config_cloned).await;
+            if let Err(e) = button_handler(&mut config_cloned).await {
+                error!("{} button_handler: {}", NAME, e);
+            }
         });
     }
 
