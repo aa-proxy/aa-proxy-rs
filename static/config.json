@@ -149,51 +149,51 @@
       "values": {
         "mitm": {
           "typ": "boolean",
-          "description": "Enable MITM mode"
+          "description": "Enable MITM mode. This must be enabled for all options below to take effect."
         },
         "dpi": {
           "typ": "integer",
-          "description": "Force DPI\n0 = don't change DPI"
+          "description": "Force DPI\n0 = do not change DPI\nIf you are unsure what value to use, start experimenting with e.g. 130. Logs are helpful, as they show both the original HU value and the new one."
         },
         "audio_max_unacked": {
           "typ": "integer",
-          "description": "Override the `max_unacked` setting for audio channels. This may improve audio performance on some head units, but could worsen it on others. Adjust this value experimentally only if you experience audio stuttering.\n0 = leave unchanged"
+          "description": "Override the `max_unacked` setting for audio channels. This may improve audio performance on some head units, but may worsen it on others. Adjust this value experimentally only if you experience audio stuttering.\n0 = leave unchanged."
         },
         "remove_tap_restriction": {
           "typ": "boolean",
-          "description": "remove tap restriction"
+          "description": "Remove tap restrictions. This affects situations where tapping too frequently while driving triggers a temporary lockout warning. Might not work, depending on phone and Android version."
         },
         "video_in_motion": {
           "typ": "boolean",
-          "description": "video in motion"
+          "description": "Enable video playback while driving. Intended for passengers only - do not watch video while driving. Might not work, depending on phone and Android version. In some cases, this also requires `developer_mode` to be enabled below."
         },
         "disable_media_sink": {
           "typ": "boolean",
-          "description": "Disable media sink"
+          "description": "Disable the media sink. This prevents regular audio from being routed to the head unit (it stays on the phone), allowing, for example, a passenger to watch YouTube locally on the phone with audio."
         },
         "disable_tts_sink": {
           "typ": "boolean",
-          "description": "Disable TTS sink"
+          "description": "Disable the TTS sink. Similar to the option above, but navigation voice guidance is not routed to the head unit and remains on the phone."
         },
         "developer_mode": {
           "typ": "boolean",
-          "description": "Developer mode"
+          "description": "Enable developer mode. This option emulates a Google Head Unit, allowing installation and use of applications that are normally unavailable. Commonly used by developers when testing or developing new applications."
         },
         "remove_bluetooth": {
           "typ": "boolean",
-          "description": "Remove Bluetooth service from `service discovery response`"
+          "description": "Remove the Bluetooth service from the `service discovery response`. This option may be helpful for head units with integrated wireless Android Auto."
         },
         "remove_wifi": {
           "typ": "boolean",
-          "description": "Remove Wi-Fi service from `service discovery response`"
+          "description": "Remove the Wi-Fi service from the `service discovery response`. This option may be helpful for head units with integrated wireless Android Auto."
         },
         "stop_on_disconnect": {
           "typ": "boolean",
-          "description": "Stop working on manual `Disconnect` from phone"
+          "description": "Stop automatic reconnection after manually selecting `Disconnect` in Android Auto on the phone. aa-proxy will not attempt to reconnect until the next restart or until a Bluetooth connection is initiated manually from the phone."
         },
         "waze_lht_workaround": {
           "typ": "boolean",
-          "description": "Enable `Waze` workaround for LHT (Left-Hand Traffic) countries by swaping U_TURN_LEFT to U_TURN_RIGHT in navigation / HUD"
+          "description": "Enable a Waze workaround for LHT (Left-Hand Traffic) countries by swapping U_TURN_LEFT with U_TURN_RIGHT in navigation and HUD."
         }
       }
     },
@@ -206,7 +206,7 @@
         },
         "ev_battery_logger": {
           "typ": "string",
-          "description": "Path to script executed when Android Auto session starts/stops and EV battery data is needed\nArgument \"start\" or \"stop\" is appended automatically when invoked"
+          "description": "Path to executable for providing EV battery data (e.g. from an OBD dongle). It is started automatically when an Android Auto session begins and terminated when the session ends.\nAny parameters provided at the end of the path are passed to the executable as-is."
         },
         "ev_connector_types": {
           "typ": "string",
