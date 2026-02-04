@@ -46,6 +46,7 @@ This project is currently tested and built for the following boards that support
 - Raspberry Pi 4
 - Raspberry Pi 5
 - [AAWireless TWO](https://www.aawireless.io/en/products/aawireless-two)
+- AAWireless 3
 - [Radxa Zero 3W](https://radxa.com/products/zeros/zero3w/)
 - [MilkV DuoS](https://milkv.io/duo-s)
 
