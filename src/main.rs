@@ -308,8 +308,9 @@ async fn tokio_main(
         }
 
         // run only if not handling this in handshake task
-        if !(cfg.quick_reconnect && profile_connected.load(Ordering::Relaxed))
-            || cfg.action_requested == Some(Action::Stop)
+        if cfg.wired.is_none()
+            && (!(cfg.quick_reconnect && profile_connected.load(Ordering::Relaxed))
+                || cfg.action_requested == Some(Action::Stop))
         {
             // bluetooth handshake
             if let Err(e) = bluetooth
