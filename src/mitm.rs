@@ -883,27 +883,29 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
     if passthrough {
         loop {
             tokio::select! {
-            // handling data from opposite device's thread, which needs to be transmitted
-            Some(pkt) = rx.recv() => {
-                debug!("{} rx.recv", get_name(proxy_type));
-                let _ = pkt_debug(proxy_type, HexdumpLevel::RawOutput, hex_requested, &pkt).await;
+                biased; // prioritize transmit path over reader forwarding
 
-                pkt.transmit(&mut device)
-                    .await
-                    .with_context(|| format!("proxy/{}: transmit failed", get_name(proxy_type)))?;
+                // handling data from opposite device's thread, which needs to be transmitted
+                Some(pkt) = rx.recv() => {
+                    debug!("{} rx.recv", get_name(proxy_type));
+                    let _ = pkt_debug(proxy_type, HexdumpLevel::RawOutput, hex_requested, &pkt).await;
 
-                // Increment byte counters for statistics
-                // fixme: compute final_len for precise stats
-                bytes_written.fetch_add(HEADER_LENGTH + pkt.payload.len(), Ordering::Relaxed);
-            }
+                    pkt.transmit(&mut device)
+                        .await
+                        .with_context(|| format!("proxy/{}: transmit failed", get_name(proxy_type)))?;
 
-            // handling input data from the reader thread
-            Some(pkt) = rxr.recv() => {
-                debug!("{} rxr.recv", get_name(proxy_type));
-                let _ = pkt_debug(proxy_type, HexdumpLevel::RawOutput, hex_requested, &pkt).await;
+                    // Increment byte counters for statistics
+                    // fixme: compute final_len for precise stats
+                    bytes_written.fetch_add(HEADER_LENGTH + pkt.payload.len(), Ordering::Relaxed);
+                }
 
-                tx.send(pkt).await?;
-            }
+                // handling input data from the reader thread
+                Some(pkt) = rxr.recv() => {
+                    debug!("{} rxr.recv", get_name(proxy_type));
+                    let _ = pkt_debug(proxy_type, HexdumpLevel::RawOutput, hex_requested, &pkt).await;
+
+                    tx.send(pkt).await?;
+                }
             }
         }
     }

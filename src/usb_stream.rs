@@ -211,7 +211,11 @@ impl AsyncRead for UsbStreamRead {
             // try to read from the remote
             let res = ready!(pin.read_queue.poll_next_complete(cx));
 
-            // copy into the buffer
+            // Submit next URB immediately after receiving the current one to keep
+            // the USB pipeline full and eliminate the gap between reads (Bug 3).
+            let buffer = pin.read_queue.allocate(MAX_PACKET_SIZE);
+            pin.read_queue.submit(buffer);
+
             // copy into poll buffer
             let copy_from_buffer = {
                 let unfilled = buf.initialize_unfilled();
@@ -224,9 +228,6 @@ impl AsyncRead for UsbStreamRead {
             // copy the rest into local buffer
             pin.read_buffer
                 .extend_from_slice(&res.buffer[copy_from_buffer..]);
-            // submit new request
-            let buffer = pin.read_queue.allocate(MAX_PACKET_SIZE);
-            pin.read_queue.submit(buffer);
             Poll::Ready(Ok(()))
         } else {
             let copy_from_buffer = {
@@ -259,24 +260,30 @@ impl AsyncRead for UsbStreamRead {
 impl AsyncWrite for UsbStreamWrite {
     fn poll_write(
         self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
+        cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, io::Error>> {
         let pin = self.get_mut();
+        let len = buf.len();
 
-        // extend to local buffer
-        pin.write_queue.submit(buf.to_vec().into());
-        use futures::executor::block_on;
-
-        if pin.write_queue.pending() > 0 {
-            let res = block_on(pin.write_queue.next_complete());
-            match res.status {
-                Ok(_) => Poll::Ready(Ok(0 /*res.data.actual_length()*/)),
-                Err(e) => Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e))),
+        // Drain any already-completed transfers non-blocking to detect errors
+        // and prevent unbounded queue growth. Must NOT use block_on here as
+        // this runs on the single-threaded tokio-uring executor (Bug 1).
+        while pin.write_queue.pending() > 0 {
+            match pin.write_queue.poll_next_complete(cx) {
+                Poll::Ready(res) => {
+                    if let Err(e) = res.status {
+                        return Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e)));
+                    }
+                }
+                Poll::Pending => break,
             }
-        } else {
-            Poll::Ready(Ok(0))
         }
+
+        // Submit the new data to the kernel USB driver and report it as
+        // consumed. The transfer completes asynchronously (Bug 2 fix: was Ok(0)).
+        pin.write_queue.submit(buf.to_vec().into());
+        Poll::Ready(Ok(len))
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
