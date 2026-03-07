@@ -574,12 +574,25 @@ fn main() -> Result<()> {
     let sensor_channel_cloned = sensor_channel.clone();
     let profile_connected = Arc::new(AtomicBool::new(false));
 
-    // build and spawn main tokio runtime
-    let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
     let restart_tx_cloned = restart_tx.clone();
     let profile_connected_cloned = profile_connected.clone();
-    runtime.spawn(async move {
-        tokio_main(
+
+    // riscv64 is a single-core architecture; using multi-threaded scheduler causes overhead.
+    // current_thread runtime tasks are only driven by block_on, not spawn, so io_loop must
+    // run in its own OS thread to allow block_on(tokio_main) to execute on the main thread.
+    #[cfg(target_arch = "riscv64")]
+    {
+        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+        let io_thread = thread::spawn(move || {
+            let _ = tokio_uring::start(io_loop(
+                restart_tx,
+                tcp_start_cloned,
+                config,
+                tx,
+                sensor_channel,
+            ));
+        });
+        let _ = runtime.block_on(tokio_main(
             config_cloned,
             config_json.clone(),
             restart_tx_cloned,
@@ -590,18 +603,43 @@ fn main() -> Result<()> {
             led_support,
             button_support,
             profile_connected_cloned,
-        )
-        .await
-    });
+        ));
+        let _ = io_thread.join();
+    }
 
-    // start tokio_uring runtime simultaneously
-    let _ = tokio_uring::start(io_loop(
-        restart_tx,
-        tcp_start_cloned,
-        config,
-        tx,
-        sensor_channel,
-    ));
+    // On multi-core architectures use the multi-threaded scheduler: tokio_main runs on
+    // worker threads while io_loop drives tokio_uring on the main thread.
+    #[cfg(not(target_arch = "riscv64"))]
+    {
+        let runtime = Builder::new_multi_thread()
+            .enable_all()
+            .global_queue_interval(15) // Check global queue more frequently
+            .event_interval(31)        // Reduce I/O polling overhead
+            .build()
+            .unwrap();
+        runtime.spawn(async move {
+            tokio_main(
+                config_cloned,
+                config_json.clone(),
+                restart_tx_cloned,
+                tcp_start,
+                args.config.clone(),
+                tx_cloned,
+                sensor_channel_cloned,
+                led_support,
+                button_support,
+                profile_connected_cloned,
+            )
+            .await
+        });
+        let _ = tokio_uring::start(io_loop(
+            restart_tx,
+            tcp_start_cloned,
+            config,
+            tx,
+            sensor_channel,
+        ));
+    }
 
     info!(
         "🚩 aa-proxy-rs terminated, running time: {}",

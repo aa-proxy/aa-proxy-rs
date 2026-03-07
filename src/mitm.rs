@@ -884,7 +884,11 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
     if passthrough {
         loop {
             tokio::select! {
-                biased; // prioritize transmit path over reader forwarding
+                // Fair (non-biased) selection: both arms are polled with equal priority.
+                // A biased selector would starve rxr (car ACKs / control messages back to the
+                // phone) whenever rx (phone→car video data) is continuously ready, because
+                // the phone throttles its send rate when ACKs stop arriving — causing a 2-3×
+                // throughput drop once the tx_md / txr_hu channels saturate.
 
                 // handling data from opposite device's thread, which needs to be transmitted
                 Some(pkt) = rx.recv() => {
