@@ -6,6 +6,10 @@ use nusb::{
 use simplelog::*;
 use std::io;
 use std::pin::Pin;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 use std::task::{ready, Context, Poll};
 use std::time::Duration;
 use thiserror::Error;
@@ -43,9 +47,41 @@ pub enum WriteError {
 use crate::io_uring::BUFFER_LEN;
 const MAX_PACKET_SIZE: usize = BUFFER_LEN;
 // Number of read URBs to keep queued with the USB host controller at all times.
-// Keeping 2 in flight means the controller always has a buffer ready even while
+// In flight that means the controller always has a buffer ready even while
 // the upper layer is busy parsing packets from the previous completion.
-const MIN_PENDING_READS: usize = 2;
+const MIN_PENDING_READS: usize = 8;
+
+/// Live performance counters for a single USB stream direction.
+/// Updated in the hot path with `Ordering::Relaxed`; sampled by the
+/// `transfer_monitor` task every 100 ms for diagnostics logging.
+pub struct UsbReadCounters {
+    /// Number of read URBs currently in-flight with the kernel.
+    pub pending_reads: Arc<AtomicUsize>,
+    /// Bytes sitting in the overflow buffer waiting for the next poll_read.
+    pub cached_bytes: Arc<AtomicUsize>,
+}
+
+pub struct UsbWriteCounters {
+    /// Number of write URBs currently in-flight with the kernel.
+    pub pending_writes: Arc<AtomicUsize>,
+}
+
+impl UsbReadCounters {
+    fn new() -> Self {
+        UsbReadCounters {
+            pending_reads: Arc::new(AtomicUsize::new(0)),
+            cached_bytes: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+impl UsbWriteCounters {
+    fn new() -> Self {
+        UsbWriteCounters {
+            pending_writes: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
 
 pub struct UsbStreamRead {
     pub read_queue: Endpoint<Bulk, In>,
@@ -54,9 +90,13 @@ pub struct UsbStreamRead {
     /// Cursor into `read_buffer`: first unconsumed byte index.
     /// Using a cursor avoids O(n) Vec::drain on every cached read.
     read_buffer_pos: usize,
+    /// Shared atomics updated in the hot path; cloned to `transfer_monitor`.
+    pub counters: Arc<UsbReadCounters>,
 }
 pub struct UsbStreamWrite {
     pub write_queue: Endpoint<Bulk, Out>,
+    /// Shared atomics updated in the hot path; cloned to `transfer_monitor`.
+    pub counters: Arc<UsbWriteCounters>,
 }
 
 // switch a USB device to accessory mode
@@ -193,17 +233,23 @@ impl UsbStreamRead {
             let buffer = read_queue.allocate(MAX_PACKET_SIZE);
             read_queue.submit(buffer);
         }
+        let counters = Arc::new(UsbReadCounters::new());
+        counters.pending_reads.store(read_queue.pending(), Ordering::Relaxed);
         UsbStreamRead {
             read_queue,
             read_buffer: Vec::with_capacity(MAX_PACKET_SIZE),
             read_buffer_pos: 0,
+            counters,
         }
     }
 }
 
 impl UsbStreamWrite {
     pub fn new(write_queue: Endpoint<Bulk, Out>) -> Self {
-        UsbStreamWrite { write_queue }
+        UsbStreamWrite {
+            write_queue,
+            counters: Arc::new(UsbWriteCounters::new()),
+        }
     }
 
     /// Submit an owned buffer directly, bypassing the `AsyncWrite` trait's
@@ -224,6 +270,7 @@ impl UsbStreamWrite {
 
         // Submit directly from the owned Vec — no extra copy needed.
         self.write_queue.submit(buf.into());
+        self.counters.pending_writes.store(self.write_queue.pending(), Ordering::Relaxed);
         Ok(len)
     }
 }
@@ -238,12 +285,14 @@ impl AsyncRead for UsbStreamRead {
 
         // Helper: keep MIN_PENDING_READS URBs submitted at all times so the
         // USB host controller is never starved — called from BOTH branches.
+        // Also updates the shared pending_reads counter for the monitor.
         #[inline(always)]
         fn replenish(pin: &mut UsbStreamRead) {
             while pin.read_queue.pending() < MIN_PENDING_READS {
                 let buf = pin.read_queue.allocate(MAX_PACKET_SIZE);
                 pin.read_queue.submit(buf);
             }
+            pin.counters.pending_reads.store(pin.read_queue.pending(), Ordering::Relaxed);
         }
 
         let cached_remaining = pin.read_buffer.len() - pin.read_buffer_pos;
@@ -252,6 +301,7 @@ impl AsyncRead for UsbStreamRead {
             // Buffer fully consumed — reset cursor and reuse the allocation.
             pin.read_buffer.clear();
             pin.read_buffer_pos = 0;
+            pin.counters.cached_bytes.store(0, Ordering::Relaxed);
 
             // Ensure the pipeline is primed before we wait.
             replenish(pin);
@@ -279,6 +329,7 @@ impl AsyncRead for UsbStreamRead {
             // read_buffer_pos stays 0 — the cursor starts at the beginning.
             if res.buffer.len() > copy_len {
                 pin.read_buffer.extend_from_slice(&res.buffer[copy_len..]);
+                pin.counters.cached_bytes.store(pin.read_buffer.len(), Ordering::Relaxed);
             }
 
             Poll::Ready(Ok(()))
@@ -304,6 +355,10 @@ impl AsyncRead for UsbStreamRead {
                 .copy_from_slice(&pin.read_buffer[src_start..src_start + copy_len]);
             pin.read_buffer_pos += copy_len;
             buf.advance(copy_len);
+
+            // Update cached bytes counter: remaining after this copy.
+            let remaining = pin.read_buffer.len() - pin.read_buffer_pos;
+            pin.counters.cached_bytes.store(remaining, Ordering::Relaxed);
 
             Poll::Ready(Ok(()))
         }
@@ -336,6 +391,7 @@ impl AsyncWrite for UsbStreamWrite {
         // Submit the new data to the kernel USB driver and report it as
         // consumed. The transfer completes asynchronously (Bug 2 fix: was Ok(0)).
         pin.write_queue.submit(buf.to_vec().into());
+        pin.counters.pending_writes.store(pin.write_queue.pending(), Ordering::Relaxed);
         Poll::Ready(Ok(len))
     }
 

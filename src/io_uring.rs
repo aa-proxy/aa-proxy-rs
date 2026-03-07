@@ -4,6 +4,7 @@ use humantime::format_duration;
 use mac_address::MacAddress;
 use simplelog::*;
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::net::IpAddr;
 use std::rc::Rc;
@@ -36,14 +37,23 @@ const NAME: &str = "<i><bright-black> proxy: </>";
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 const USB_ACCESSORY_PATH: &str = "/dev/usb_accessory";
-// 64 KB per URB: 4× fewer kernel round-trips vs 16 KB at high bitrates.
-// At 20 Mbps (1080p/60 fps AA video) this reduces URB count from ~1250/s to ~312/s.
-pub const BUFFER_LEN: usize = 128 * 1024;
+// 16 KB per URB — matches the Android Open Accessory protocol maximum bulk-transfer size.
+pub const BUFFER_LEN: usize = 16 * 1024;
 const TCP_CLIENT_TIMEOUT: Duration = Duration::new(30, 0);
 const COMP_APP_TCP_PORT: u16 = 9999;
 
-const TCP_RECV_BUFFER_SIZE: usize = 256 * 1024; // 256 KB
-const TCP_SEND_BUFFER_SIZE: usize = 256 * 1024; // 256 KB
+const TCP_RECV_BUFFER_SIZE: usize = 32 * 1024; // 32 KB
+const TCP_SEND_BUFFER_SIZE: usize = 32 * 1024; // 32 KB
+
+const READER_QUEUE_DEPTH: usize = 32;   // Large for video bursts
+const TRANSMIT_QUEUE_DEPTH: usize = 16; // Moderate for forwarding
+
+/// CoDel-like AQM: maximum sojourn time before a data packet is dropped.
+/// Packets on channel 0 (Android Auto control channel) are always forwarded.
+const AQM_MAX_LATENCY: Duration = Duration::from_millis(200);
+/// Depth of the small output channel between each AQM relay and the proxy.
+/// The relay's internal VecDeque handles real buffering.
+const AQM_QUEUE_DEPTH: usize = 8;
 
 use crate::config::{Action, SharedConfig};
 use crate::config::{TCP_DHU_PORT, TCP_SERVER_PORT};
@@ -54,7 +64,7 @@ use crate::mitm::proxy;
 use crate::mitm::Packet;
 use crate::mitm::ProxyType;
 use crate::usb_stream;
-use crate::usb_stream::{UsbStreamRead, UsbStreamWrite};
+use crate::usb_stream::{UsbReadCounters, UsbStreamRead, UsbStreamWrite, UsbWriteCounters};
 
 // tokio_uring::fs::File and tokio_uring::net::TcpStream are using different
 // read and write calls:
@@ -103,6 +113,9 @@ async fn transfer_monitor(
     tcp_bytes_written: Arc<AtomicUsize>,
     read_timeout: Duration,
     config: SharedConfig,
+    channels: [Sender<Packet>; 4],
+    usb_read_counters: Option<Arc<UsbReadCounters>>,
+    usb_write_counters: Option<Arc<UsbWriteCounters>>,
 ) -> Result<()> {
     let mut usb_bytes_out_last: usize = 0;
     let mut tcp_bytes_out_last: usize = 0;
@@ -154,6 +167,41 @@ async fn transfer_monitor(
                 tcp_transferred_last.to_string_as(true),
                 tcp_speed.to_string_as(true),
                 tcp_transferred_total.to_string_as(true),
+            );
+
+            // Channel queue depths: items currently queued = max_capacity - capacity.
+            // [tx_hu, tx_md, txr_hu, txr_md]
+            let ch_names = ["tx_hu", "tx_md", "txr_hu", "txr_md"];
+            let ch_depths: Vec<String> = channels
+                .iter()
+                .zip(ch_names.iter())
+                .map(|(s, name)| {
+                    let depth = s.max_capacity() - s.capacity();
+                    format!("{}:{}/{}", name, depth, s.max_capacity())
+                })
+                .collect();
+
+            // USB counters (only present when phone is wired).
+            let usb_info = match (&usb_read_counters, &usb_write_counters) {
+                (Some(r), Some(w)) => {
+                    let pending_r = r.pending_reads.load(Ordering::Relaxed);
+                    let cached    = r.cached_bytes.load(Ordering::Relaxed);
+                    let pending_w = w.pending_writes.load(Ordering::Relaxed);
+                    format!(
+                        " | USB urb_r:{} cached:{} urb_w:{}",
+                        pending_r,
+                        ByteSize::b(cached as u64).to_string_as(true),
+                        pending_w
+                    )
+                }
+                _ => String::new(),
+            };
+
+            info!(
+                "{} queues: {}{}",
+                NAME,
+                ch_depths.join("  "),
+                usb_info
             );
 
             // save values for next iteration
@@ -478,11 +526,23 @@ pub async fn io_loop(
         let mut hu_tcp_stream = None;
 
         // MITM/proxy mpsc channels:
-        // 64-deep channels absorb H.264 keyframe bursts without stalling readers.
-        let (tx_hu, rx_md): (Sender<Packet>, Receiver<Packet>) = mpsc::channel(64);
-        let (tx_md, rx_hu): (Sender<Packet>, Receiver<Packet>) = mpsc::channel(64);
-        let (txr_hu, rxr_md): (Sender<Packet>, Receiver<Packet>) = mpsc::channel(64);
-        let (txr_md, rxr_hu): (Sender<Packet>, Receiver<Packet>) = mpsc::channel(64);
+        // 256-deep channels absorb H.264 keyframe bursts (a single 700 KB I-frame splits into
+        // ~44 AA packets at 16 KB each; two overlapping keyframes fill a 64-slot channel and
+        // stall the reader tasks, compounding ACK back-pressure from the phone).
+        let (tx_hu, rx_md): (Sender<Packet>, Receiver<Packet>) = mpsc::channel(TRANSMIT_QUEUE_DEPTH);
+        let (tx_md, rx_hu): (Sender<Packet>, Receiver<Packet>) = mpsc::channel(TRANSMIT_QUEUE_DEPTH);
+        let (txr_hu, rxr_md): (Sender<Packet>, Receiver<Packet>) = mpsc::channel(READER_QUEUE_DEPTH);
+        let (txr_md, rxr_hu): (Sender<Packet>, Receiver<Packet>) = mpsc::channel(READER_QUEUE_DEPTH);
+
+        // Clone senders now, before they are moved into tasks, so the monitor
+        // can sample their queue depths via max_capacity() - capacity().
+        // Order matches the array expected by transfer_monitor.
+        let monitor_channels = [
+            tx_hu.clone(),
+            tx_md.clone(),
+            txr_hu.clone(),
+            txr_md.clone(),
+        ];
 
         // selecting I/O device for reading and writing
         // and creating desired objects for proxy functions
@@ -491,11 +551,19 @@ pub async fn io_loop(
         let hu_w;
         let md_w;
         let mut usb_dev = None;
+        // USB perf counters — Some when phone is wired, None for wireless.
+        let mut monitor_usb_read_counters: Option<Arc<UsbReadCounters>> = None;
+        let mut monitor_usb_write_counters: Option<Arc<UsbWriteCounters>> = None;
         // MD transfer device
         if let Some(md) = md_usb {
             // MD over wired USB
             let (dev, usb_r, usb_w) = md;
             usb_dev = Some(dev);
+            // Clone counter Arcs before the streams are moved into Rc<RefCell<>>.
+            // These Arcs are Send; the Rc wrappers are not — so the monitor gets
+            // the clones while the IO tasks keep the originals inside their Rc.
+            monitor_usb_read_counters = Some(usb_r.counters.clone());
+            monitor_usb_write_counters = Some(usb_w.counters.clone());
             let usb_r = Rc::new(RefCell::new(usb_r));
             let usb_w = Rc::new(RefCell::new(usb_w));
             md_r = IoDevice::UsbReader(usb_r, PhantomData::<TcpStream>);
@@ -561,6 +629,9 @@ pub async fn io_loop(
             stream_bytes,
             read_timeout,
             shared_config.clone(),
+            monitor_channels,
+            monitor_usb_read_counters,
+            monitor_usb_write_counters,
         ));
 
         // Stop as soon as one of them errors
