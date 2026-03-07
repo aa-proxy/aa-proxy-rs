@@ -170,30 +170,36 @@ impl Packet {
         device: &mut IoDevice<A>,
     ) -> std::result::Result<usize, std::io::Error> {
         let len = self.payload.len() as u16;
-        let mut frame: Vec<u8> = vec![];
+        // Pre-allocate to exact size so the Vec never reallocates.
+        // header is 4 bytes, or 8 bytes when final_length is present.
+        let header_size = if self.final_length.is_some() { 8 } else { 4 };
+        let mut frame: Vec<u8> = Vec::with_capacity(header_size + self.payload.len());
         frame.push(self.channel);
         frame.push(self.flags);
         frame.push((len >> 8) as u8);
         frame.push((len & 0xff) as u8);
         if let Some(final_len) = self.final_length {
-            // adding addional 4-bytes of final_len header
+            // adding additional 4-bytes of final_len header
             frame.push((final_len >> 24) as u8);
             frame.push((final_len >> 16) as u8);
             frame.push((final_len >> 8) as u8);
             frame.push((final_len & 0xff) as u8);
         }
+        // extend_from_slice copies directly without an intermediate clone allocation.
         match device {
             IoDevice::UsbWriter(device, _) => {
-                frame.append(&mut self.payload.clone());
+                frame.extend_from_slice(&self.payload);
                 let mut dev = device.borrow_mut();
-                dev.write(&frame).await
+                // write_owned submits the already-owned Vec to nusb without a
+                // second copy (unlike AsyncWrite::write which takes &[u8]).
+                dev.write_owned(frame).await
             }
             IoDevice::EndpointIo(device) => {
-                frame.append(&mut self.payload.clone());
+                frame.extend_from_slice(&self.payload);
                 device.write(frame).submit().await.0
             }
             IoDevice::TcpStreamIo(device) => {
-                frame.append(&mut self.payload.clone());
+                frame.extend_from_slice(&self.payload);
                 device.write(frame).submit().await.0
             }
             _ => todo!(),

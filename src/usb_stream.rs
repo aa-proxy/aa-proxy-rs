@@ -42,10 +42,18 @@ pub enum WriteError {
 
 use crate::io_uring::BUFFER_LEN;
 const MAX_PACKET_SIZE: usize = BUFFER_LEN;
+// Number of read URBs to keep queued with the USB host controller at all times.
+// Keeping 2 in flight means the controller always has a buffer ready even while
+// the upper layer is busy parsing packets from the previous completion.
+const MIN_PENDING_READS: usize = 2;
 
 pub struct UsbStreamRead {
     pub read_queue: Endpoint<Bulk, In>,
+    /// Overflow bytes from the last URB that didn't fit into the caller's ReadBuf.
     read_buffer: Vec<u8>,
+    /// Cursor into `read_buffer`: first unconsumed byte index.
+    /// Using a cursor avoids O(n) Vec::drain on every cached read.
+    read_buffer_pos: usize,
 }
 pub struct UsbStreamWrite {
     pub write_queue: Endpoint<Bulk, Out>,
@@ -178,10 +186,17 @@ pub async fn new(
 }
 
 impl UsbStreamRead {
-    pub fn new(read_queue: Endpoint<Bulk, In>) -> Self {
+    pub fn new(mut read_queue: Endpoint<Bulk, In>) -> Self {
+        // Pre-fill the USB host controller's queue so there is never a window
+        // where no read URB is pending — even before the first poll_read call.
+        for _ in 0..MIN_PENDING_READS {
+            let buffer = read_queue.allocate(MAX_PACKET_SIZE);
+            read_queue.submit(buffer);
+        }
         UsbStreamRead {
             read_queue,
             read_buffer: Vec::with_capacity(MAX_PACKET_SIZE),
+            read_buffer_pos: 0,
         }
     }
 }
@@ -189,6 +204,27 @@ impl UsbStreamRead {
 impl UsbStreamWrite {
     pub fn new(write_queue: Endpoint<Bulk, Out>) -> Self {
         UsbStreamWrite { write_queue }
+    }
+
+    /// Submit an owned buffer directly, bypassing the `AsyncWrite` trait's
+    /// `&[u8]` → `buf.to_vec()` copy.  Allows up to `MAX_PENDING_WRITES`
+    /// URBs to be in-flight simultaneously for better write throughput.
+    pub async fn write_owned(&mut self, buf: Vec<u8>) -> io::Result<usize> {
+        const MAX_PENDING_WRITES: usize = 4;
+        let len = buf.len();
+
+        // If the queue is saturated, wait for at least one completion so we
+        // get back-pressure and have a chance to detect errors.
+        while self.write_queue.pending() >= MAX_PENDING_WRITES {
+            let res = self.write_queue.next_complete().await;
+            if let Err(e) = res.status {
+                return Err(io::Error::new(io::ErrorKind::Other, e));
+            }
+        }
+
+        // Submit directly from the owned Vec — no extra copy needed.
+        self.write_queue.submit(buf.into());
+        Ok(len)
     }
 }
 
@@ -200,57 +236,74 @@ impl AsyncRead for UsbStreamRead {
     ) -> Poll<io::Result<()>> {
         let pin = self.get_mut();
 
-        // either read from local buffer or request from remote
-        if pin.read_buffer.is_empty() {
-            // make sure there's pending request
-            if pin.read_queue.pending() == 0 {
-                let buffer = pin.read_queue.allocate(MAX_PACKET_SIZE);
-                pin.read_queue.submit(buffer);
+        // Helper: keep MIN_PENDING_READS URBs submitted at all times so the
+        // USB host controller is never starved — called from BOTH branches.
+        #[inline(always)]
+        fn replenish(pin: &mut UsbStreamRead) {
+            while pin.read_queue.pending() < MIN_PENDING_READS {
+                let buf = pin.read_queue.allocate(MAX_PACKET_SIZE);
+                pin.read_queue.submit(buf);
             }
+        }
 
-            // try to read from the remote
+        let cached_remaining = pin.read_buffer.len() - pin.read_buffer_pos;
+
+        if cached_remaining == 0 {
+            // Buffer fully consumed — reset cursor and reuse the allocation.
+            pin.read_buffer.clear();
+            pin.read_buffer_pos = 0;
+
+            // Ensure the pipeline is primed before we wait.
+            replenish(pin);
+
+            // Wait for the next completed URB.
             let res = ready!(pin.read_queue.poll_next_complete(cx));
 
-            // Submit next URB immediately after receiving the current one to keep
-            // the USB pipeline full and eliminate the gap between reads (Bug 3).
-            let buffer = pin.read_queue.allocate(MAX_PACKET_SIZE);
-            pin.read_queue.submit(buffer);
+            // Replenish immediately after reaping so the controller always
+            // has work queued by the time we return to the caller.
+            replenish(pin);
 
-            // copy into poll buffer
-            let copy_from_buffer = {
-                let unfilled = buf.initialize_unfilled();
-                let copy_from_buffer = std::cmp::min(unfilled.len(), res.buffer.len());
-                unfilled[..copy_from_buffer].copy_from_slice(&res.buffer[..copy_from_buffer]);
+            // Propagate transfer errors (e.g. device disconnect) instead of
+            // silently returning Ok(()) with zero bytes.
+            if let Err(e) = res.status {
+                return Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e)));
+            }
 
-                copy_from_buffer
-            };
-            buf.advance(copy_from_buffer);
-            // copy the rest into local buffer
-            pin.read_buffer
-                .extend_from_slice(&res.buffer[copy_from_buffer..]);
+            // Copy as much as fits into the caller's ReadBuf.
+            let unfilled = buf.initialize_unfilled();
+            let copy_len = std::cmp::min(unfilled.len(), res.buffer.len());
+            unfilled[..copy_len].copy_from_slice(&res.buffer[..copy_len]);
+            buf.advance(copy_len);
+
+            // Stash any overflow for subsequent poll_read calls.
+            // read_buffer_pos stays 0 — the cursor starts at the beginning.
+            if res.buffer.len() > copy_len {
+                pin.read_buffer.extend_from_slice(&res.buffer[copy_len..]);
+            }
+
             Poll::Ready(Ok(()))
         } else {
-            let copy_from_buffer = {
-                let unfilled = buf.initialize_unfilled();
+            // Serve bytes from the overflow buffer accumulated in a prior poll.
+            //
+            // Bug fix A: replenish URBs here too.  Without this, both pending
+            // URBs can complete while we drain cached data and the hardware
+            // goes idle until the next is_empty branch is reached.
+            replenish(pin);
 
-                // check if possible to read more
-                if unfilled.is_empty() {
-                    return Poll::Pending;
-                }
+            let unfilled = buf.initialize_unfilled();
+            if unfilled.is_empty() {
+                return Poll::Pending;
+            }
 
-                // first copy from local buffer
-                let copy_from_buffer = std::cmp::min(unfilled.len(), pin.read_buffer.len());
-
-                if copy_from_buffer > 0 {
-                    unfilled[..copy_from_buffer]
-                        .copy_from_slice(&pin.read_buffer[..copy_from_buffer]);
-                    pin.read_buffer.drain(..copy_from_buffer);
-                }
-
-                copy_from_buffer
-            };
-
-            buf.advance(copy_from_buffer);
+            // Bug fix B: advance a cursor instead of Vec::drain.
+            // drain(..n) is O(n) — it shifts every remaining byte left.
+            // Moving a usize index is O(1) and reuses the same allocation.
+            let copy_len = std::cmp::min(unfilled.len(), cached_remaining);
+            let src_start = pin.read_buffer_pos;
+            unfilled[..copy_len]
+                .copy_from_slice(&pin.read_buffer[src_start..src_start + copy_len]);
+            pin.read_buffer_pos += copy_len;
+            buf.advance(copy_len);
 
             Poll::Ready(Ok(()))
         }

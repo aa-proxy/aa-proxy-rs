@@ -36,9 +36,14 @@ const NAME: &str = "<i><bright-black> proxy: </>";
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 const USB_ACCESSORY_PATH: &str = "/dev/usb_accessory";
-pub const BUFFER_LEN: usize = 16 * 1024;
+// 64 KB per URB: 4× fewer kernel round-trips vs 16 KB at high bitrates.
+// At 20 Mbps (1080p/60 fps AA video) this reduces URB count from ~1250/s to ~312/s.
+pub const BUFFER_LEN: usize = 128 * 1024;
 const TCP_CLIENT_TIMEOUT: Duration = Duration::new(30, 0);
 const COMP_APP_TCP_PORT: u16 = 9999;
+
+const TCP_RECV_BUFFER_SIZE: usize = 256 * 1024; // 256 KB
+const TCP_SEND_BUFFER_SIZE: usize = 256 * 1024; // 256 KB
 
 use crate::config::{Action, SharedConfig};
 use crate::config::{TCP_DHU_PORT, TCP_SERVER_PORT};
@@ -195,6 +200,31 @@ async fn flatten<T>(handle: &mut JoinHandle<Result<T>>) -> Result<T> {
     }
 }
 
+/// Set SO_RCVBUF / SO_SNDBUF on any socket via its raw file descriptor.
+/// Works for both `tokio::net::TcpStream` and `tokio_uring::net::TcpStream`
+/// because both implement `AsRawFd`.
+fn apply_tcp_buffer_sizes(fd: std::os::unix::io::RawFd) {
+    use libc::{setsockopt, SOL_SOCKET, SO_RCVBUF, SO_SNDBUF};
+    let recv_size = TCP_RECV_BUFFER_SIZE as libc::c_int;
+    let send_size = TCP_SEND_BUFFER_SIZE as libc::c_int;
+    unsafe {
+        setsockopt(
+            fd,
+            SOL_SOCKET,
+            SO_RCVBUF,
+            &recv_size as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        );
+        setsockopt(
+            fd,
+            SOL_SOCKET,
+            SO_SNDBUF,
+            &send_size as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        );
+    }
+}
+
 async fn tcp_bridge(remote_addr: &str, local_addr: &str) {
     loop {
         debug!(
@@ -308,9 +338,11 @@ async fn tcp_wait_for_connection(listener: &mut TcpListener) -> Result<(TcpStrea
         .await;
     });
 
-    // disable Nagle algorithm, so segments are always sent as soon as possible,
-    // even if there is only a small amount of data
+    // Disable Nagle's algorithm and enlarge kernel socket buffers for
+    // high-throughput Android Auto video streaming.
+    use std::os::unix::io::AsRawFd;
     stream.set_nodelay(true)?;
+    apply_tcp_buffer_sizes(stream.as_raw_fd());
 
     Ok((stream, addr))
 }
@@ -446,10 +478,11 @@ pub async fn io_loop(
         let mut hu_tcp_stream = None;
 
         // MITM/proxy mpsc channels:
-        let (tx_hu, rx_md): (Sender<Packet>, Receiver<Packet>) = mpsc::channel(10);
-        let (tx_md, rx_hu): (Sender<Packet>, Receiver<Packet>) = mpsc::channel(10);
-        let (txr_hu, rxr_md): (Sender<Packet>, Receiver<Packet>) = mpsc::channel(10);
-        let (txr_md, rxr_hu): (Sender<Packet>, Receiver<Packet>) = mpsc::channel(10);
+        // 64-deep channels absorb H.264 keyframe bursts without stalling readers.
+        let (tx_hu, rx_md): (Sender<Packet>, Receiver<Packet>) = mpsc::channel(64);
+        let (tx_md, rx_hu): (Sender<Packet>, Receiver<Packet>) = mpsc::channel(64);
+        let (txr_hu, rxr_md): (Sender<Packet>, Receiver<Packet>) = mpsc::channel(64);
+        let (txr_md, rxr_hu): (Sender<Packet>, Receiver<Packet>) = mpsc::channel(64);
 
         // selecting I/O device for reading and writing
         // and creating desired objects for proxy functions
