@@ -28,7 +28,7 @@ use std::time::Duration;
 use tokio::runtime::Builder;
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::Sender as BroadcastSender;
-use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
 use tokio::time::Instant;
@@ -190,7 +190,7 @@ async fn tokio_main(
     restart_tx: BroadcastSender<Option<Action>>,
     tcp_start: Arc<Notify>,
     config_file: PathBuf,
-    tx: Arc<Mutex<Option<Sender<Packet>>>>,
+    tx: Arc<Mutex<Option<UnboundedSender<Packet>>>>,
     sensor_channel: Arc<Mutex<Option<u8>>>,
     led_support: bool,
     button_support: bool,

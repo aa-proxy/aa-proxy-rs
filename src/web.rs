@@ -38,7 +38,7 @@ use tokio::fs::File;
 use tokio::io::duplex;
 use tokio::io::AsyncWriteExt;
 use tokio::io::DuplexStream;
-use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Mutex;
 use tokio_util::io::ReaderStream;
 
@@ -57,7 +57,7 @@ pub struct AppState {
     pub config: SharedConfig,
     pub config_json: SharedConfigJson,
     pub config_file: Arc<PathBuf>,
-    pub tx: Arc<Mutex<Option<Sender<Packet>>>>,
+    pub tx: Arc<Mutex<Option<UnboundedSender<Packet>>>>,
     pub sensor_channel: Arc<Mutex<Option<u8>>>,
 }
 

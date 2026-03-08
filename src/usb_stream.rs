@@ -47,7 +47,7 @@ pub enum WriteError {
 use crate::io_uring::BUFFER_LEN;
 const MAX_PACKET_SIZE: usize = BUFFER_LEN;
 // Number of read URBs to keep queued with the USB host controller at all times.
-// In flight that means the controller always has a buffer ready even while
+// Keeping 8 in flight that means the controller always has a buffer ready even while
 // the upper layer is busy parsing packets from the previous completion.
 const MIN_PENDING_READS: usize = 8;
 
@@ -256,11 +256,10 @@ impl UsbStreamWrite {
     /// `&[u8]` → `buf.to_vec()` copy.  Allows up to `MAX_PENDING_WRITES`
     /// URBs to be in-flight simultaneously for better write throughput.
     pub async fn write_owned(&mut self, buf: Vec<u8>) -> io::Result<usize> {
-        const MAX_PENDING_WRITES: usize = 4;
+        const MAX_PENDING_WRITES: usize = 32;  // 4 → 32
         let len = buf.len();
 
-        // If the queue is saturated, wait for at least one completion so we
-        // get back-pressure and have a chance to detect errors.
+        // Only wait if we're completely saturated
         while self.write_queue.pending() >= MAX_PENDING_WRITES {
             let res = self.write_queue.next_complete().await;
             if let Err(e) = res.status {
@@ -268,7 +267,6 @@ impl UsbStreamWrite {
             }
         }
 
-        // Submit directly from the owned Vec — no extra copy needed.
         self.write_queue.submit(buf.into());
         self.counters.pending_writes.store(self.write_queue.pending(), Ordering::Relaxed);
         Ok(len)
@@ -374,9 +372,7 @@ impl AsyncWrite for UsbStreamWrite {
         let pin = self.get_mut();
         let len = buf.len();
 
-        // Drain any already-completed transfers non-blocking to detect errors
-        // and prevent unbounded queue growth. Must NOT use block_on here as
-        // this runs on the single-threaded tokio-uring executor (Bug 1).
+        // Drain completions non-blocking
         while pin.write_queue.pending() > 0 {
             match pin.write_queue.poll_next_complete(cx) {
                 Poll::Ready(res) => {
@@ -388,8 +384,15 @@ impl AsyncWrite for UsbStreamWrite {
             }
         }
 
-        // Submit the new data to the kernel USB driver and report it as
-        // consumed. The transfer completes asynchronously (Bug 2 fix: was Ok(0)).
+        // CRITICAL: Don't wait if queue has space - submit immediately!
+        const MAX_PENDING_WRITES: usize = 32;  // Match write_owned
+        
+        if pin.write_queue.pending() >= MAX_PENDING_WRITES {
+            // Queue full - apply backpressure
+            return Poll::Pending;
+        }
+
+        // Submit immediately
         pin.write_queue.submit(buf.to_vec().into());
         pin.counters.pending_writes.store(pin.write_queue.pending(), Ordering::Relaxed);
         Poll::Ready(Ok(len))
@@ -406,3 +409,5 @@ impl AsyncWrite for UsbStreamWrite {
         Poll::Ready(Ok(()))
     }
 }
+
+
