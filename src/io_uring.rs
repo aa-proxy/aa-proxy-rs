@@ -4,7 +4,6 @@ use humantime::format_duration;
 use mac_address::MacAddress;
 use simplelog::*;
 use std::cell::RefCell;
-use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::net::IpAddr;
 use std::rc::Rc;
@@ -16,7 +15,7 @@ use tokio::io::{self, copy_bidirectional, AsyncBufReadExt, BufReader};
 use tokio::net::TcpStream as TokioTcpStream;
 use tokio::process::Command;
 use tokio::sync::broadcast::Sender as BroadcastSender;
-use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
 use tokio::sync::{mpsc, Mutex, Notify};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
@@ -45,15 +44,7 @@ const COMP_APP_TCP_PORT: u16 = 9999;
 const TCP_RECV_BUFFER_SIZE: usize = 32 * 1024; // 32 KB
 const TCP_SEND_BUFFER_SIZE: usize = 32 * 1024; // 32 KB
 
-const READER_QUEUE_DEPTH: usize = 32;   // Large for video bursts
-const TRANSMIT_QUEUE_DEPTH: usize = 16; // Moderate for forwarding
-
-/// CoDel-like AQM: maximum sojourn time before a data packet is dropped.
-/// Packets on channel 0 (Android Auto control channel) are always forwarded.
-const AQM_MAX_LATENCY: Duration = Duration::from_millis(200);
-/// Depth of the small output channel between each AQM relay and the proxy.
-/// The relay's internal VecDeque handles real buffering.
-const AQM_QUEUE_DEPTH: usize = 8;
+const READER_QUEUE_DEPTH: usize = 32;   // Bounded reader queues absorb H.264 keyframe bursts
 
 use crate::config::{Action, SharedConfig};
 use crate::config::{TCP_DHU_PORT, TCP_SERVER_PORT};
@@ -113,7 +104,7 @@ async fn transfer_monitor(
     tcp_bytes_written: Arc<AtomicUsize>,
     read_timeout: Duration,
     config: SharedConfig,
-    channels: [Sender<Packet>; 4],
+    channels: [Sender<Packet>; 2],
     usb_read_counters: Option<Arc<UsbReadCounters>>,
     usb_write_counters: Option<Arc<UsbWriteCounters>>,
 ) -> Result<()> {
@@ -170,8 +161,9 @@ async fn transfer_monitor(
             );
 
             // Channel queue depths: items currently queued = max_capacity - capacity.
-            // [tx_hu, tx_md, txr_hu, txr_md]
-            let ch_names = ["tx_hu", "tx_md", "txr_hu", "txr_md"];
+            // tx_hu/tx_md are now unbounded; only bounded reader queues are tracked here.
+            // [txr_hu, txr_md]
+            let ch_names = ["txr_hu", "txr_md"];
             let ch_depths: Vec<String> = channels
                 .iter()
                 .zip(ch_names.iter())
@@ -399,7 +391,7 @@ pub async fn io_loop(
     need_restart: BroadcastSender<Option<Action>>,
     tcp_start: Arc<Notify>,
     config: SharedConfig,
-    tx: Arc<Mutex<Option<Sender<Packet>>>>,
+    tx: Arc<Mutex<Option<UnboundedSender<Packet>>>>,
     sensor_channel: Arc<Mutex<Option<u8>>>,
 ) -> Result<()> {
     let shared_config = config.clone();
@@ -526,20 +518,19 @@ pub async fn io_loop(
         let mut hu_tcp_stream = None;
 
         // MITM/proxy mpsc channels:
-        // 256-deep channels absorb H.264 keyframe bursts (a single 700 KB I-frame splits into
-        // ~44 AA packets at 16 KB each; two overlapping keyframes fill a 64-slot channel and
-        // stall the reader tasks, compounding ACK back-pressure from the phone).
-        let (tx_hu, rx_md): (Sender<Packet>, Receiver<Packet>) = mpsc::channel(TRANSMIT_QUEUE_DEPTH);
-        let (tx_md, rx_hu): (Sender<Packet>, Receiver<Packet>) = mpsc::channel(TRANSMIT_QUEUE_DEPTH);
+        // tx_hu/tx_md are unbounded to prevent async ABBA deadlock: if both were bounded,
+        // proxy_hu could block on tx_hu.send() while proxy_md is blocked on tx_md.send(),
+        // each waiting for the other to drain its rx — neither can make progress.
+        // Backpressure is applied instead at the reader level via bounded txr_* channels.
+        let (tx_hu, rx_md): (UnboundedSender<Packet>, UnboundedReceiver<Packet>) = mpsc::unbounded_channel();
+        let (tx_md, rx_hu): (UnboundedSender<Packet>, UnboundedReceiver<Packet>) = mpsc::unbounded_channel();
         let (txr_hu, rxr_md): (Sender<Packet>, Receiver<Packet>) = mpsc::channel(READER_QUEUE_DEPTH);
         let (txr_md, rxr_hu): (Sender<Packet>, Receiver<Packet>) = mpsc::channel(READER_QUEUE_DEPTH);
 
         // Clone senders now, before they are moved into tasks, so the monitor
         // can sample their queue depths via max_capacity() - capacity().
-        // Order matches the array expected by transfer_monitor.
+        // Only the bounded reader channels are tracked; tx_hu/tx_md are unbounded.
         let monitor_channels = [
-            tx_hu.clone(),
-            tx_md.clone(),
             txr_hu.clone(),
             txr_md.clone(),
         ];

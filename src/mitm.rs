@@ -10,9 +10,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
-use tokio::io::AsyncWriteExt;
-use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::timeout;
+use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
 use tokio_uring::buf::BoundedBuf;
 
 // protobuf stuff:
@@ -120,6 +119,7 @@ impl SslMemBuf {
     }
 }
 
+#[derive(Debug)]
 pub struct Packet {
     pub channel: u8,
     pub flags: u8,
@@ -869,8 +869,8 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
     proxy_type: ProxyType,
     mut device: IoDevice<A>,
     bytes_written: Arc<AtomicUsize>,
-    tx: Sender<Packet>,
-    mut rx: Receiver<Packet>,
+    tx: UnboundedSender<Packet>,
+    mut rx: UnboundedReceiver<Packet>,
     mut rxr: Receiver<Packet>,
     mut config: SharedConfig,
     sensor_channel: Arc<tokio::sync::Mutex<Option<u8>>>,
@@ -882,37 +882,39 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
 
     // in full_frames/passthrough mode we only directly pass packets from one endpoint to the other
     if passthrough {
-        loop {
-            tokio::select! {
-                // Fair (non-biased) selection: both arms are polled with equal priority.
-                // A biased selector would starve rxr (car ACKs / control messages back to the
-                // phone) whenever rx (phone→car video data) is continuously ready, because
-                // the phone throttles its send rate when ACKs stop arriving — causing a 2-3×
-                // throughput drop once the tx_md / txr_hu channels saturate.
-
-                // handling data from opposite device's thread, which needs to be transmitted
-                Some(pkt) = rx.recv() => {
-                    debug!("{} rx.recv", get_name(proxy_type));
-                    let _ = pkt_debug(proxy_type, HexdumpLevel::RawOutput, hex_requested, &pkt).await;
-
-                    pkt.transmit(&mut device)
-                        .await
-                        .with_context(|| format!("proxy/{}: transmit failed", get_name(proxy_type)))?;
-
-                    // Increment byte counters for statistics
-                    // fixme: compute final_len for precise stats
-                    bytes_written.fetch_add(HEADER_LENGTH + pkt.payload.len(), Ordering::Relaxed);
-                }
-
-                // handling input data from the reader thread
-                Some(pkt) = rxr.recv() => {
-                    debug!("{} rxr.recv", get_name(proxy_type));
-                    let _ = pkt_debug(proxy_type, HexdumpLevel::RawOutput, hex_requested, &pkt).await;
-
-                    tx.send(pkt).await?;
+        // spawn an independent task to constantly drain rxr -> tx without being blocked by Tx I/O
+        let tx_clone = tx.clone();
+        let proxy_type_clone = proxy_type.clone();
+        let rxr_drain_handle = tokio_uring::spawn(async move {
+            while let Some(pkt) = rxr.recv().await {
+                debug!("{} rxr.recv (decoupled)", get_name(proxy_type_clone));
+                // Let the debug logging happen without awaiting, since we only need the output if log_enabled.
+                let _ = pkt_debug(proxy_type_clone, HexdumpLevel::RawOutput, hex_requested, &pkt).await;
+                if tx_clone.send(pkt).is_err() {
+                    break;
                 }
             }
+        });
+
+        loop {
+            // handling data from opposite device's thread, which needs to be transmitted
+            if let Some(pkt) = rx.recv().await {
+                debug!("{} rx.recv", get_name(proxy_type));
+                let _ = pkt_debug(proxy_type, HexdumpLevel::RawOutput, hex_requested, &pkt).await;
+
+                pkt.transmit(&mut device)
+                    .await
+                    .with_context(|| format!("proxy/{}: transmit failed", get_name(proxy_type)))?;
+
+                // Increment byte counters for statistics
+                // fixme: compute final_len for precise stats
+                bytes_written.fetch_add(HEADER_LENGTH + pkt.payload.len(), Ordering::Relaxed);
+            } else {
+                break; // rx channel disconnected
+            }
         }
+        rxr_drain_handle.abort();
+        return Ok(());
     }
 
     let ssl = ssl_builder(proxy_type).await?;
@@ -936,7 +938,7 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
         )
         .await;
         // sending to the MD
-        tx.send(pkt).await?;
+        tx.send(pkt)?;
         // waiting for MD reply
         let pkt = rx.recv().await.ok_or("rx channel hung up")?;
         // sending reply back to the HU
@@ -990,7 +992,7 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
         )
         .await;
         // sending reply back to the HU
-        tx.send(pkt).await?;
+        tx.send(pkt)?;
 
         // doing SSL handshake
         const STEPS: u8 = 3;
@@ -1035,70 +1037,94 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
     };
     loop {
         tokio::select! {
-        // handling data from opposite device's thread, which needs to be transmitted
-        Some(mut pkt) = rx.recv() => {
-            let handled = pkt_modify_hook(
-                proxy_type,
-                &mut pkt,
-                &mut ctx,
-                sensor_channel.clone(),
-                &cfg,
-                &mut config,
-            )
-            .await?;
-            let _ = pkt_debug(
-                proxy_type,
-                HexdumpLevel::DecryptedOutput,
-                hex_requested,
-                &pkt,
-            )
-            .await;
+            // handling data from opposite device's thread, which needs to be transmitted
+            Some(mut pkt) = rx.recv() => {
+                let handled = pkt_modify_hook(
+                    proxy_type,
+                    &mut pkt,
+                    &mut ctx,
+                    sensor_channel.clone(),
+                    &cfg,
+                    &mut config,
+                )
+                .await?;
+                let _ = pkt_debug(
+                    proxy_type,
+                    HexdumpLevel::DecryptedOutput,
+                    hex_requested,
+                    &pkt,
+                )
+                .await;
 
-            if handled {
-                debug!(
-                    "{} pkt_modify_hook: message has been handled, sending reply packet only...",
-                    get_name(proxy_type)
-                );
-                tx.send(pkt).await?;
-            } else {
-                pkt.encrypt_payload(&mut mem_buf, &mut server).await?;
-                let _ = pkt_debug(proxy_type, HexdumpLevel::RawOutput, hex_requested, &pkt).await;
-                pkt.transmit(&mut device)
-                    .await
-                    .with_context(|| format!("proxy/{}: transmit failed", get_name(proxy_type)))?;
+                if handled {
+                    debug!(
+                        "{} pkt_modify_hook: message has been handled, sending reply packet only...",
+                        get_name(proxy_type)
+                    );
+                    tx.send(pkt)?;
+                } else {
+                    pkt.encrypt_payload(&mut mem_buf, &mut server).await?;
+                    let _ = pkt_debug(proxy_type, HexdumpLevel::RawOutput, hex_requested, &pkt).await;
+                    
+                    // Transmit packet without blocking the concurrent drain of rxr
+                    // We can't spawn because transmit takes `&mut device`.
+                    pkt.transmit(&mut device)
+                        .await
+                        .with_context(|| format!("proxy/{}: transmit failed", get_name(proxy_type)))?;
 
-                // Increment byte counters for statistics
-                // fixme: compute final_len for precise stats
-                bytes_written.fetch_add(HEADER_LENGTH + pkt.payload.len(), Ordering::Relaxed);
-            }
-        }
+                    // Increment byte counters for statistics
+                    // fixme: compute final_len for precise stats
+                    bytes_written.fetch_add(HEADER_LENGTH + pkt.payload.len(), Ordering::Relaxed);
 
-        // handling input data from the reader thread
-        Some(mut pkt) = rxr.recv() => {
-            let _ = pkt_debug(proxy_type, HexdumpLevel::RawInput, hex_requested, &pkt).await;
-            match pkt.decrypt_payload(&mut mem_buf, &mut server).await {
-                Ok(_) => {
-                    let _ = pkt_modify_hook(
-                        proxy_type,
-                        &mut pkt,
-                        &mut ctx,
-                        sensor_channel.clone(),
-                        &cfg,
-                        &mut config,
-                    )
-                    .await?;
-                    let _ = pkt_debug(
-                        proxy_type,
-                        HexdumpLevel::DecryptedInput,
-                        hex_requested,
-                        &pkt,
-                    )
-                    .await;
-                    tx.send(pkt).await?;
+                    // Post-write drain as before to quickly dispatch queued ACKs
+                    while let Ok(mut fwd_pkt) = rxr.try_recv() {
+                        let _ = pkt_debug(proxy_type, HexdumpLevel::RawInput, hex_requested, &fwd_pkt).await;
+                        match fwd_pkt.decrypt_payload(&mut mem_buf, &mut server).await {
+                            Ok(_) => {
+                                let _ = pkt_modify_hook(
+                                    proxy_type,
+                                    &mut fwd_pkt,
+                                    &mut ctx,
+                                    sensor_channel.clone(),
+                                    &cfg,
+                                    &mut config,
+                                )
+                                .await?;
+                                let _ = pkt_debug(proxy_type, HexdumpLevel::DecryptedInput, hex_requested, &fwd_pkt).await;
+                                tx.send(fwd_pkt)?;
+                            }
+                            Err(e) => error!("decrypt_payload (post-write drain): {:?}", e),
+                        }
+                    }
                 }
-                Err(e) => error!("decrypt_payload: {:?}", e),
             }
-        }
+
+            // handling input data from the reader thread
+            Some(mut pkt) = rxr.recv() => {
+                let _ = pkt_debug(proxy_type, HexdumpLevel::RawInput, hex_requested, &pkt).await;
+                match pkt.decrypt_payload(&mut mem_buf, &mut server).await {
+                    Ok(_) => {
+                        let _ = pkt_modify_hook(
+                            proxy_type,
+                            &mut pkt,
+                            &mut ctx,
+                            sensor_channel.clone(),
+                            &cfg,
+                            &mut config,
+                        )
+                        .await?;
+                        let _ = pkt_debug(
+                            proxy_type,
+                            HexdumpLevel::DecryptedInput,
+                            hex_requested,
+                            &pkt,
+                        )
+                        .await;
+                        tx.send(pkt)?;
+                    }
+                    Err(e) => error!("decrypt_payload: {:?}", e),
+                }
+            }
         }
     }
 }
