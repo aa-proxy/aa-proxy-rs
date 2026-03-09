@@ -1,7 +1,7 @@
 use nusb::Endpoint;
 use nusb::{
     transfer::{Bulk, In, Out},
-    Device, MaybeFuture,
+    Device, Interface, MaybeFuture,
 };
 use simplelog::*;
 use std::io;
@@ -50,6 +50,9 @@ const MAX_PACKET_SIZE: usize = BUFFER_LEN;
 // Keeping 8 in flight that means the controller always has a buffer ready even while
 // the upper layer is busy parsing packets from the previous completion.
 const MIN_PENDING_READS: usize = 8;
+// Keep the HU write queue intentionally shallow so congestion propagates back to
+// the phone quickly instead of accumulating large video/audio buffers locally.
+const MAX_PENDING_WRITES: usize = 2;
 
 /// Live performance counters for a single USB stream direction.
 /// Updated in the hot path with `Ordering::Relaxed`; sampled by the
@@ -85,6 +88,10 @@ impl UsbWriteCounters {
 
 pub struct UsbStreamRead {
     pub read_queue: Endpoint<Bulk, In>,
+    /// Keeps the USB interface claim alive for the lifetime of the endpoints.
+    /// Dropping `Interface` releases the kernel claim; the endpoints must not
+    /// outlive it, so we store it here alongside the read endpoint.
+    _iface: Interface,
     /// Overflow bytes from the last URB that didn't fit into the caller's ReadBuf.
     read_buffer: Vec<u8>,
     /// Cursor into `read_buffer`: first unconsumed byte index.
@@ -220,13 +227,13 @@ pub async fn new(
 
     Ok((
         device,
-        UsbStreamRead::new(read_queue),
+        UsbStreamRead::new(read_queue, iface),
         UsbStreamWrite::new(write_queue),
     ))
 }
 
 impl UsbStreamRead {
-    pub fn new(mut read_queue: Endpoint<Bulk, In>) -> Self {
+    pub fn new(mut read_queue: Endpoint<Bulk, In>, iface: Interface) -> Self {
         // Pre-fill the USB host controller's queue so there is never a window
         // where no read URB is pending — even before the first poll_read call.
         for _ in 0..MIN_PENDING_READS {
@@ -237,6 +244,7 @@ impl UsbStreamRead {
         counters.pending_reads.store(read_queue.pending(), Ordering::Relaxed);
         UsbStreamRead {
             read_queue,
+            _iface: iface,
             read_buffer: Vec::with_capacity(MAX_PACKET_SIZE),
             read_buffer_pos: 0,
             counters,
@@ -256,7 +264,6 @@ impl UsbStreamWrite {
     /// `&[u8]` → `buf.to_vec()` copy.  Allows up to `MAX_PENDING_WRITES`
     /// URBs to be in-flight simultaneously for better write throughput.
     pub async fn write_owned(&mut self, buf: Vec<u8>) -> io::Result<usize> {
-        const MAX_PENDING_WRITES: usize = 32;  // 4 → 32
         let len = buf.len();
 
         // Only wait if we're completely saturated
@@ -384,8 +391,8 @@ impl AsyncWrite for UsbStreamWrite {
             }
         }
 
-        // CRITICAL: Don't wait if queue has space - submit immediately!
-        const MAX_PENDING_WRITES: usize = 32;  // Match write_owned
+        // Submit immediately while there is still explicit room in the bounded
+        // USB queue; once full, return Pending to propagate backpressure.
         
         if pin.write_queue.pending() >= MAX_PENDING_WRITES {
             // Queue full - apply backpressure
@@ -409,5 +416,6 @@ impl AsyncWrite for UsbStreamWrite {
         Poll::Ready(Ok(()))
     }
 }
+
 
 

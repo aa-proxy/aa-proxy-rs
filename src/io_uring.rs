@@ -15,7 +15,7 @@ use tokio::io::{self, copy_bidirectional, AsyncBufReadExt, BufReader};
 use tokio::net::TcpStream as TokioTcpStream;
 use tokio::process::Command;
 use tokio::sync::broadcast::Sender as BroadcastSender;
-use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, Mutex, Notify};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
@@ -41,10 +41,11 @@ pub const BUFFER_LEN: usize = 16 * 1024;
 const TCP_CLIENT_TIMEOUT: Duration = Duration::new(30, 0);
 const COMP_APP_TCP_PORT: u16 = 9999;
 
-const TCP_RECV_BUFFER_SIZE: usize = 32 * 1024; // 32 KB
-const TCP_SEND_BUFFER_SIZE: usize = 32 * 1024; // 32 KB
-
-const READER_QUEUE_DEPTH: usize = 32;   // Bounded reader queues absorb H.264 keyframe bursts
+const TCP_BUFFER_SIZE: usize = 32 * 1024; // 32 KB
+// Keep only a small number of fully parsed AA packets buffered between tasks.
+// A slow HU should stall the phone-side reader quickly so TCP backpressure can
+// reach Android and trigger bitrate/resolution adaptation.
+const READER_QUEUE_DEPTH: usize = 2;
 
 use crate::config::{Action, SharedConfig};
 use crate::config::{TCP_DHU_PORT, TCP_SERVER_PORT};
@@ -98,13 +99,37 @@ pub enum IoDevice<A: Endpoint<A>> {
     TcpStreamIo(Rc<TcpStream>),
 }
 
+/// Set SO_RCVBUF / SO_SNDBUF on any socket via its raw file descriptor.
+/// Works for both `tokio::net::TcpStream` and `tokio_uring::net::TcpStream`
+/// because both implement `AsRawFd`.
+fn apply_tcp_buffer_sizes(fd: std::os::unix::io::RawFd) {
+    use libc::{setsockopt, SOL_SOCKET, SO_RCVBUF, SO_SNDBUF};
+    let buf_size = TCP_BUFFER_SIZE as libc::c_int;
+    unsafe {
+        setsockopt(
+            fd,
+            SOL_SOCKET,
+            SO_RCVBUF,
+            &buf_size as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        );
+        setsockopt(
+            fd,
+            SOL_SOCKET,
+            SO_SNDBUF,
+            &buf_size as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        );
+    }
+}
+
 async fn transfer_monitor(
     stats_interval: Option<Duration>,
     usb_bytes_written: Arc<AtomicUsize>,
     tcp_bytes_written: Arc<AtomicUsize>,
     read_timeout: Duration,
     config: SharedConfig,
-    channels: [Sender<Packet>; 2],
+    monitor_channels: [Sender<Packet>; 4],
     usb_read_counters: Option<Arc<UsbReadCounters>>,
     usb_write_counters: Option<Arc<UsbWriteCounters>>,
 ) -> Result<()> {
@@ -112,6 +137,9 @@ async fn transfer_monitor(
     let mut tcp_bytes_out_last: usize = 0;
     let mut stall_usb_bytes_last: usize = 0;
     let mut stall_tcp_bytes_last: usize = 0;
+    // Skip the very first stall check: data cannot have flowed yet during the
+    // SSL handshake phase, so the initial interval would always be a false positive.
+    let mut stall_first_check = true;
     let mut report_time = Instant::now();
     let mut stall_check = Instant::now();
 
@@ -131,20 +159,21 @@ async fn transfer_monitor(
 
         // Stats printing
         if stats_interval.is_some() && report_time.elapsed() > stats_interval.unwrap() {
-            // compute USB transfer
-            usb_bytes_out_last = usb_bytes_out - usb_bytes_out_last;
+            let elapsed_secs = report_time.elapsed().as_secs_f64();
+
+            // compute USB transfer — use a separate delta variable so
+            // `usb_bytes_out_last` keeps its "total at last report" semantics.
+            let usb_delta = usb_bytes_out - usb_bytes_out_last;
             let usb_transferred_total = ByteSize::b(usb_bytes_out.try_into().unwrap());
-            let usb_transferred_last = ByteSize::b(usb_bytes_out_last.try_into().unwrap());
-            let usb_speed: u64 =
-                (usb_bytes_out_last as f64 / report_time.elapsed().as_secs_f64()).round() as u64;
+            let usb_transferred_last = ByteSize::b(usb_delta.try_into().unwrap());
+            let usb_speed: u64 = (usb_delta as f64 / elapsed_secs).round() as u64;
             let usb_speed = ByteSize::b(usb_speed);
 
             // compute TCP transfer
-            tcp_bytes_out_last = tcp_bytes_out - tcp_bytes_out_last;
+            let tcp_delta = tcp_bytes_out - tcp_bytes_out_last;
             let tcp_transferred_total = ByteSize::b(tcp_bytes_out.try_into().unwrap());
-            let tcp_transferred_last = ByteSize::b(tcp_bytes_out_last.try_into().unwrap());
-            let tcp_speed: u64 =
-                (tcp_bytes_out_last as f64 / report_time.elapsed().as_secs_f64()).round() as u64;
+            let tcp_transferred_last = ByteSize::b(tcp_delta.try_into().unwrap());
+            let tcp_speed: u64 = (tcp_delta as f64 / elapsed_secs).round() as u64;
             let tcp_speed = ByteSize::b(tcp_speed);
 
             info!(
@@ -161,10 +190,8 @@ async fn transfer_monitor(
             );
 
             // Channel queue depths: items currently queued = max_capacity - capacity.
-            // tx_hu/tx_md are now unbounded; only bounded reader queues are tracked here.
-            // [txr_hu, txr_md]
-            let ch_names = ["txr_hu", "txr_md"];
-            let ch_depths: Vec<String> = channels
+            let ch_names = ["txr_hu", "txr_md", "tx_hu", "tx_md"];
+            let ch_depths: Vec<String> = monitor_channels
                 .iter()
                 .zip(ch_names.iter())
                 .map(|(s, name)| {
@@ -204,11 +231,17 @@ async fn transfer_monitor(
 
         // transfer stall detection
         if stall_check.elapsed() > read_timeout {
-            // compute delta since last check
-            stall_usb_bytes_last = usb_bytes_out - stall_usb_bytes_last;
-            stall_tcp_bytes_last = tcp_bytes_out - stall_tcp_bytes_last;
+            // compute delta since last check using dedicated variables so the
+            // `stall_*_last` accumulators keep their "total at last check" semantics.
+            let usb_stall_delta = usb_bytes_out - stall_usb_bytes_last;
+            let tcp_stall_delta = tcp_bytes_out - stall_tcp_bytes_last;
 
-            if stall_usb_bytes_last == 0 || stall_tcp_bytes_last == 0 {
+            // The first interval covers the SSL handshake phase where the MITM
+            // proxy byte counters are not yet incremented — skip it to avoid a
+            // false-positive stall error before real data starts flowing.
+            if stall_first_check {
+                stall_first_check = false;
+            } else if usb_stall_delta == 0 || tcp_stall_delta == 0 {
                 return Err("unexpected transfer stall".into());
             }
 
@@ -236,32 +269,8 @@ async fn flatten<T>(handle: &mut JoinHandle<Result<T>>) -> Result<T> {
     match handle.await {
         Ok(Ok(result)) => Ok(result),
         Ok(Err(err)) => Err(err),
-        Err(_) => Err("handling failed".into()),
-    }
-}
-
-/// Set SO_RCVBUF / SO_SNDBUF on any socket via its raw file descriptor.
-/// Works for both `tokio::net::TcpStream` and `tokio_uring::net::TcpStream`
-/// because both implement `AsRawFd`.
-fn apply_tcp_buffer_sizes(fd: std::os::unix::io::RawFd) {
-    use libc::{setsockopt, SOL_SOCKET, SO_RCVBUF, SO_SNDBUF};
-    let recv_size = TCP_RECV_BUFFER_SIZE as libc::c_int;
-    let send_size = TCP_SEND_BUFFER_SIZE as libc::c_int;
-    unsafe {
-        setsockopt(
-            fd,
-            SOL_SOCKET,
-            SO_RCVBUF,
-            &recv_size as *const _ as *const libc::c_void,
-            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-        );
-        setsockopt(
-            fd,
-            SOL_SOCKET,
-            SO_SNDBUF,
-            &send_size as *const _ as *const libc::c_void,
-            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-        );
+        // Preserve panic/cancellation details so they appear in logs.
+        Err(e) => Err(format!("task panicked or was cancelled: {e}").into()),
     }
 }
 
@@ -361,24 +370,7 @@ async fn tcp_wait_for_connection(listener: &mut TcpListener) -> Result<(TcpStrea
         NAME, addr
     );
 
-    // this is creating a reverse tcp bridge for Android
-    // direct connection to the device side is not allowed
-    tokio::spawn(async move {
-        info!(
-            "{} starting TCP reverse connection, Android IP: {}",
-            NAME,
-            addr.ip()
-        );
-        // FIXME use port configured by user for webserver
-        // or ignore when webserver disabled...
-        tcp_bridge(
-            &format!("{}:{}", addr.ip(), COMP_APP_TCP_PORT),
-            "127.0.0.1:80",
-        )
-        .await;
-    });
-
-    // Disable Nagle's algorithm and enlarge kernel socket buffers for
+    // Disable Nagle's algorithm for
     // high-throughput Android Auto video streaming.
     use std::os::unix::io::AsRawFd;
     stream.set_nodelay(true)?;
@@ -391,7 +383,7 @@ pub async fn io_loop(
     need_restart: BroadcastSender<Option<Action>>,
     tcp_start: Arc<Notify>,
     config: SharedConfig,
-    tx: Arc<Mutex<Option<UnboundedSender<Packet>>>>,
+    tx: Arc<Mutex<Option<Sender<Packet>>>>,
     sensor_channel: Arc<Mutex<Option<u8>>>,
 ) -> Result<()> {
     let shared_config = config.clone();
@@ -422,11 +414,23 @@ pub async fn io_loop(
         };
         let read_timeout = Duration::from_secs(config.timeout_secs.into());
 
+        // Extract the local webserver port from the bind address string (e.g. "0.0.0.0:80").
+        // Used to forward companion-app connections to the correct local port.
+        let webserver_port: u16 = config
+            .webserver
+            .as_ref()
+            .and_then(|addr| addr.rsplit(':').next())
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(80);
+
         let mut client_mac: Option<MacAddress> = None;
         let mut md_tcp = None;
         let mut md_usb = None;
         let mut hu_tcp = None;
         let mut hu_usb = None;
+        // JoinHandle for the companion-app TCP reverse bridge task (wireless only).
+        // Stored so it can be aborted and awaited during session cleanup.
+        let mut bridge_handle: Option<tokio::task::JoinHandle<()>> = None;
         if config.wired.is_some() {
             info!(
                 "{} 💤 trying to enable Android Auto mode on USB port...",
@@ -455,6 +459,20 @@ pub async fn io_loop(
                 md_tcp = Some(s);
                 // Get MAC address of the connected client for later disassociation
                 client_mac = mac_from_ipv4(ip).await.unwrap_or(None);
+                // Spawn companion-app TCP bridge only when webserver is enabled.
+                // Use the configured webserver port rather than a hardcoded 80.
+                if config.webserver.is_some() {
+                    let comp_addr = format!("{}:{}", ip.ip(), COMP_APP_TCP_PORT);
+                    let local_addr = format!("127.0.0.1:{}", webserver_port);
+                    bridge_handle = Some(tokio::spawn(async move {
+                        info!(
+                            "{} starting TCP reverse connection, Android IP: {}",
+                            NAME,
+                            ip.ip()
+                        );
+                        tcp_bridge(&comp_addr, &local_addr).await;
+                    }));
+                }
             } else {
                 // notify main loop to restart
                 let _ = need_restart.send(None);
@@ -518,21 +536,21 @@ pub async fn io_loop(
         let mut hu_tcp_stream = None;
 
         // MITM/proxy mpsc channels:
-        // tx_hu/tx_md are unbounded to prevent async ABBA deadlock: if both were bounded,
-        // proxy_hu could block on tx_hu.send() while proxy_md is blocked on tx_md.send(),
-        // each waiting for the other to drain its rx — neither can make progress.
-        // Backpressure is applied instead at the reader level via bounded txr_* channels.
-        let (tx_hu, rx_md): (UnboundedSender<Packet>, UnboundedReceiver<Packet>) = mpsc::unbounded_channel();
-        let (tx_md, rx_hu): (UnboundedSender<Packet>, UnboundedReceiver<Packet>) = mpsc::unbounded_channel();
+        // tx_hu/tx_md are bounded to apply end-to-end backpressure.
+        // Passthrough mode avoids mutual-send deadlock by holding at most one
+        // locally pending forward packet per proxy while waiting on tx.reserve().
+        let (tx_hu, rx_md): (Sender<Packet>, Receiver<Packet>) = mpsc::channel(READER_QUEUE_DEPTH);
+        let (tx_md, rx_hu): (Sender<Packet>, Receiver<Packet>) = mpsc::channel(READER_QUEUE_DEPTH);
         let (txr_hu, rxr_md): (Sender<Packet>, Receiver<Packet>) = mpsc::channel(READER_QUEUE_DEPTH);
         let (txr_md, rxr_hu): (Sender<Packet>, Receiver<Packet>) = mpsc::channel(READER_QUEUE_DEPTH);
 
         // Clone senders now, before they are moved into tasks, so the monitor
         // can sample their queue depths via max_capacity() - capacity().
-        // Only the bounded reader channels are tracked; tx_hu/tx_md are unbounded.
         let monitor_channels = [
             txr_hu.clone(),
             txr_md.clone(),
+            tx_hu.clone(),
+            tx_md.clone(),
         ];
 
         // selecting I/O device for reading and writing
@@ -648,6 +666,19 @@ pub async fn io_loop(
         from_file.abort();
         from_stream.abort();
         monitor.abort();
+
+        // Abort the companion-app bridge task if it was spawned this session.
+        if let Some(h) = bridge_handle.take() {
+            h.abort();
+            // Await so the bridge's socket is closed before we restart.
+            let _ = h.await;
+        }
+
+        // Do not await these handles here: `try_join!(flatten(&mut ...))` above
+        // may already have polled one of them to completion, and polling a
+        // `JoinHandle` after completion panics. Aborting is enough to request
+        // cancellation of the remaining tasks before we drop the handles and
+        // shut down the TCP streams below.
 
         // make sure TCP connections are closed before next connection attempts
         if let Some(stream) = md_tcp_stream {
