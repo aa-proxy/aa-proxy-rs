@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::time::timeout;
-use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{Receiver, Sender};
 use tokio_uring::buf::BoundedBuf;
 
 // protobuf stuff:
@@ -311,8 +311,7 @@ pub async fn pkt_modify_hook(
                             response.set_status(MessageStatus::STATUS_SUCCESS);
 
                             let mut payload: Vec<u8> = response.write_to_bytes()?;
-                            payload.insert(0, ((SENSOR_MESSAGE_RESPONSE as u16) >> 8) as u8);
-                            payload.insert(1, ((SENSOR_MESSAGE_RESPONSE as u16) & 0xff) as u8);
+                            prepend_message_id(&mut payload, SENSOR_MESSAGE_RESPONSE as u16);
 
                             let reply = Packet {
                                 channel: ch,
@@ -382,9 +381,7 @@ pub async fn pkt_modify_hook(
 
                     // rewrite payload to new message contents
                     pkt.payload = msg.write_to_bytes()?;
-                    // inserting 2 bytes of message_id at the beginning
-                    pkt.payload.insert(0, (message_id >> 8) as u8);
-                    pkt.payload.insert(1, (message_id & 0xff) as u8);
+                    prepend_message_id(&mut pkt.payload, message_id as u16);
                     return Ok(false);
                 }
             }
@@ -415,12 +412,9 @@ pub async fn pkt_modify_hook(
                         pkt.channel,
                     );
 
-                    // FIXME: this code fragment is used multiple times
                     // rewrite payload to new message contents
                     pkt.payload = msg.write_to_bytes()?;
-                    // inserting 2 bytes of message_id at the beginning
-                    pkt.payload.insert(0, (message_id >> 8) as u8);
-                    pkt.payload.insert(1, (message_id & 0xff) as u8);
+                    prepend_message_id(&mut pkt.payload, message_id as u16);
                     return Ok(false);
                 }
                 // end processing
@@ -678,9 +672,7 @@ pub async fn pkt_modify_hook(
 
             // rewrite payload to new message contents
             pkt.payload = msg.write_to_bytes()?;
-            // inserting 2 bytes of message_id at the beginning
-            pkt.payload.insert(0, (message_id >> 8) as u8);
-            pkt.payload.insert(1, (message_id & 0xff) as u8);
+            prepend_message_id(&mut pkt.payload, message_id as u16);
         }
         _ => return Ok(false),
     };
@@ -696,8 +688,7 @@ async fn ssl_encapsulate(mut mem_buf: SslMemBuf) -> Result<Packet> {
 
     // create MESSAGE_ENCAPSULATED_SSL Packet
     let message_type = ControlMessageType::MESSAGE_ENCAPSULATED_SSL as u16;
-    res.insert(0, (message_type >> 8) as u8);
-    res.insert(1, (message_type & 0xff) as u8);
+    prepend_message_id(&mut res, message_type);
     Ok(Packet {
         channel: 0x00,
         flags: FRAME_TYPE_FIRST | FRAME_TYPE_LAST,
@@ -797,9 +788,25 @@ async fn read_input_data<A: Endpoint<A>>(
     Ok(())
 }
 
-/// runtime musl detection
-fn is_musl() -> bool {
+/// Detects whether we are running on a musl-riscv64 system.
+/// Incremental reading is only needed on that particular platform
+/// because its USB gadget driver delivers exact-sized packets.
+fn is_musl_riscv64() -> bool {
     std::path::Path::new("/lib/ld-musl-riscv64.so.1").exists()
+}
+
+/// Prepend a 2-byte big-endian message ID to a payload vector.
+///
+/// `Vec::insert(0, b)` is O(n) for each call because it shifts every
+/// existing byte one position to the right.  This helper builds a new
+/// vector with a 2-byte header followed by the original content in a
+/// single allocation, avoiding the O(n) + O(n) double shift.
+fn prepend_message_id(payload: &mut Vec<u8>, message_id: u16) {
+    let mut framed = Vec::with_capacity(2 + payload.len());
+    framed.push((message_id >> 8) as u8);
+    framed.push((message_id & 0xff) as u8);
+    framed.append(payload);
+    *payload = framed;
 }
 
 /// main reader thread for a device
@@ -809,7 +816,10 @@ pub async fn endpoint_reader<A: Endpoint<A>>(
     hu: bool,
 ) -> Result<()> {
     let mut rbuf: VecDeque<u8> = VecDeque::new();
-    let incremental_read = if !hu && is_musl() { true } else { false };
+    // Incremental (header-first) reading is only needed on musl-riscv64 for
+    // the mobile-device side; use a direct boolean expression instead of
+    // wrapping it in an if/else that returns a literal (Clippy: needless_bool).
+    let incremental_read = !hu && is_musl_riscv64();
     loop {
         read_input_data(&mut rbuf, &mut device, incremental_read).await?;
         // check if we have complete packet available
@@ -874,8 +884,8 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
     proxy_type: ProxyType,
     mut device: IoDevice<A>,
     bytes_written: Arc<AtomicUsize>,
-    tx: UnboundedSender<Packet>,
-    mut rx: UnboundedReceiver<Packet>,
+    tx: Sender<Packet>,
+    mut rx: Receiver<Packet>,
     mut rxr: Receiver<Packet>,
     mut config: SharedConfig,
     sensor_channel: Arc<tokio::sync::Mutex<Option<u8>>>,
@@ -885,40 +895,90 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
     let passthrough = !cfg.mitm;
     let hex_requested = cfg.hexdump_level;
 
-    // in full_frames/passthrough mode we only directly pass packets from one endpoint to the other
+    // In passthrough mode we want asymmetric behavior:
+    // - HeadUnit proxy: keep HU -> phone forwarding decoupled so command/control
+    //   traffic is not delayed by a slow write to the HU.
+    // - MobileDevice proxy: keep tight phone -> HU backpressure so a slow HU
+    //   quickly stalls the phone-side reader and reaches Android's bitrate
+    //   adaptation logic.
     if passthrough {
-        // spawn an independent task to constantly drain rxr -> tx without being blocked by Tx I/O
-        let tx_clone = tx.clone();
-        let proxy_type_clone = proxy_type.clone();
-        let rxr_drain_handle = tokio_uring::spawn(async move {
-            while let Some(pkt) = rxr.recv().await {
-                debug!("{} rxr.recv (decoupled)", get_name(proxy_type_clone));
-                // Let the debug logging happen without awaiting, since we only need the output if log_enabled.
-                let _ = pkt_debug(proxy_type_clone, HexdumpLevel::RawOutput, hex_requested, &pkt).await;
-                if tx_clone.send(pkt).is_err() {
+        if proxy_type == ProxyType::HeadUnit {
+            let tx_clone = tx.clone();
+            let proxy_type_clone = proxy_type;
+            let rxr_drain_handle = tokio_uring::spawn(async move {
+                while let Some(pkt) = rxr.recv().await {
+                    debug!("{} rxr.recv (decoupled)", get_name(proxy_type_clone));
+                    let _ = pkt_debug(
+                        proxy_type_clone,
+                        HexdumpLevel::RawOutput,
+                        hex_requested,
+                        &pkt,
+                    )
+                    .await;
+                    if tx_clone.send(pkt).await.is_err() {
+                        break;
+                    }
+                }
+            });
+
+            loop {
+                if let Some(pkt) = rx.recv().await {
+                    debug!("{} rx.recv", get_name(proxy_type));
+                    let _ = pkt_debug(proxy_type, HexdumpLevel::RawOutput, hex_requested, &pkt).await;
+
+                    pkt.transmit(&mut device)
+                        .await
+                        .with_context(|| format!("proxy/{}: transmit failed", get_name(proxy_type)))?;
+
+                    bytes_written.fetch_add(HEADER_LENGTH + pkt.payload.len(), Ordering::Relaxed);
+                } else {
                     break;
                 }
             }
-        });
+
+            rxr_drain_handle.abort();
+            let _ = rxr_drain_handle.await;
+            return Ok(());
+        }
+
+        // MobileDevice proxy: keep at most one locally pending forwarded packet
+        // while waiting for room in `tx`; once that fills up we stop draining
+        // `rxr`, which lets the reader task block and pushes congestion all the
+        // way back to the phone's TCP socket.
+        let mut pending_forward: Option<Packet> = None;
 
         loop {
-            // handling data from opposite device's thread, which needs to be transmitted
-            if let Some(pkt) = rx.recv().await {
-                debug!("{} rx.recv", get_name(proxy_type));
-                let _ = pkt_debug(proxy_type, HexdumpLevel::RawOutput, hex_requested, &pkt).await;
+            tokio::select! {
+                biased;
 
-                pkt.transmit(&mut device)
-                    .await
-                    .with_context(|| format!("proxy/{}: transmit failed", get_name(proxy_type)))?;
+                reserve = tx.reserve(), if pending_forward.is_some() => {
+                    let permit = reserve?;
+                    permit.send(pending_forward.take().unwrap());
+                }
 
-                // Increment byte counters for statistics
-                // fixme: compute final_len for precise stats
-                bytes_written.fetch_add(HEADER_LENGTH + pkt.payload.len(), Ordering::Relaxed);
-            } else {
-                break; // rx channel disconnected
+                Some(pkt) = rx.recv() => {
+                    debug!("{} rx.recv", get_name(proxy_type));
+                    let _ = pkt_debug(proxy_type, HexdumpLevel::RawOutput, hex_requested, &pkt).await;
+
+                    pkt.transmit(&mut device)
+                        .await
+                        .with_context(|| format!("proxy/{}: transmit failed", get_name(proxy_type)))?;
+
+                    // Increment byte counters for statistics
+                    // fixme: compute final_len for precise stats
+                    bytes_written.fetch_add(HEADER_LENGTH + pkt.payload.len(), Ordering::Relaxed);
+                }
+
+                Some(pkt) = rxr.recv(), if pending_forward.is_none() => {
+                    debug!("{} rxr.recv", get_name(proxy_type));
+                    let _ = pkt_debug(proxy_type, HexdumpLevel::RawInput, hex_requested, &pkt).await;
+                    pending_forward = Some(pkt);
+                }
+
+                else => break,
             }
         }
-        rxr_drain_handle.abort();
+
         return Ok(());
     }
 
@@ -943,7 +1003,7 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
         )
         .await;
         // sending to the MD
-        tx.send(pkt)?;
+        tx.send(pkt).await?;
         // waiting for MD reply
         let pkt = rx.recv().await.ok_or("rx channel hung up")?;
         // sending reply back to the HU
@@ -997,7 +1057,7 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
         )
         .await;
         // sending reply back to the HU
-        tx.send(pkt)?;
+        tx.send(pkt).await?;
 
         // doing SSL handshake
         const STEPS: u8 = 3;
@@ -1017,8 +1077,9 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
                     server.ssl().current_cipher().unwrap().name(),
                 );
             }
-            if i == 3 {
-                // this was the last handshake step, need to break here
+            if i == STEPS {
+                // This was the final handshake step; there is no further
+                // packet exchange with the peer, so break before the receive.
                 break;
             };
             let pkt = ssl_encapsulate(mem_buf.clone()).await?;
@@ -1066,7 +1127,7 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
                         "{} pkt_modify_hook: message has been handled, sending reply packet only...",
                         get_name(proxy_type)
                     );
-                    tx.send(pkt)?;
+                    tx.send(pkt).await?;
                 } else {
                     pkt.encrypt_payload(&mut mem_buf, &mut server).await?;
                     let _ = pkt_debug(proxy_type, HexdumpLevel::RawOutput, hex_requested, &pkt).await;
@@ -1096,7 +1157,7 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
                                 )
                                 .await?;
                                 let _ = pkt_debug(proxy_type, HexdumpLevel::DecryptedInput, hex_requested, &fwd_pkt).await;
-                                tx.send(fwd_pkt)?;
+                                tx.send(fwd_pkt).await?;
                             }
                             Err(e) => error!("decrypt_payload (post-write drain): {:?}", e),
                         }
@@ -1125,7 +1186,7 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
                             &pkt,
                         )
                         .await;
-                        tx.send(pkt)?;
+                        tx.send(pkt).await?;
                     }
                     Err(e) => error!("decrypt_payload: {:?}", e),
                 }
