@@ -101,6 +101,8 @@ pub struct AppConfig {
         deserialize_with = "empty_string_as_none"
     )]
     pub webserver: Option<String>,
+    #[serde(default, deserialize_with = "empty_string_as_none")]
+    pub iperf3_server: Option<String>,
     pub bt_timeout_secs: u16,
     pub mitm: bool,
     pub dpi: u16,
@@ -238,6 +240,7 @@ impl Default for AppConfig {
             btalias: None,
             timeout_secs: 10,
             webserver: webserver_default_bind(),
+            iperf3_server: Some("0.0.0.0:5201".into()),
             bt_timeout_secs: 120,
             mitm: false,
             dpi: 0,
@@ -337,6 +340,9 @@ impl AppConfig {
         doc["timeout_secs"] = value(self.timeout_secs as i64);
         if let Some(webserver) = &self.webserver {
             doc["webserver"] = value(webserver);
+        }
+        if let Some(iperf3_server) = &self.iperf3_server {
+            doc["iperf3_server"] = value(iperf3_server);
         }
         doc["bt_timeout_secs"] = value(self.bt_timeout_secs as i64);
         doc["mitm"] = value(self.mitm);

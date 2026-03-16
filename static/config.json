@@ -232,6 +232,10 @@
         "usb_serial_console": {
           "typ": "boolean",
           "description": "Enables the USB serial gadget (ttyGS0) for low-level console debugging. This should be disabled during normal Android Auto operation."
+        },
+        "iperf3_server": {
+          "typ": "string",
+          "description": "Start a built-in iperf3-compatible TCP test server automatically on this bind address/port (for example `0.0.0.0:5201`). Empty = disabled. Intended for throughput testing."
         }
       }
     }

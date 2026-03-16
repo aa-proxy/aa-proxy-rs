@@ -6,6 +6,7 @@ pub mod config;
 pub mod config_types;
 pub mod ev;
 pub mod io_uring;
+pub mod iperf3;
 pub mod led;
 pub mod mitm;
 pub mod usb_gadget;

@@ -1397,3 +1397,37 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn packet_append_frame_to_preserves_basic_header_and_payload() {
+        let pkt = Packet {
+            channel: 0x02,
+            flags: FRAME_TYPE_FIRST | FRAME_TYPE_LAST,
+            final_length: None,
+            payload: vec![0xaa, 0xbb, 0xcc],
+        };
+        let mut frame = Vec::new();
+        pkt.append_frame_to(&mut frame);
+        assert_eq!(frame, vec![0x02, 0x03, 0x00, 0x03, 0xaa, 0xbb, 0xcc]);
+    }
+
+    #[test]
+    fn packet_append_frame_to_includes_final_length_header() {
+        let pkt = Packet {
+            channel: 0x05,
+            flags: FRAME_TYPE_FIRST,
+            final_length: Some(0x01020304),
+            payload: vec![0xdd],
+        };
+        let mut frame = Vec::new();
+        pkt.append_frame_to(&mut frame);
+        assert_eq!(
+            frame,
+            vec![0x05, 0x01, 0x00, 0x01, 0x01, 0x02, 0x03, 0x04, 0xdd]
+        );
+    }
+}
