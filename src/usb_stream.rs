@@ -49,10 +49,10 @@ const MAX_PACKET_SIZE: usize = BUFFER_LEN;
 // Number of read URBs to keep queued with the USB host controller at all times.
 // Keeping 8 in flight that means the controller always has a buffer ready even while
 // the upper layer is busy parsing packets from the previous completion.
-const MIN_PENDING_READS: usize = 8;
+pub(crate) const MIN_PENDING_READS: usize = 8;
 // Keep the HU write queue intentionally shallow so congestion propagates back to
 // the phone quickly instead of accumulating large video/audio buffers locally.
-const MAX_PENDING_WRITES: usize = 2;
+pub(crate) const MAX_PENDING_WRITES: usize = 8;
 
 /// Live performance counters for a single USB stream direction.
 /// Updated in the hot path with `Ordering::Relaxed`; sampled by the
@@ -67,6 +67,8 @@ pub struct UsbReadCounters {
 pub struct UsbWriteCounters {
     /// Number of write URBs currently in-flight with the kernel.
     pub pending_writes: Arc<AtomicUsize>,
+    /// Exact bytes currently queued in submitted write URBs.
+    pub buffered_bytes: Arc<AtomicUsize>,
 }
 
 impl UsbReadCounters {
@@ -82,8 +84,16 @@ impl UsbWriteCounters {
     fn new() -> Self {
         UsbWriteCounters {
             pending_writes: Arc::new(AtomicUsize::new(0)),
+            buffered_bytes: Arc::new(AtomicUsize::new(0)),
         }
     }
+}
+
+#[inline]
+fn saturating_sub(counter: &AtomicUsize, bytes: usize) {
+    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        Some(current.saturating_sub(bytes))
+    });
 }
 
 pub struct UsbStreamRead {
@@ -97,13 +107,15 @@ pub struct UsbStreamRead {
     /// Cursor into `read_buffer`: first unconsumed byte index.
     /// Using a cursor avoids O(n) Vec::drain on every cached read.
     read_buffer_pos: usize,
-    /// Shared atomics updated in the hot path; cloned to `transfer_monitor`.
-    pub counters: Arc<UsbReadCounters>,
+    /// Shared atomics updated in the hot path when transfer stats are enabled;
+    /// cloned to `transfer_monitor`.
+    pub counters: Option<Arc<UsbReadCounters>>,
 }
 pub struct UsbStreamWrite {
     pub write_queue: Endpoint<Bulk, Out>,
-    /// Shared atomics updated in the hot path; cloned to `transfer_monitor`.
-    pub counters: Arc<UsbWriteCounters>,
+    /// Shared atomics updated in the hot path when transfer stats are enabled;
+    /// cloned to `transfer_monitor`.
+    pub counters: Option<Arc<UsbWriteCounters>>,
 }
 
 // switch a USB device to accessory mode
@@ -154,6 +166,7 @@ pub fn switch_to_accessory(info: &nusb::DeviceInfo) -> Result<(), ConnectError> 
 
 pub async fn new(
     wired: Option<UsbId>,
+    collect_stats: bool,
 ) -> Result<(Device, UsbStreamRead, UsbStreamWrite), ConnectError> {
     // switch all usb devices to accessory mode and ignore errors
     nusb::list_devices()
@@ -227,21 +240,25 @@ pub async fn new(
 
     Ok((
         device,
-        UsbStreamRead::new(read_queue, iface),
-        UsbStreamWrite::new(write_queue),
+        UsbStreamRead::new(read_queue, iface, collect_stats),
+        UsbStreamWrite::new(write_queue, collect_stats),
     ))
 }
 
 impl UsbStreamRead {
-    pub fn new(mut read_queue: Endpoint<Bulk, In>, iface: Interface) -> Self {
+    pub fn new(mut read_queue: Endpoint<Bulk, In>, iface: Interface, collect_stats: bool) -> Self {
         // Pre-fill the USB host controller's queue so there is never a window
         // where no read URB is pending — even before the first poll_read call.
         for _ in 0..MIN_PENDING_READS {
             let buffer = read_queue.allocate(MAX_PACKET_SIZE);
             read_queue.submit(buffer);
         }
-        let counters = Arc::new(UsbReadCounters::new());
-        counters.pending_reads.store(read_queue.pending(), Ordering::Relaxed);
+        let counters = collect_stats.then(|| Arc::new(UsbReadCounters::new()));
+        if let Some(counters) = counters.as_ref() {
+            counters
+                .pending_reads
+                .store(read_queue.pending(), Ordering::Relaxed);
+        }
         UsbStreamRead {
             read_queue,
             _iface: iface,
@@ -253,10 +270,10 @@ impl UsbStreamRead {
 }
 
 impl UsbStreamWrite {
-    pub fn new(write_queue: Endpoint<Bulk, Out>) -> Self {
+    pub fn new(write_queue: Endpoint<Bulk, Out>, collect_stats: bool) -> Self {
         UsbStreamWrite {
             write_queue,
-            counters: Arc::new(UsbWriteCounters::new()),
+            counters: collect_stats.then(|| Arc::new(UsbWriteCounters::new())),
         }
     }
 
@@ -269,13 +286,26 @@ impl UsbStreamWrite {
         // Only wait if we're completely saturated
         while self.write_queue.pending() >= MAX_PENDING_WRITES {
             let res = self.write_queue.next_complete().await;
+            if let Some(counters) = self.counters.as_ref() {
+                saturating_sub(&counters.buffered_bytes, res.buffer.len());
+                counters
+                    .pending_writes
+                    .store(self.write_queue.pending(), Ordering::Relaxed);
+            }
             if let Err(e) = res.status {
                 return Err(io::Error::new(io::ErrorKind::Other, e));
             }
         }
 
+        if let Some(counters) = self.counters.as_ref() {
+            counters.buffered_bytes.fetch_add(len, Ordering::Relaxed);
+        }
         self.write_queue.submit(buf.into());
-        self.counters.pending_writes.store(self.write_queue.pending(), Ordering::Relaxed);
+        if let Some(counters) = self.counters.as_ref() {
+            counters
+                .pending_writes
+                .store(self.write_queue.pending(), Ordering::Relaxed);
+        }
         Ok(len)
     }
 }
@@ -297,7 +327,11 @@ impl AsyncRead for UsbStreamRead {
                 let buf = pin.read_queue.allocate(MAX_PACKET_SIZE);
                 pin.read_queue.submit(buf);
             }
-            pin.counters.pending_reads.store(pin.read_queue.pending(), Ordering::Relaxed);
+            if let Some(counters) = pin.counters.as_ref() {
+                counters
+                    .pending_reads
+                    .store(pin.read_queue.pending(), Ordering::Relaxed);
+            }
         }
 
         let cached_remaining = pin.read_buffer.len() - pin.read_buffer_pos;
@@ -306,7 +340,9 @@ impl AsyncRead for UsbStreamRead {
             // Buffer fully consumed — reset cursor and reuse the allocation.
             pin.read_buffer.clear();
             pin.read_buffer_pos = 0;
-            pin.counters.cached_bytes.store(0, Ordering::Relaxed);
+            if let Some(counters) = pin.counters.as_ref() {
+                counters.cached_bytes.store(0, Ordering::Relaxed);
+            }
 
             // Ensure the pipeline is primed before we wait.
             replenish(pin);
@@ -334,7 +370,11 @@ impl AsyncRead for UsbStreamRead {
             // read_buffer_pos stays 0 — the cursor starts at the beginning.
             if res.buffer.len() > copy_len {
                 pin.read_buffer.extend_from_slice(&res.buffer[copy_len..]);
-                pin.counters.cached_bytes.store(pin.read_buffer.len(), Ordering::Relaxed);
+                if let Some(counters) = pin.counters.as_ref() {
+                    counters
+                        .cached_bytes
+                        .store(pin.read_buffer.len(), Ordering::Relaxed);
+                }
             }
 
             Poll::Ready(Ok(()))
@@ -356,14 +396,15 @@ impl AsyncRead for UsbStreamRead {
             // Moving a usize index is O(1) and reuses the same allocation.
             let copy_len = std::cmp::min(unfilled.len(), cached_remaining);
             let src_start = pin.read_buffer_pos;
-            unfilled[..copy_len]
-                .copy_from_slice(&pin.read_buffer[src_start..src_start + copy_len]);
+            unfilled[..copy_len].copy_from_slice(&pin.read_buffer[src_start..src_start + copy_len]);
             pin.read_buffer_pos += copy_len;
             buf.advance(copy_len);
 
             // Update cached bytes counter: remaining after this copy.
             let remaining = pin.read_buffer.len() - pin.read_buffer_pos;
-            pin.counters.cached_bytes.store(remaining, Ordering::Relaxed);
+            if let Some(counters) = pin.counters.as_ref() {
+                counters.cached_bytes.store(remaining, Ordering::Relaxed);
+            }
 
             Poll::Ready(Ok(()))
         }
@@ -383,6 +424,12 @@ impl AsyncWrite for UsbStreamWrite {
         while pin.write_queue.pending() > 0 {
             match pin.write_queue.poll_next_complete(cx) {
                 Poll::Ready(res) => {
+                    if let Some(counters) = pin.counters.as_ref() {
+                        saturating_sub(&counters.buffered_bytes, res.buffer.len());
+                        counters
+                            .pending_writes
+                            .store(pin.write_queue.pending(), Ordering::Relaxed);
+                    }
                     if let Err(e) = res.status {
                         return Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e)));
                     }
@@ -393,15 +440,22 @@ impl AsyncWrite for UsbStreamWrite {
 
         // Submit immediately while there is still explicit room in the bounded
         // USB queue; once full, return Pending to propagate backpressure.
-        
+
         if pin.write_queue.pending() >= MAX_PENDING_WRITES {
             // Queue full - apply backpressure
             return Poll::Pending;
         }
 
         // Submit immediately
+        if let Some(counters) = pin.counters.as_ref() {
+            counters.buffered_bytes.fetch_add(len, Ordering::Relaxed);
+        }
         pin.write_queue.submit(buf.to_vec().into());
-        pin.counters.pending_writes.store(pin.write_queue.pending(), Ordering::Relaxed);
+        if let Some(counters) = pin.counters.as_ref() {
+            counters
+                .pending_writes
+                .store(pin.write_queue.pending(), Ordering::Relaxed);
+        }
         Poll::Ready(Ok(len))
     }
 
@@ -413,9 +467,10 @@ impl AsyncWrite for UsbStreamWrite {
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
         let pin = self.get_mut();
         pin.write_queue.cancel_all();
+        if let Some(counters) = pin.counters.as_ref() {
+            counters.pending_writes.store(0, Ordering::Relaxed);
+            counters.buffered_bytes.store(0, Ordering::Relaxed);
+        }
         Poll::Ready(Ok(()))
     }
 }
-
-
-
