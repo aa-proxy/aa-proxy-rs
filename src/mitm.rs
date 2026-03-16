@@ -23,6 +23,7 @@ use crate::mitm::protos::*;
 use crate::mitm::sensor_source_service::Sensor;
 use crate::mitm::AudioStreamType::*;
 use crate::mitm::ByeByeReason::USER_SELECTION;
+use crate::mitm::Gear::GEAR_PARK;
 use crate::mitm::MediaMessageId::*;
 use crate::mitm::SensorMessageId::*;
 use crate::mitm::SensorType::*;
@@ -330,14 +331,18 @@ pub async fn pkt_modify_hook(
                 SENSOR_MESSAGE_BATCH => {
                     if let Ok(mut msg) = SensorBatch::parse_from_bytes(data) {
                         if cfg.video_in_motion {
+                            if !msg.gear_data.is_empty() {
+                                // forcing gear
+                                msg.gear_data[0].set_gear(GEAR_PARK);
+                            }
                             if !msg.driving_status_data.is_empty() {
                                 // forcing status to 0 value
                                 msg.driving_status_data[0].set_status(0);
-                                // regenerating payload data
-                                pkt.payload = msg.write_to_bytes()?;
-                                pkt.payload.insert(0, (message_id >> 8) as u8);
-                                pkt.payload.insert(1, (message_id & 0xff) as u8);
                             }
+                            // regenerating payload data
+                            pkt.payload = msg.write_to_bytes()?;
+                            pkt.payload.insert(0, (message_id >> 8) as u8);
+                            pkt.payload.insert(1, (message_id & 0xff) as u8);
                         }
                     }
                 }
