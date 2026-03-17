@@ -943,6 +943,7 @@ async fn read_input_data<A: Endpoint<A>>(
     rbuf: &mut VecDeque<u8>,
     obj: &mut IoDevice<A>,
     incremental_read: bool,
+    read_timeout: Duration,
 ) -> Result<()> {
     let mut newdata = vec![0u8; BUFFER_LEN];
     let mut n;
@@ -961,7 +962,7 @@ async fn read_input_data<A: Endpoint<A>>(
                 read_counters.pending_reads.store(1, Ordering::Relaxed);
             }
             let retval = device.read(newdata);
-            let timed = timeout(Duration::from_millis(15000), retval).await;
+            let timed = timeout(read_timeout, retval).await;
             if let Some(read_counters) = read_counters.as_ref() {
                 read_counters.pending_reads.store(0, Ordering::Relaxed);
             }
@@ -973,7 +974,7 @@ async fn read_input_data<A: Endpoint<A>>(
                 // read header
                 newdata = vec![0u8; HEADER_LENGTH];
                 let retval = device.read(newdata);
-                (n, newdata) = timeout(Duration::from_millis(15000), retval)
+                (n, newdata) = timeout(read_timeout, retval)
                     .await
                     .context("read_input_data/header: EndpointIo timeout")?;
                 len = n.context("read_input_data/header: EndpointIo read error")?;
@@ -991,14 +992,14 @@ async fn read_input_data<A: Endpoint<A>>(
                 newdata = vec![0u8; payload_size];
             }
             let retval = device.read(newdata);
-            (n, newdata) = timeout(Duration::from_millis(15000), retval)
+            (n, newdata) = timeout(read_timeout, retval)
                 .await
                 .context("read_input_data: EndpointIo timeout")?;
             len = n.context("read_input_data: EndpointIo read error")?;
         }
         IoDevice::TcpStreamIo(device) => {
             let retval = device.read(newdata);
-            (n, newdata) = timeout(Duration::from_millis(15000), retval)
+            (n, newdata) = timeout(read_timeout, retval)
                 .await
                 .context("read_input_data: TcpStreamIo timeout")?;
             len = n.context("read_input_data: TcpStreamIo read error")?;
@@ -1037,14 +1038,17 @@ pub async fn endpoint_reader<A: Endpoint<A>>(
     mut device: IoDevice<A>,
     tx: Sender<Packet>,
     hu: bool,
+    config: SharedConfig,
 ) -> Result<()> {
     let mut rbuf: VecDeque<u8> = VecDeque::new();
+    let cfg = config.read().await.clone();
+    let read_timeout = Duration::from_secs(cfg.timeout_secs.into());
     // Incremental (header-first) reading is only needed on musl-riscv64 for
     // the mobile-device side; use a direct boolean expression instead of
     // wrapping it in an if/else that returns a literal (Clippy: needless_bool).
     let incremental_read = !hu && is_musl_riscv64();
     loop {
-        read_input_data(&mut rbuf, &mut device, incremental_read).await?;
+        read_input_data(&mut rbuf, &mut device, incremental_read, read_timeout).await?;
         // check if we have complete packet available
         loop {
             if rbuf.len() > HEADER_LENGTH {
