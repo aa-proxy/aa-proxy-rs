@@ -731,8 +731,8 @@ pub async fn io_loop(
         }
 
         // dedicated reading threads:
-        reader_hu = tokio_uring::spawn(endpoint_reader(hu_r, txr_hu, true));
-        reader_md = tokio_uring::spawn(endpoint_reader(md_r, txr_md, false));
+        reader_hu = tokio_uring::spawn(endpoint_reader(hu_r, txr_hu, true, shared_config.clone()));
+        reader_md = tokio_uring::spawn(endpoint_reader(md_r, txr_md, false, shared_config.clone()));
         // main processing threads:
         from_file = tokio_uring::spawn(proxy(
             ProxyType::HeadUnit,
