@@ -141,6 +141,10 @@
         "bt_poweroff": {
           "typ": "boolean",
           "description": "Powers off the Bluetooth adapter after the handshake. Intended for use only in specific configurations"
+        },
+        "external_antenna": {
+          "typ": "boolean",
+          "description": "Only for Radxa: enable if you want to use (and have connected) an external antenna"
         }
       }
     },

@@ -133,6 +133,7 @@ pub struct AppConfig {
     pub eth_mode: String,
     pub startup_delay: u8,
     pub ble_password: String,
+    pub external_antenna: bool,
 
     #[serde(skip)]
     pub action_requested: Option<Action>,
@@ -283,6 +284,7 @@ impl Default for AppConfig {
             eth_mode: String::new(),
             startup_delay: 0,
             ble_password: String::new(),
+            external_antenna: false,
         }
     }
 }
@@ -368,6 +370,7 @@ impl AppConfig {
         doc["eth_mode"] = value(&self.eth_mode);
         doc["startup_delay"] = value(self.startup_delay as i64);
         doc["ble_password"] = value(&self.ble_password);
+        doc["external_antenna"] = value(self.external_antenna);
 
         let _ = fs::write(config_file, doc.to_string());
     }
