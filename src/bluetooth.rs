@@ -572,6 +572,9 @@ impl Bluetooth {
                 let _ = restart_tx.send(None);
             }));
         } else {
+            // let some phones that have problems with handshake time to
+            // finish all bluetooth frames before disconnect
+            let _ = tokio::time::sleep(Duration::from_millis(150));
             // handshake complete, now disconnect the device so it should
             // connect to real HU for calls
             let device = self.adapter.device(bluer::Address(*address))?;
