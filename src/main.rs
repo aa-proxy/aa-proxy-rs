@@ -620,7 +620,7 @@ fn main() -> Result<()> {
         let runtime = Builder::new_multi_thread()
             .enable_all()
             .global_queue_interval(15) // Check global queue more frequently
-            .event_interval(31)        // Reduce I/O polling overhead
+            .event_interval(31) // Reduce I/O polling overhead
             .build()
             .unwrap();
         runtime.spawn(async move {
