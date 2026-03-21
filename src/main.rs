@@ -71,6 +71,9 @@ struct Args {
     /// Generate system config and exit
     #[clap(short, long)]
     generate_system_config: bool,
+    /// Generate hostapd config and exit
+    #[clap(short, long)]
+    generate_hostapd: bool,
 }
 
 fn init_wifi_config(cfg: &AppConfig) -> WifiConfig {
@@ -496,8 +499,6 @@ fn main() -> Result<()> {
 
     // generate system configs from template and exit
     if args.generate_system_config {
-        generate_hostapd_conf(config).expect("error generating config from template");
-
         generate_usb_strings(UMTPRD_CONF_IN, UMTPRD_CONF_OUT)
             .expect("error generating config from template");
 
@@ -512,6 +513,11 @@ fn main() -> Result<()> {
         perms.set_mode(0o755); // rwxr-xr-x
         fs::set_permissions(GADGET_INIT_OUT, perms)?;
 
+        return Ok(());
+    }
+    // generate hostapd config from template and exit
+    if args.generate_hostapd {
+        generate_hostapd_conf(config).expect("error generating config from template");
         return Ok(());
     }
 
