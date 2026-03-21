@@ -106,27 +106,54 @@ impl UsbGadgetState {
         accessory_started: Arc<tokio::sync::Notify>,
     ) {
         if self.legacy {
-            for _try in 1..=2 {
-                let _ = self.enable(DEFAULT_GADGET_NAME);
-                info!("{} 🔌 USB Manager: Enabled default gadget", NAME);
+            const PER_TRY_TIMEOUT: Duration = Duration::from_secs(6);
+            const COOLDOWN_MS: u64 = 100;
 
-                // now waiting for accesory start from uevent thread loop
-                let retval = accessory_started.notified();
-                if let Err(_) = timeout(Duration::from_secs_f32(3.0), retval).await {
+            let mut got_accessory = false;
+
+            for _try in 1..=2 {
+                // Register the waiter BEFORE enabling the gadget to avoid missing the notification
+                let notified_fut = accessory_started.notified();
+
+                if let Err(e) = self.enable(DEFAULT_GADGET_NAME) {
                     error!(
-                    "{} 🔌 USB Manager: Timeout waiting for accessory start, trying to recover...",
-                    NAME
-                );
+                        "{} 🔌 USB Manager: failed to enable default gadget: {e}",
+                        NAME
+                    );
                 } else {
-                    break;
-                };
+                    info!("{} 🔌 USB Manager: Enabled default gadget", NAME);
+                }
+
+                match timeout(PER_TRY_TIMEOUT, notified_fut).await {
+                    Ok(()) => {
+                        got_accessory = true;
+                        break;
+                    }
+                    Err(_) => {
+                        error!(
+                        "{} 🔌 USB Manager: Timeout waiting for accessory start, trying to recover...",
+                        NAME
+                    );
+                        // Actual recovery: disable and brief cooldown
+                        let _ = self.disable(DEFAULT_GADGET_NAME);
+                        tokio::time::sleep(Duration::from_millis(COOLDOWN_MS)).await;
+                    }
+                }
             }
 
-            info!("{} 🔌 USB Manager: Received accessory start request", NAME);
-            let _ = self.disable(DEFAULT_GADGET_NAME);
-            // 0.1 second, keep the gadget disabled for a short time to let the host recognize the change
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            if got_accessory {
+                info!("{} 🔌 USB Manager: Received accessory start request", NAME);
+                let _ = self.disable(DEFAULT_GADGET_NAME);
+                // 0.1s so the host perceives the change
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            } else {
+                warn!(
+                "{} 🔌 USB Manager: Accessory start NOT received after retries; proceeding may fail",
+                NAME
+            );
+            }
         }
+
         let _ = self.enable(ACCESSORY_GADGET_NAME);
         info!("{} 🔌 USB Manager: Switched to accessory gadget", NAME);
     }
