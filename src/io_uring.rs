@@ -52,7 +52,6 @@ use crate::config::{Action, SharedConfig};
 use crate::config::{TCP_DHU_PORT, TCP_SERVER_PORT};
 use crate::ev::spawn_ev_client_task;
 use crate::ev::EvTaskCommand;
-use crate::iperf3;
 use crate::mitm::endpoint_reader;
 use crate::mitm::proxy;
 use crate::mitm::Packet;
@@ -444,23 +443,6 @@ pub async fn io_loop(
     let bind_addr = format!("0.0.0.0:{}", TCP_DHU_PORT).parse().unwrap();
     let mut dhu_listener = Some(TcpListener::bind(bind_addr).unwrap());
     info!("{} 🛰️ DHU TCP server bound to: <u>{}</u>", NAME, bind_addr);
-
-    if let Some(ref bindaddr) = shared_config.read().await.iperf3_server {
-        match bindaddr.parse::<SocketAddr>() {
-            Ok(addr) => {
-                tokio_uring::spawn(async move {
-                    if let Err(e) = iperf3::run_server(addr).await {
-                        error!("{} iperf3 server error: {}", NAME, e);
-                    }
-                });
-
-                info!("{} iperf3 server listening on {}", NAME, addr);
-            }
-            Err(e) => {
-                error!("{} iperf3 server address/port parse: {}", NAME, e);
-            }
-        }
-    }
 
     loop {
         // reload new config
