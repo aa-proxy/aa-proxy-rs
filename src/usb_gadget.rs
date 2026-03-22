@@ -4,6 +4,7 @@ use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::thread;
 use std::time::Duration;
 
 use kobject_uevent::UEvent;
@@ -31,13 +32,24 @@ pub fn uevent_listener(accessory_started: Arc<tokio::sync::Notify>) {
     socket.bind(&sa).unwrap();
 
     loop {
-        let _ = socket.recv(&mut buf, 0).unwrap();
-        let u = UEvent::from_netlink_packet(&buf).unwrap();
-        if u.env.get("DEVNAME").is_some_and(|x| x == "usb_accessory")
-            && u.env.get("ACCESSORY").is_some_and(|x| x == "START")
-        {
-            debug!("got uevent: {:#?}", u);
-            accessory_started.notify_one();
+        match socket.recv(&mut buf, 0) {
+            Ok(n) => match UEvent::from_netlink_packet(&buf) {
+                Ok(u) => {
+                    if u.env.get("DEVNAME").is_some_and(|x| x == "usb_accessory")
+                        && u.env.get("ACCESSORY").is_some_and(|x| x == "START")
+                    {
+                        debug!("got uevent: {:#?}", u);
+                        accessory_started.notify_one();
+                    }
+                }
+                Err(e) => {
+                    warn!("UEvent invalid ({} bytes): {e}", n);
+                }
+            },
+            Err(e) => {
+                warn!("error in recv from netlink: {e}; retry");
+                thread::sleep(Duration::from_millis(10));
+            }
         }
     }
 }
