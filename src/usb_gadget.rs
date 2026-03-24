@@ -23,13 +23,13 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>
 pub const DEFAULT_GADGET_NAME: &str = "default";
 pub const ACCESSORY_GADGET_NAME: &str = "accessory";
 
-pub fn uevent_listener(accessory_started: Arc<tokio::sync::Notify>) {
+pub fn uevent_listener(accessory_started: Arc<tokio::sync::Notify>) -> Result<()> {
     info!("{} 📬 Starting UEvent listener thread...", NAME);
-    let mut socket = netlink_sys::Socket::new(NETLINK_KOBJECT_UEVENT).unwrap();
+    let mut socket = netlink_sys::Socket::new(NETLINK_KOBJECT_UEVENT)?;
     let sa = netlink_sys::SocketAddr::new(process::id(), 1);
     let mut buf = vec![0u8; 1024 * 8];
 
-    socket.bind(&sa).unwrap();
+    socket.bind(&sa)?;
 
     loop {
         match socket.recv(&mut buf, 0) {
