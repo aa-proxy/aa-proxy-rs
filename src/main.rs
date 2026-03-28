@@ -306,9 +306,9 @@ async fn tokio_main(
             }
         }
 
-        if change_usb_order {
-            enable_usb_if_present(&mut usb, accessory_started.clone()).await;
-        }
+        //if change_usb_order {
+        //    enable_usb_if_present(&mut usb, accessory_started.clone()).await;
+        //}
 
         // run only if not handling this in handshake task
         if cfg.wired.is_none()
@@ -337,9 +337,9 @@ async fn tokio_main(
             }
         }
 
-        if !change_usb_order {
+        //if !change_usb_order {
             enable_usb_if_present(&mut usb, accessory_started.clone()).await;
-        }
+        //}
 
         // inform via LED about successful connection
         if let Some(ref mut leds) = led_manager {
@@ -352,7 +352,7 @@ async fn tokio_main(
                 "{} 📵 TCP/USB connection closed or not started, trying again...",
                 NAME
             );
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         } else {
             info!(
                 "{} 📵 TCP/USB connection closed or not started, quick restart...",
