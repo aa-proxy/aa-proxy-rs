@@ -156,8 +156,8 @@ impl UsbGadgetState {
             if got_accessory {
                 info!("{} 🔌 USB Manager: Received accessory start request", NAME);
                 let _ = self.disable(DEFAULT_GADGET_NAME);
-                // 0.1s so the host perceives the change
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                // 0.5s so the host perceives the change
+                tokio::time::sleep(Duration::from_millis(500)).await;
             } else {
                 warn!(
                 "{} 🔌 USB Manager: Accessory start NOT received after retries; proceeding may fail",
