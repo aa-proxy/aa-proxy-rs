@@ -273,11 +273,7 @@ async fn tokio_main(
     });
 
     // set default gadget before bluetooth handshake
-    if let Some(ref mut usb) = usb {
-        if let Err(e) = usb.init() {
-            error!("{} 🔌 USB init error: {}", NAME, e);
-        }
-    }
+    enable_usb_if_present(&mut usb, accessory_started.clone()).await;
 
     // initial bluetooth setup
     let mut bluetooth;
