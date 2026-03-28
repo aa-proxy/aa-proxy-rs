@@ -113,6 +113,10 @@ impl UsbGadgetState {
         Ok(())
     }
 
+    pub fn enable_default(&mut self) {
+       let _ = self.enable(DEFAULT_GADGET_NAME);
+    }
+
     pub async fn enable_default_and_wait_for_accessory(
         &mut self,
         accessory_started: Arc<tokio::sync::Notify>,

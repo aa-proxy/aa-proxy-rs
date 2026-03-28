@@ -304,6 +304,7 @@ async fn tokio_main(
             if let Err(e) = usb.init() {
                 error!("{} 🔌 USB init error: {}", NAME, e);
             }
+            usb.enable_default();
         }
 
         //if change_usb_order {
