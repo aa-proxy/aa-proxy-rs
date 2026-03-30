@@ -163,11 +163,12 @@ fn logging_init(debug: bool, disable_console_debug: bool, log_path: &PathBuf) {
     }
 }
 
-async fn enable_usb_if_present(usb: &mut Option<UsbGadgetState>, accessory_started: Arc<Notify>) {
+async fn enable_usb_if_present(usb: &mut Option<UsbGadgetState>, accessory_started: Arc<Notify>) -> Result<()> {
     if let Some(ref mut usb) = usb {
         usb.enable_default_and_wait_for_accessory(accessory_started)
-            .await;
+            .await?;
     }
+    Ok(())
 }
 
 async fn action_handler(config: &mut SharedConfig) {
@@ -339,7 +340,9 @@ async fn tokio_main(
         }
 
         //if !change_usb_order {
-            enable_usb_if_present(&mut usb, accessory_started.clone()).await;
+        if let Err(e) = enable_usb_if_present(&mut usb, accessory_started.clone()).await {
+                error!("{} enable_usb_if_present: {}", NAME, e);
+        }
         //}
 
         // inform via LED about successful connection

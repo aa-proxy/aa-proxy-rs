@@ -120,7 +120,7 @@ impl UsbGadgetState {
     pub async fn enable_default_and_wait_for_accessory(
         &mut self,
         accessory_started: Arc<tokio::sync::Notify>,
-    ) {
+    ) -> Result <()> {
         if self.legacy {
             const PER_TRY_TIMEOUT: Duration = Duration::from_secs(6);
             const COOLDOWN_MS: u64 = 100;
@@ -151,7 +151,7 @@ impl UsbGadgetState {
                         NAME
                     );
                         // Actual recovery: disable and brief cooldown
-                        let _ = self.disable(DEFAULT_GADGET_NAME);
+                        self.disable(DEFAULT_GADGET_NAME)?;
                         tokio::time::sleep(Duration::from_millis(COOLDOWN_MS)).await;
                     }
                 }
@@ -159,9 +159,9 @@ impl UsbGadgetState {
 
             if got_accessory {
                 info!("{} 🔌 USB Manager: Received accessory start request", NAME);
-                let _ = self.disable(DEFAULT_GADGET_NAME);
-                // 0.1s so the host perceives the change
-                tokio::time::sleep(Duration::from_millis(700)).await;
+                self.disable(DEFAULT_GADGET_NAME)?;
+                // 0.5s so the host perceives the change
+                tokio::time::sleep(Duration::from_millis(500)).await;
             } else {
                 warn!(
                 "{} 🔌 USB Manager: Accessory start NOT received after retries; proceeding may fail",
@@ -170,8 +170,9 @@ impl UsbGadgetState {
             }
         }
 
-        let _ = self.enable(ACCESSORY_GADGET_NAME);
+        self.enable(ACCESSORY_GADGET_NAME)?;
         info!("{} 🔌 USB Manager: Switched to accessory gadget", NAME);
+        Ok(())
     }
 
     fn attached(gadget_path: &PathBuf) -> io::Result<Option<String>> {
