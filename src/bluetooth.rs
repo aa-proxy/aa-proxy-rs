@@ -547,6 +547,11 @@ impl Bluetooth {
         if quick_reconnect {
             // keep the bluetooth profile connection alive
             // and use it in a loop to restart handshake when necessary
+            //
+            // hsp_handle is moved into the task so that the HSP session stays
+            // registered for the entire duration of the quick_reconnect loop.
+            // It will be dropped (= unregistered from BlueZ) when the task exits.
+            let hsp_session = hsp_handle.take();
             let adapter_cloned = self.adapter.clone();
             let _ = Some(tokio::spawn(async move {
                 profile_connected.store(true, Ordering::Relaxed);
@@ -582,6 +587,14 @@ impl Bluetooth {
                 }
                 // we are now disconnected, redo bluetooth connection
                 profile_connected.store(false, Ordering::Relaxed);
+                // Drop HSP session here - this unregisters the profile from BlueZ.
+                // We do it explicitly with a small delay to give BlueZ time to clean up.
+                if let Some(sess) = hsp_session {
+                    info!("{} 🎧 Headset Profile (HSP): unregistering ...", NAME);
+                    drop(sess);
+                    tokio::time::sleep(Duration::from_millis(80)).await;
+                    info!("{} 🎧 Headset Profile (HSP): unregistered", NAME);
+                }
                 // main loop could now wait so send an event to restart
                 let _ = restart_tx.send(None);
             }));
