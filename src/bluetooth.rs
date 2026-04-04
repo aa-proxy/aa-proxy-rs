@@ -474,6 +474,17 @@ impl Bluetooth {
         Ok(())
     }
 
+    /// Drop HSP session here - this unregisters the profile from BlueZ.
+    /// We do it explicitly with a small delay to give BlueZ time to clean up.
+    async fn unregister_hsp(hsp_session: Option<bluer::Session>) {
+        if let Some(sess) = hsp_session {
+            info!("{} 🎧 Headset Profile (HSP): unregistering ...", NAME);
+            drop(sess);
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            info!("{} 🎧 Headset Profile (HSP): unregistered", NAME);
+        }
+    }
+
     pub async fn aa_handshake(
         &mut self,
         connect: BluetoothAddressList,
@@ -587,14 +598,7 @@ impl Bluetooth {
                 }
                 // we are now disconnected, redo bluetooth connection
                 profile_connected.store(false, Ordering::Relaxed);
-                // Drop HSP session here - this unregisters the profile from BlueZ.
-                // We do it explicitly with a small delay to give BlueZ time to clean up.
-                if let Some(sess) = hsp_session {
-                    info!("{} 🎧 Headset Profile (HSP): unregistering ...", NAME);
-                    drop(sess);
-                    tokio::time::sleep(Duration::from_millis(80)).await;
-                    info!("{} 🎧 Headset Profile (HSP): unregistered", NAME);
-                }
+                Self::unregister_hsp(hsp_session).await;
                 // main loop could now wait so send an event to restart
                 let _ = restart_tx.send(None);
             }));
@@ -610,12 +614,7 @@ impl Bluetooth {
             // --- UNREGISTER HSP ---
             //
             if !self.dongle_mode {
-                if let Some(sess) = hsp_handle.take() {
-                    info!("{} 🎧 Headset Profile (HSP): unregistering ...", NAME);
-                    drop(sess); // unregister_profile
-                    tokio::time::sleep(Duration::from_millis(80)).await;
-                    info!("{} 🎧 Headset Profile (HSP): unregistered", NAME);
-                }
+                Self::unregister_hsp(hsp_handle.take()).await;
             }
             if bt_poweroff {
                 let _ = self.adapter.set_powered(false).await;
