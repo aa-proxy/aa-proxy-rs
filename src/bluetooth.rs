@@ -62,6 +62,7 @@ pub struct Bluetooth {
     btle_handle: Option<bluer::gatt::local::ApplicationHandle>,
     adv_handle: Option<bluer::adv::AdvertisementHandle>,
     current_index: usize,
+    dongle_mode: bool,
 }
 
 // Create and configure the Bluetooth adapter
@@ -111,47 +112,13 @@ pub async fn init(
     let handle_aa = session.register_profile(profile).await?;
     info!("{} 📱 AA Wireless Profile: registered", NAME);
 
-    if !dongle_mode {
-        // Headset profile
-        let profile = Profile {
-            uuid: HSP_HS_UUID,
-            name: Some("HSP HS".to_string()),
-            require_authentication: Some(false),
-            require_authorization: Some(false),
-            ..Default::default()
-        };
-        match session.register_profile(profile).await {
-            Ok(mut handle) => {
-                info!("{} 🎧 Headset Profile (HSP): registered", NAME);
-                // handling connection to headset profile in own task
-                // it only accepts each incoming connection
-                let _ = Some(tokio::spawn(async move {
-                    loop {
-                        let req = handle.next().await.expect("received no connect request");
-                        info!(
-                            "{} 🎧 Headset Profile (HSP): connect from: <b>{}</>",
-                            NAME,
-                            req.device()
-                        );
-                        let _ = req.accept();
-                    }
-                }));
-            }
-            Err(e) => {
-                warn!(
-                    "{} 🎧 Headset Profile (HSP) registering error: {}, ignoring",
-                    NAME, e
-                );
-            }
-        }
-    }
-
     Ok(Bluetooth {
         adapter,
         handle_aa,
         btle_handle: None,
         adv_handle: None,
         current_index: 0,
+        dongle_mode,
     })
 }
 
@@ -523,6 +490,53 @@ impl Bluetooth {
         if bt_poweroff {
             let _ = self.adapter.set_powered(true).await;
         }
+        //
+        // --- HSP PROFILE REGISTRATION ---
+        //
+        let mut hsp_handle = None;
+
+        if !self.dongle_mode {
+            let session = bluer::Session::new().await?;
+            let profile = Profile {
+                uuid: HSP_HS_UUID,
+                name: Some("HSP HS".to_string()),
+                require_authentication: Some(false),
+                require_authorization: Some(false),
+                ..Default::default()
+            };
+
+            match session.register_profile(profile).await {
+                Ok(handle) => {
+                    info!("{} 🎧 Headset Profile (HSP): registered", NAME);
+
+                    // Move ownership of handle into task
+                    tokio::spawn(async move {
+                        let mut h = handle;
+                        loop {
+                            let req = h.next().await.expect("received no HSP connect request");
+
+                            info!(
+                                "{} 🎧 Headset Profile (HSP): connect from <b>{}</>",
+                                NAME,
+                                req.device()
+                            );
+
+                            let _ = req.accept();
+                        }
+                    });
+
+                    // Keep handle for unregister
+                    hsp_handle = Some(session);
+                }
+                Err(e) => {
+                    warn!(
+                        "{} 🎧 Headset Profile (HSP) registering error: {}, ignoring",
+                        NAME, e
+                    );
+                }
+            }
+        }
+
         // Use the provided session and adapter instead of creating new ones
         let (address, mut stream) = self
             .get_aa_profile_connection(connect, bt_timeout, stopped)
@@ -579,6 +593,17 @@ impl Bluetooth {
             // connect to real HU for calls
             let device = self.adapter.device(bluer::Address(*address))?;
             let _ = device.disconnect().await;
+            //
+            // --- UNREGISTER HSP ---
+            //
+            if !self.dongle_mode {
+                if let Some(sess) = hsp_handle.take() {
+                    info!("{} 🎧 Headset Profile (HSP): unregistering ...", NAME);
+                    drop(sess); // unregister_profile
+                    tokio::time::sleep(Duration::from_millis(80)).await;
+                    info!("{} 🎧 Headset Profile (HSP): unregistered", NAME);
+                }
+            }
             if bt_poweroff {
                 let _ = self.adapter.set_powered(false).await;
             }
