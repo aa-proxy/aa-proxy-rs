@@ -598,23 +598,30 @@ pub async fn pkt_modify_hook(
     if proxy_type == ProxyType::MobileDevice {
         if let Some(sink) = ctx.media_channels.get(&pkt.channel) {
             // payload[2..] strips the 2-byte message_id prefix
-            let frame_data = pkt.payload[2..].to_vec();
+            let frame_data = &pkt.payload[2..];
             match protos::MediaMessageId::from_i32(message_id).unwrap_or(MEDIA_MESSAGE_DATA) {
                 MEDIA_MESSAGE_CODEC_CONFIG => {
+                    // CODEC_CONFIG is raw Annex-B H264 (SPS+PPS), send as-is
                     debug!(
                         "{} media tap: CODEC_CONFIG on ch {:#04x}, {} bytes, first bytes: {:02X?}",
                         get_name(proxy_type), pkt.channel, frame_data.len(),
                         &frame_data[..frame_data.len().min(16)]
                     );
-                    sink.send_codec_config(frame_data).await;
+                    sink.send_codec_config(frame_data.to_vec()).await;
                 }
                 MEDIA_MESSAGE_DATA => {
-                    debug!(
-                        "{} media tap: DATA on ch {:#04x}, {} bytes, first bytes: {:02X?}",
-                        get_name(proxy_type), pkt.channel, frame_data.len(),
-                        &frame_data[..frame_data.len().min(16)]
-                    );
-                    sink.send_frame(frame_data).await;
+                    // DATA frames have an 8-byte timestamp header before the Annex-B NAL data.
+                    // Skip frames that are too short (protobuf control messages on the channel).
+                    const TIMESTAMP_HEADER: usize = 8;
+                    if frame_data.len() > TIMESTAMP_HEADER {
+                        let nal_data = &frame_data[TIMESTAMP_HEADER..];
+                        debug!(
+                            "{} media tap: DATA on ch {:#04x}, {} bytes ({}b after ts strip), first NAL bytes: {:02X?}",
+                            get_name(proxy_type), pkt.channel, frame_data.len(), nal_data.len(),
+                            &nal_data[..nal_data.len().min(8)]
+                        );
+                        sink.send_frame(nal_data.to_vec()).await;
+                    }
                 }
                 _ => {}
             }
