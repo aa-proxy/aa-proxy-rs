@@ -95,7 +95,7 @@ pub async fn media_tcp_server(port: u16, label: String, sink: MediaSink) {
         }
     };
     info!(
-        "<green>media_tcp_server</>: <b>{label}</> listening on port <b>{port}</>  →  vlc --avcodec-hw=none tcp://127.0.0.1:{port}"
+        "<green>media_tcp_server</>: <b>{label}</> listening on port <b>{port}</>  →  vlc --avcodec-hw=none --demux ts tcp://127.0.0.1:{port}  (or: ffplay tcp://127.0.0.1:{port})"
     );
 
     loop {
@@ -107,66 +107,96 @@ pub async fn media_tcp_server(port: u16, label: String, sink: MediaSink) {
                 tokio::spawn(async move {
                     let mut rx = sink.subscribe();
                     let mut ts = MpegTsState::new();
+
+                    // Send PAT+PMT immediately so VLC/ffplay can complete format probing
+                    // without timing out while we wait for the first IDR frame.
+                    let initial_psi = ts.pat_pmt();
+                    if stream.write_all(&initial_psi).await.is_err() {
+                        return;
+                    }
+
                     // Wait until we see an IDR frame before starting the stream so
                     // the decoder always begins at a clean keyframe boundary.
+                    // While waiting, periodically send null TS packets + PAT/PMT to
+                    // keep the connection alive and the format probe satisfied.
+                    let null_pkt = MpegTsState::null_packet();
                     let mut synced = false;
+                    let mut null_ticker =
+                        tokio::time::interval(std::time::Duration::from_millis(100));
+                    null_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
                     loop {
-                        match rx.recv().await {
-                            Ok(item) => {
-                                let (pts_us, ref data) = *item;
-                                // pts_us == 0 means codec-config broadcast; skip
-                                // — the cached copy is injected before IDR below.
-                                if pts_us == 0 {
-                                    continue;
-                                }
-                                let is_idr = is_idr_frame(data);
-                                if !synced {
-                                    if !is_idr {
-                                        continue;
-                                    }
-                                    synced = true;
-                                    debug!(
-                                        "media_tcp_server: {addr} ({label}) IDR sync'd, streaming MPEG-TS"
-                                    );
-                                }
+                        tokio::select! {
+                            biased;
+                            item = rx.recv() => {
+                                match item {
+                                    Ok(item) => {
+                                        let (pts_us, ref data) = *item;
+                                        // pts_us == 0 means codec-config broadcast; skip
+                                        // — the cached copy is injected before IDR below.
+                                        if pts_us == 0 {
+                                            continue;
+                                        }
+                                        let is_idr = is_idr_frame(data);
+                                        if !synced {
+                                            if !is_idr {
+                                                continue;
+                                            }
+                                            synced = true;
+                                            debug!(
+                                                "media_tcp_server: {addr} ({label}) IDR sync'd, streaming MPEG-TS"
+                                            );
+                                        }
 
-                                if is_idr {
-                                    // PAT + PMT before every IDR for robustness.
-                                    let psi = ts.pat_pmt();
-                                    if stream.write_all(&psi).await.is_err() {
-                                        break;
-                                    }
+                                        if is_idr {
+                                            // PAT + PMT before every IDR for robustness.
+                                            let psi = ts.pat_pmt();
+                                            if stream.write_all(&psi).await.is_err() {
+                                                break;
+                                            }
 
-                                    // Prepend SPS+PPS into the same PES as the IDR so
-                                    // the decoder always has fresh parameter sets.
-                                    let idr_payload =
-                                        if let Some(cfg) = sink.get_codec_cfg().await {
-                                            let mut v =
-                                                Vec::with_capacity(cfg.len() + data.len());
-                                            v.extend_from_slice(&cfg);
-                                            v.extend_from_slice(data);
-                                            v
+                                            // Prepend SPS+PPS into the same PES as the IDR so
+                                            // the decoder always has fresh parameter sets.
+                                            let idr_payload =
+                                                if let Some(cfg) = sink.get_codec_cfg().await {
+                                                    let mut v =
+                                                        Vec::with_capacity(cfg.len() + data.len());
+                                                    v.extend_from_slice(&cfg);
+                                                    v.extend_from_slice(data);
+                                                    v
+                                                } else {
+                                                    data.clone()
+                                                };
+                                            let pkts = ts.video_pes(pts_us, &idr_payload, true);
+                                            if stream.write_all(&pkts).await.is_err() {
+                                                break;
+                                            }
                                         } else {
-                                            data.clone()
-                                        };
-                                    let pkts = ts.video_pes(pts_us, &idr_payload, true);
-                                    if stream.write_all(&pkts).await.is_err() {
-                                        break;
+                                            let pkts = ts.video_pes(pts_us, data, false);
+                                            if stream.write_all(&pkts).await.is_err() {
+                                                break;
+                                            }
+                                        }
                                     }
-                                } else {
-                                    let pkts = ts.video_pes(pts_us, data, false);
-                                    if stream.write_all(&pkts).await.is_err() {
-                                        break;
+                                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                                        warn!(
+                                            "media_tcp_server: client {addr} ({label}) lagged by {n} frames, re-syncing"
+                                        );
+                                        synced = false;
                                     }
+                                    Err(broadcast::error::RecvError::Closed) => break,
                                 }
                             }
-                            Err(broadcast::error::RecvError::Lagged(n)) => {
-                                warn!(
-                                    "media_tcp_server: client {addr} ({label}) lagged by {n} frames, re-syncing"
-                                );
-                                synced = false;
+                            _ = null_ticker.tick(), if !synced => {
+                                // Keep-alive: null packet + PAT+PMT every 100ms while unsynced.
+                                if stream.write_all(&null_pkt).await.is_err() {
+                                    break;
+                                }
+                                let psi = ts.pat_pmt();
+                                if stream.write_all(&psi).await.is_err() {
+                                    break;
+                                }
                             }
-                            Err(broadcast::error::RecvError::Closed) => break,
                         }
                     }
                     info!("<green>media_tcp_server</>: client disconnected {addr} ({label})");

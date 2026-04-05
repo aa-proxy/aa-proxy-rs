@@ -214,6 +214,19 @@ impl MpegTsState {
         out
     }
 
+    /// A single null TS packet (PID 0x1FFF) — use to keep the connection alive
+    /// while the client waits for the first IDR frame, so VLC/ffplay can finish
+    /// format probing without timing out.
+    pub fn null_packet() -> [u8; TS_PACKET_SIZE] {
+        let mut pkt = [0xFFu8; TS_PACKET_SIZE];
+        pkt[0] = 0x47;
+        pkt[1] = 0x1F; // PID high = 0x1F
+        pkt[2] = 0xFF; // PID low  = 0xFF  → PID 0x1FFF (null packet)
+        pkt[3] = 0x10; // payload only, counter = 0 (not significant for null PID)
+        // payload bytes already 0xFF
+        pkt
+    }
+
     /// Wrap Annex-B `data` in PES packets and fragment into 188-byte TS packets.
     ///
     /// `pts_us` is the Android Auto presentation timestamp in microseconds
