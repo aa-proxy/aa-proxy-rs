@@ -40,13 +40,16 @@ use crate::ev::EvTaskCommand;
 use crate::io_uring::Endpoint;
 use crate::io_uring::IoDevice;
 use crate::io_uring::BUFFER_LEN;
+use crate::mpegts::MpegTsState;
 
 /// Broadcast-based sink for tapping a single media channel over TCP.
 /// Multiple TCP clients can connect; each receives a copy of every frame.
 /// Lagging clients are dropped silently.
 #[derive(Clone)]
 pub struct MediaSink {
-    tx: broadcast::Sender<Arc<Vec<u8>>>,
+    /// Each broadcast item is `(pts_us, data)`.  For codec-config frames the
+    /// pts_us field is 0 and `codec_cfg` is also populated.
+    tx: broadcast::Sender<Arc<(u64, Vec<u8>)>>,
     /// Cached codec config frame sent to every new client on connect.
     codec_cfg: Arc<tokio::sync::Mutex<Option<Arc<Vec<u8>>>>>,
 }
@@ -61,16 +64,16 @@ impl MediaSink {
     }
 
     pub async fn send_codec_config(&self, data: Vec<u8>) {
-        let frame = Arc::new(data);
-        *self.codec_cfg.lock().await = Some(frame.clone());
-        let _ = self.tx.send(frame);
+        let buf = Arc::new(data);
+        *self.codec_cfg.lock().await = Some(buf.clone());
+        let _ = self.tx.send(Arc::new((0u64, buf.as_ref().clone())));
     }
 
-    pub async fn send_frame(&self, data: Vec<u8>) {
-        let _ = self.tx.send(Arc::new(data));
+    pub async fn send_frame(&self, pts_us: u64, data: Vec<u8>) {
+        let _ = self.tx.send(Arc::new((pts_us, data)));
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<Arc<Vec<u8>>> {
+    pub fn subscribe(&self) -> broadcast::Receiver<Arc<(u64, Vec<u8>)>> {
         self.tx.subscribe()
     }
 
@@ -81,7 +84,8 @@ impl MediaSink {
 
 /// TCP server for one media channel tap. Binds on `0.0.0.0:port`.
 /// Logs the VLC connect command on startup.
-/// For each client: replays cached codec config frame first, then streams live frames.
+/// Streams an MPEG-TS container so that players receive proper PTS timing.
+/// For each client: waits for an IDR, then sends PAT+PMT and streams from there.
 pub async fn media_tcp_server(port: u16, label: String, sink: MediaSink) {
     let listener = match TcpListener::bind(format!("0.0.0.0:{port}")).await {
         Ok(l) => l,
@@ -91,7 +95,7 @@ pub async fn media_tcp_server(port: u16, label: String, sink: MediaSink) {
         }
     };
     info!(
-        "<green>media_tcp_server</>: <b>{label}</> listening on port <b>{port}</>  →  vlc --avcodec-hw=none --demux h264 tcp://127.0.0.1:{port}"
+        "<green>media_tcp_server</>: <b>{label}</> listening on port <b>{port}</>  →  vlc --avcodec-hw=none tcp://127.0.0.1:{port}"
     );
 
     loop {
@@ -102,36 +106,65 @@ pub async fn media_tcp_server(port: u16, label: String, sink: MediaSink) {
                 let label = label.clone();
                 tokio::spawn(async move {
                     let mut rx = sink.subscribe();
-                    // Skip frames until the next IDR (keyframe) so the decoder starts cleanly.
-                    // When IDR is found, prepend SPS+PPS (CODEC_CONFIG) immediately before it
-                    // so the decoder always has fresh parameters at the keyframe boundary.
+                    let mut ts = MpegTsState::new();
+                    // Wait until we see an IDR frame before starting the stream so
+                    // the decoder always begins at a clean keyframe boundary.
                     let mut synced = false;
                     loop {
                         match rx.recv().await {
-                            Ok(frame) => {
+                            Ok(item) => {
+                                let (pts_us, ref data) = *item;
+                                // pts_us == 0 means codec-config broadcast; skip
+                                // — the cached copy is injected before IDR below.
+                                if pts_us == 0 {
+                                    continue;
+                                }
+                                let is_idr = is_idr_frame(data);
                                 if !synced {
-                                    if !is_idr_frame(&frame) {
+                                    if !is_idr {
                                         continue;
                                     }
                                     synced = true;
-                                    debug!("media_tcp_server: {addr} ({label}) IDR sync'd, streaming");
+                                    debug!(
+                                        "media_tcp_server: {addr} ({label}) IDR sync'd, streaming MPEG-TS"
+                                    );
                                 }
-                                // Re-inject SPS+PPS before every IDR so the decoder never loses
-                                // parameter set context (fixes 'non-existing PPS' errors).
-                                if is_idr_frame(&frame) {
-                                    if let Some(cfg_frame) = sink.get_codec_cfg().await {
-                                        if stream.write_all(&cfg_frame).await.is_err() {
-                                            break;
-                                        }
+
+                                if is_idr {
+                                    // PAT + PMT before every IDR for robustness.
+                                    let psi = ts.pat_pmt();
+                                    if stream.write_all(&psi).await.is_err() {
+                                        break;
                                     }
-                                }
-                                if stream.write_all(&frame).await.is_err() {
-                                    break;
+
+                                    // Prepend SPS+PPS into the same PES as the IDR so
+                                    // the decoder always has fresh parameter sets.
+                                    let idr_payload =
+                                        if let Some(cfg) = sink.get_codec_cfg().await {
+                                            let mut v =
+                                                Vec::with_capacity(cfg.len() + data.len());
+                                            v.extend_from_slice(&cfg);
+                                            v.extend_from_slice(data);
+                                            v
+                                        } else {
+                                            data.clone()
+                                        };
+                                    let pkts = ts.video_pes(pts_us, &idr_payload, true);
+                                    if stream.write_all(&pkts).await.is_err() {
+                                        break;
+                                    }
+                                } else {
+                                    let pkts = ts.video_pes(pts_us, data, false);
+                                    if stream.write_all(&pkts).await.is_err() {
+                                        break;
+                                    }
                                 }
                             }
                             Err(broadcast::error::RecvError::Lagged(n)) => {
-                                warn!("media_tcp_server: client {addr} ({label}) lagged by {n} frames, re-syncing");
-                                synced = false; // force re-sync to next IDR after lag
+                                warn!(
+                                    "media_tcp_server: client {addr} ({label}) lagged by {n} frames, re-syncing"
+                                );
+                                synced = false;
                             }
                             Err(broadcast::error::RecvError::Closed) => break,
                         }
@@ -636,17 +669,20 @@ pub async fn pkt_modify_hook(
                     sink.send_codec_config(frame_data.to_vec()).await;
                 }
                 MEDIA_MESSAGE_DATA => {
-                    // DATA frames have an 8-byte timestamp header before the Annex-B NAL data.
+                    // DATA frames have an 8-byte big-endian µs PTS before the Annex-B NAL data.
                     // Skip frames that are too short (protobuf control messages on the channel).
                     const TIMESTAMP_HEADER: usize = 8;
                     if frame_data.len() > TIMESTAMP_HEADER {
+                        let pts_us = u64::from_be_bytes(
+                            frame_data[..TIMESTAMP_HEADER].try_into().unwrap(),
+                        );
                         let nal_data = &frame_data[TIMESTAMP_HEADER..];
                         debug!(
-                            "{} media tap: DATA on ch {:#04x}, {} bytes ({}b after ts strip), first NAL bytes: {:02X?}",
+                            "{} media tap: DATA on ch {:#04x}, {} bytes ({}b after ts strip), pts={}µs, first NAL bytes: {:02X?}",
                             get_name(proxy_type), pkt.channel, frame_data.len(), nal_data.len(),
-                            &nal_data[..nal_data.len().min(8)]
+                            pts_us, &nal_data[..nal_data.len().min(8)]
                         );
-                        sink.send_frame(nal_data.to_vec()).await;
+                        sink.send_frame(pts_us, nal_data.to_vec()).await;
                     }
                 }
                 _ => {}
