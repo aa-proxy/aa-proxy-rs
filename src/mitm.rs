@@ -101,25 +101,28 @@ pub async fn media_tcp_server(port: u16, label: String, sink: MediaSink) {
                 let sink = sink.clone();
                 let label = label.clone();
                 tokio::spawn(async move {
-                    // Replay cached SPS+PPS codec config so the client has the decoder parameters.
-                    if let Some(cfg_frame) = sink.get_codec_cfg().await {
-                        if stream.write_all(&cfg_frame).await.is_err() {
-                            return;
-                        }
-                    }
                     let mut rx = sink.subscribe();
                     // Skip frames until the next IDR (keyframe) so the decoder starts cleanly.
-                    // Without this, a client connecting mid-GOP receives P-frames it cannot decode.
+                    // When IDR is found, prepend SPS+PPS (CODEC_CONFIG) immediately before it
+                    // so the decoder always has fresh parameters at the keyframe boundary.
                     let mut synced = false;
                     loop {
                         match rx.recv().await {
                             Ok(frame) => {
                                 if !synced {
-                                    if is_idr_frame(&frame) {
-                                        synced = true;
-                                        debug!("media_tcp_server: {addr} ({label}) IDR sync'd, streaming");
-                                    } else {
+                                    if !is_idr_frame(&frame) {
                                         continue;
+                                    }
+                                    synced = true;
+                                    debug!("media_tcp_server: {addr} ({label}) IDR sync'd, streaming");
+                                }
+                                // Re-inject SPS+PPS before every IDR so the decoder never loses
+                                // parameter set context (fixes 'non-existing PPS' errors).
+                                if is_idr_frame(&frame) {
+                                    if let Some(cfg_frame) = sink.get_codec_cfg().await {
+                                        if stream.write_all(&cfg_frame).await.is_err() {
+                                            break;
+                                        }
                                     }
                                 }
                                 if stream.write_all(&frame).await.is_err() {
@@ -127,8 +130,8 @@ pub async fn media_tcp_server(port: u16, label: String, sink: MediaSink) {
                                 }
                             }
                             Err(broadcast::error::RecvError::Lagged(n)) => {
-                                warn!("media_tcp_server: client {addr} ({label}) lagged by {n} frames, dropping");
-                                break;
+                                warn!("media_tcp_server: client {addr} ({label}) lagged by {n} frames, re-syncing");
+                                synced = false; // force re-sync to next IDR after lag
                             }
                             Err(broadcast::error::RecvError::Closed) => break,
                         }
