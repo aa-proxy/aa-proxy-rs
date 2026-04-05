@@ -165,8 +165,11 @@ pub struct ModifyContext {
     nav_channel: Option<u8>,
     audio_channels: Vec<u8>,
     ev_tx: Sender<EvTaskCommand>,
-    /// Maps channel_id → MediaSink for active media tap, populated from SDR response.
+    /// Offset→sink map (keys 0-6). Used only at SDR time to look up which sink
+    /// to assign to each real channel. Never used for tapping.
     media_sinks: HashMap<u8, MediaSink>,
+    /// channel_id→sink map. Populated from SDR. Used for tapping data packets.
+    media_channels: HashMap<u8, MediaSink>,
 }
 
 #[derive(PartialEq, Copy, Clone, Debug)]
@@ -593,11 +596,26 @@ pub async fn pkt_modify_hook(
 
     // tap media frames for debug streaming (only on MobileDevice path = phone → HU direction)
     if proxy_type == ProxyType::MobileDevice {
-        if let Some(sink) = ctx.media_sinks.get(&pkt.channel) {
+        if let Some(sink) = ctx.media_channels.get(&pkt.channel) {
+            // payload[2..] strips the 2-byte message_id prefix
             let frame_data = pkt.payload[2..].to_vec();
             match protos::MediaMessageId::from_i32(message_id).unwrap_or(MEDIA_MESSAGE_DATA) {
-                MEDIA_MESSAGE_CODEC_CONFIG => sink.send_codec_config(frame_data).await,
-                MEDIA_MESSAGE_DATA => sink.send_frame(frame_data).await,
+                MEDIA_MESSAGE_CODEC_CONFIG => {
+                    debug!(
+                        "{} media tap: CODEC_CONFIG on ch {:#04x}, {} bytes, first bytes: {:02X?}",
+                        get_name(proxy_type), pkt.channel, frame_data.len(),
+                        &frame_data[..frame_data.len().min(16)]
+                    );
+                    sink.send_codec_config(frame_data).await;
+                }
+                MEDIA_MESSAGE_DATA => {
+                    debug!(
+                        "{} media tap: DATA on ch {:#04x}, {} bytes, first bytes: {:02X?}",
+                        get_name(proxy_type), pkt.channel, frame_data.len(),
+                        &frame_data[..frame_data.len().min(16)]
+                    );
+                    sink.send_frame(frame_data).await;
+                }
                 _ => {}
             }
         }
@@ -641,7 +659,7 @@ pub async fn pkt_modify_hook(
                 Ok(msg) => msg,
             };
 
-            // Populate media_sinks channel map from pre-created offset map.
+            // Populate media_channels (channel_id→sink) from the offset→sink map.
             // Must run in MobileDevice context where the sinks are held —
             // the SDR response from HU passes through proxy(MobileDevice).rxr first.
             if proxy_type == ProxyType::MobileDevice && !ctx.media_sinks.is_empty() {
@@ -650,7 +668,7 @@ pub async fn pkt_modify_hook(
                     if !svc.media_sink_service.video_configs.is_empty() {
                         let offset = svc.media_sink_service.display_type().value() as u8;
                         if let Some(sink) = ctx.media_sinks.get(&offset).cloned() {
-                            ctx.media_sinks.insert(ch, sink);
+                            ctx.media_channels.insert(ch, sink);
                             info!(
                                 "{} <blue>media tap:</> video channel <b>{:#04x}</> → port offset <b>{}</>",
                                 get_name(proxy_type), ch, offset
@@ -660,7 +678,7 @@ pub async fn pkt_modify_hook(
                         // audio offset = audio_type value + 2 (offsets 0-2 reserved for video)
                         let offset = svc.media_sink_service.audio_type().value() as u8 + 2;
                         if let Some(sink) = ctx.media_sinks.get(&offset).cloned() {
-                            ctx.media_sinks.insert(ch, sink);
+                            ctx.media_channels.insert(ch, sink);
                             info!(
                                 "{} <blue>media tap:</> audio channel <b>{:#04x}</> → port offset <b>{}</>",
                                 get_name(proxy_type), ch, offset
@@ -1276,6 +1294,7 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
         audio_channels: vec![],
         ev_tx,
         media_sinks,
+        media_channels: HashMap::new(),
     };
     loop {
         tokio::select! {
