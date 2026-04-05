@@ -339,6 +339,36 @@ pub async fn io_loop(
     let mut dhu_listener = Some(TcpListener::bind(bind_addr).unwrap());
     info!("{} 🛰️ DHU TCP server bound to: <u>{}</u>", NAME, bind_addr);
 
+    // create media tap sinks once — they persist across reconnects (requires mitm=true)
+    let persistent_media_sinks: HashMap<u8, MediaSink> = {
+        let config_snapshot = config.read().await.clone();
+        let mut map = HashMap::new();
+        if let Some(base_port) = config_snapshot.media_dump_base_port {
+            if !config_snapshot.mitm {
+                error!(
+                    "<red>media_dump_base_port is set but mitm = false — media tap disabled!</>"
+                );
+            } else {
+                let labels = [
+                    (0u8, "video-main"),
+                    (1u8, "video-cluster"),
+                    (2u8, "video-aux"),
+                    (3u8, "audio-guidance"),
+                    (4u8, "audio-system"),
+                    (5u8, "audio-media"),
+                    (6u8, "audio-telephony"),
+                ];
+                for (offset, label) in labels {
+                    let sink = MediaSink::new(128);
+                    let port = base_port + offset as u16;
+                    tokio::spawn(media_tcp_server(port, label.to_string(), sink.clone()));
+                    map.insert(offset, sink);
+                }
+            }
+        }
+        map
+    };
+
     loop {
         // reload new config
         let config = config.read().await.clone();
@@ -497,32 +527,6 @@ pub async fn io_loop(
             *tx_lock = Some(tx_hu.clone());
         }
 
-        // create media tap sinks if configured (requires mitm=true)
-        let mut md_media_sinks: HashMap<u8, MediaSink> = HashMap::new();
-        if let Some(base_port) = config.media_dump_base_port {
-            if !config.mitm {
-                error!(
-                    "<red>media_dump_base_port is set but mitm = false — media tap disabled!</>"
-                );
-            } else {
-                let labels = [
-                    (0u8, "video-main"),
-                    (1u8, "video-cluster"),
-                    (2u8, "video-aux"),
-                    (3u8, "audio-guidance"),
-                    (4u8, "audio-system"),
-                    (5u8, "audio-media"),
-                    (6u8, "audio-telephony"),
-                ];
-                for (offset, label) in labels {
-                    let sink = MediaSink::new(128);
-                    let port = base_port + offset as u16;
-                    tokio::spawn(media_tcp_server(port, label.to_string(), sink.clone()));
-                    md_media_sinks.insert(offset, sink);
-                }
-            }
-        }
-
         // dedicated reading threads:
         reader_hu = tokio_uring::spawn(endpoint_reader(hu_r, txr_hu, true));
         reader_md = tokio_uring::spawn(endpoint_reader(md_r, txr_md, false));
@@ -549,7 +553,7 @@ pub async fn io_loop(
             shared_config.clone(),
             sensor_channel.clone(),
             ev_tx.clone(),
-            md_media_sinks,
+            persistent_media_sinks.clone(),
         ));
 
         // Thread for monitoring transfer

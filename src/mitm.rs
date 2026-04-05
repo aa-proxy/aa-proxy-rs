@@ -629,10 +629,6 @@ pub async fn pkt_modify_hook(
             }
         }
         MESSAGE_SERVICE_DISCOVERY_RESPONSE => {
-            // rewrite HeadUnit message only, exit if it is MobileDevice
-            if proxy_type == ProxyType::MobileDevice {
-                return Ok(false);
-            }
             let mut msg = match ServiceDiscoveryResponse::parse_from_bytes(data) {
                 Err(e) => {
                     error!(
@@ -644,6 +640,40 @@ pub async fn pkt_modify_hook(
                 }
                 Ok(msg) => msg,
             };
+
+            // Populate media_sinks channel map from pre-created offset map.
+            // Must run in MobileDevice context where the sinks are held —
+            // the SDR response from HU passes through proxy(MobileDevice).rxr first.
+            if proxy_type == ProxyType::MobileDevice && !ctx.media_sinks.is_empty() {
+                for svc in msg.services.iter() {
+                    let ch = svc.id() as u8;
+                    if !svc.media_sink_service.video_configs.is_empty() {
+                        let offset = svc.media_sink_service.display_type().value() as u8;
+                        if let Some(sink) = ctx.media_sinks.get(&offset).cloned() {
+                            ctx.media_sinks.insert(ch, sink);
+                            info!(
+                                "{} <blue>media tap:</> video channel <b>{:#04x}</> → port offset <b>{}</>",
+                                get_name(proxy_type), ch, offset
+                            );
+                        }
+                    } else if !svc.media_sink_service.audio_configs.is_empty() {
+                        // audio offset = audio_type value + 2 (offsets 0-2 reserved for video)
+                        let offset = svc.media_sink_service.audio_type().value() as u8 + 2;
+                        if let Some(sink) = ctx.media_sinks.get(&offset).cloned() {
+                            ctx.media_sinks.insert(ch, sink);
+                            info!(
+                                "{} <blue>media tap:</> audio channel <b>{:#04x}</> → port offset <b>{}</>",
+                                get_name(proxy_type), ch, offset
+                            );
+                        }
+                    }
+                }
+            }
+
+            // SDR rewriting is HeadUnit-only; MobileDevice sees SDR read-only (for channel map above)
+            if proxy_type == ProxyType::MobileDevice {
+                return Ok(false);
+            }
 
             // DPI
             if cfg.dpi > 0 {
@@ -880,34 +910,6 @@ pub async fn pkt_modify_hook(
                         .as_mut()
                         .unwrap()
                         .supported_ev_connector_types = connectors;
-                }
-            }
-
-            // populate media_sinks channel map from pre-created offset map
-            // (only active when media_dump_base_port is configured)
-            if !ctx.media_sinks.is_empty() {
-                for svc in msg.services.iter() {
-                    let ch = svc.id() as u8;
-                    if !svc.media_sink_service.video_configs.is_empty() {
-                        let offset = svc.media_sink_service.display_type().value() as u8;
-                        if let Some(sink) = ctx.media_sinks.get(&offset).cloned() {
-                            ctx.media_sinks.insert(ch, sink);
-                            info!(
-                                "{} <blue>media tap:</> video channel <b>{:#04x}</> → port offset <b>{}</>",
-                                get_name(proxy_type), ch, offset
-                            );
-                        }
-                    } else if !svc.media_sink_service.audio_configs.is_empty() {
-                        // audio offset = audio_type enum value + 2 (offsets 0-2 reserved for video)
-                        let offset = svc.media_sink_service.audio_type().value() as u8 + 2;
-                        if let Some(sink) = ctx.media_sinks.get(&offset).cloned() {
-                            ctx.media_sinks.insert(ch, sink);
-                            info!(
-                                "{} <blue>media tap:</> audio channel <b>{:#04x}</> → port offset <b>{}</>",
-                                get_name(proxy_type), ch, offset
-                            );
-                        }
-                    }
                 }
             }
 
