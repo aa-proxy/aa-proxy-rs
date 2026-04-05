@@ -361,7 +361,12 @@ pub async fn io_loop(
                 for (offset, label) in labels {
                     let sink = MediaSink::new(128);
                     let port = base_port + offset as u16;
-                    tokio::spawn(media_tcp_server(port, label.to_string(), sink.clone()));
+                    tokio::spawn(media_tcp_server(
+                        port,
+                        label.to_string(),
+                        sink.clone(),
+                        config_snapshot.media_wait_for_live_idr,
+                    ));
                     map.insert(offset, sink);
                 }
             }

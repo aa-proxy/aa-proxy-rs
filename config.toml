@@ -7,7 +7,7 @@ advertise = true
 enable_btle = true
 dongle_mode = false
 debug = true
-hexdump_level = "All"
+hexdump_level = "Disabled"
 disable_console_debug = true
 legacy = true
 quick_reconnect = false
@@ -43,4 +43,5 @@ eth_mode = ""
 startup_delay = 0
 ble_password = ""
 external_antenna = false
-# media_dump_base_port = 12345  # TCP port base for media stream tapping (mitm=true required)
+media_dump_base_port = 12345
+media_wait_for_live_idr = true

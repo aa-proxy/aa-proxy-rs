@@ -140,6 +140,10 @@ pub struct AppConfig {
     /// Requires mitm = true. Connect with e.g. `vlc tcp://127.0.0.1:12345`.
     #[serde(default)]
     pub media_dump_base_port: Option<u16>,
+    /// Startup behavior for media TCP tap clients.
+    /// true  = wait for a fresh live IDR before forwarding inter-frames (clean decode)
+    /// false = forward immediately after cached-IDR preview (lower latency, may artifact)
+    pub media_wait_for_live_idr: bool,
 
     #[serde(skip)]
     pub action_requested: Option<Action>,
@@ -292,6 +296,7 @@ impl Default for AppConfig {
             ble_password: String::new(),
             external_antenna: false,
             media_dump_base_port: None,
+            media_wait_for_live_idr: true,
         }
     }
 }
@@ -381,6 +386,7 @@ impl AppConfig {
         if let Some(port) = self.media_dump_base_port {
             doc["media_dump_base_port"] = value(port as i64);
         }
+        doc["media_wait_for_live_idr"] = value(self.media_wait_for_live_idr);
 
         let _ = fs::write(config_file, doc.to_string());
     }

@@ -12,8 +12,6 @@ use std::sync::Mutex;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
-use tokio::net::TcpListener;
-use tokio::sync::broadcast;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::timeout;
 use tokio_uring::buf::BoundedBuf;
@@ -40,210 +38,10 @@ use crate::ev::EvTaskCommand;
 use crate::io_uring::Endpoint;
 use crate::io_uring::IoDevice;
 use crate::io_uring::BUFFER_LEN;
-use crate::mpegts::MpegTsState;
-
-/// Broadcast-based sink for tapping a single media channel over TCP.
-/// Multiple TCP clients can connect; each receives a copy of every frame.
-/// Lagging clients are dropped silently.
-#[derive(Clone)]
-pub struct MediaSink {
-    /// Each broadcast item is `(pts_us, data)`.  For codec-config frames the
-    /// pts_us field is 0 and `codec_cfg` is also populated.
-    tx: broadcast::Sender<Arc<(u64, Vec<u8>)>>,
-    /// Cached codec config frame sent to every new client on connect.
-    codec_cfg: Arc<tokio::sync::Mutex<Option<Arc<Vec<u8>>>>>,
-}
-
-impl MediaSink {
-    pub fn new(capacity: usize) -> Self {
-        let (tx, _) = broadcast::channel(capacity);
-        Self {
-            tx,
-            codec_cfg: Arc::new(tokio::sync::Mutex::new(None)),
-        }
-    }
-
-    pub async fn send_codec_config(&self, data: Vec<u8>) {
-        let buf = Arc::new(data);
-        *self.codec_cfg.lock().await = Some(buf.clone());
-        let _ = self.tx.send(Arc::new((0u64, buf.as_ref().clone())));
-    }
-
-    pub async fn send_frame(&self, pts_us: u64, data: Vec<u8>) {
-        let _ = self.tx.send(Arc::new((pts_us, data)));
-    }
-
-    pub fn subscribe(&self) -> broadcast::Receiver<Arc<(u64, Vec<u8>)>> {
-        self.tx.subscribe()
-    }
-
-    pub async fn get_codec_cfg(&self) -> Option<Arc<Vec<u8>>> {
-        self.codec_cfg.lock().await.clone()
-    }
-}
-
-/// TCP server for one media channel tap. Binds on `0.0.0.0:port`.
-/// Logs the VLC connect command on startup.
-/// Streams an MPEG-TS container so that players receive proper PTS timing.
-/// For each client: waits for an IDR, then sends PAT+PMT and streams from there.
-pub async fn media_tcp_server(port: u16, label: String, sink: MediaSink) {
-    let listener = match TcpListener::bind(format!("0.0.0.0:{port}")).await {
-        Ok(l) => l,
-        Err(e) => {
-            error!("<red>media_tcp_server</>: failed to bind port {port} for {label}: {e}");
-            return;
-        }
-    };
-    info!(
-        "<green>media_tcp_server</>: <b>{label}</> listening on port <b>{port}</>  →  vlc --avcodec-hw=none --demux ts tcp://127.0.0.1:{port}  (or: ffplay tcp://127.0.0.1:{port})"
-    );
-
-    loop {
-        match listener.accept().await {
-            Ok((mut stream, addr)) => {
-                info!("<green>media_tcp_server</>: client connected {addr} ({label})");
-                let sink = sink.clone();
-                let label = label.clone();
-                tokio::spawn(async move {
-                    let mut rx = sink.subscribe();
-                    let mut ts = MpegTsState::new();
-
-                    // Send PAT+PMT immediately so VLC/ffplay can complete format probing
-                    // without timing out while we wait for the first IDR frame.
-                    let initial_psi = ts.pat_pmt();
-                    if stream.write_all(&initial_psi).await.is_err() {
-                        return;
-                    }
-
-                    // Wait until we see an IDR frame before starting the stream so
-                    // the decoder always begins at a clean keyframe boundary.
-                    // While waiting, periodically send null TS packets + PAT/PMT to
-                    // keep the connection alive and the format probe satisfied.
-                    let null_pkt = MpegTsState::null_packet();
-                    let mut synced = false;
-                    let mut null_ticker =
-                        tokio::time::interval(std::time::Duration::from_millis(100));
-                    null_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-                    loop {
-                        tokio::select! {
-                            biased;
-                            item = rx.recv() => {
-                                match item {
-                                    Ok(item) => {
-                                        let (pts_us, ref data) = *item;
-                                        // pts_us == 0 means codec-config broadcast; skip
-                                        // — the cached copy is injected before IDR below.
-                                        if pts_us == 0 {
-                                            continue;
-                                        }
-                                        let is_idr = is_idr_frame(data);
-                                        if !synced {
-                                            if !is_idr {
-                                                continue;
-                                            }
-                                            synced = true;
-                                            debug!(
-                                                "media_tcp_server: {addr} ({label}) IDR sync'd, streaming MPEG-TS"
-                                            );
-                                        }
-
-                                        if is_idr {
-                                            // PAT + PMT before every IDR for robustness.
-                                            let psi = ts.pat_pmt();
-                                            if stream.write_all(&psi).await.is_err() {
-                                                break;
-                                            }
-
-                                            // Prepend SPS+PPS into the same PES as the IDR so
-                                            // the decoder always has fresh parameter sets.
-                                            let idr_payload =
-                                                if let Some(cfg) = sink.get_codec_cfg().await {
-                                                    let mut v =
-                                                        Vec::with_capacity(cfg.len() + data.len());
-                                                    v.extend_from_slice(&cfg);
-                                                    v.extend_from_slice(data);
-                                                    v
-                                                } else {
-                                                    data.clone()
-                                                };
-                                            let pkts = ts.video_pes(pts_us, &idr_payload, true);
-                                            if stream.write_all(&pkts).await.is_err() {
-                                                break;
-                                            }
-                                        } else {
-                                            let pkts = ts.video_pes(pts_us, data, false);
-                                            if stream.write_all(&pkts).await.is_err() {
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                                        warn!(
-                                            "media_tcp_server: client {addr} ({label}) lagged by {n} frames, re-syncing"
-                                        );
-                                        synced = false;
-                                    }
-                                    Err(broadcast::error::RecvError::Closed) => break,
-                                }
-                            }
-                            _ = null_ticker.tick(), if !synced => {
-                                // Keep-alive: null packet + PAT+PMT every 100ms while unsynced.
-                                if stream.write_all(&null_pkt).await.is_err() {
-                                    break;
-                                }
-                                let psi = ts.pat_pmt();
-                                if stream.write_all(&psi).await.is_err() {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    info!("<green>media_tcp_server</>: client disconnected {addr} ({label})");
-                });
-            }
-            Err(e) => {
-                error!("<red>media_tcp_server</>: accept error on port {port}: {e}");
-            }
-        }
-    }
-}
-
-/// Scan all NAL units in an Annex-B buffer looking for IDR (type 5).
-/// Returns true if any NAL unit in the buffer is an IDR slice.
-/// Handles access units that begin with AUD (type 9) or SEI (type 6)
-/// before the IDR, which is common in Android Auto H.264 streams.
-fn is_idr_frame(data: &[u8]) -> bool {
-    let mut i = 0;
-    while i + 3 <= data.len() {
-        // Scan for a start code: 00 00 01 or 00 00 00 01
-        if data[i] == 0 && data[i + 1] == 0 {
-            let (sc_len, nal_off) = if i + 4 <= data.len() && data[i + 2] == 0 && data[i + 3] == 1
-            {
-                (4usize, i + 4)
-            } else if data[i + 2] == 1 {
-                (3usize, i + 3)
-            } else {
-                i += 1;
-                continue;
-            };
-            if nal_off >= data.len() {
-                break;
-            }
-            let nal_type = data[nal_off] & 0x1F;
-            match nal_type {
-                5 => return true,  // IDR slice
-                1 => return false, // non-IDR coded slice ⇒ definitely not an IDR access unit
-                _ => {}            // SPS(7), PPS(8), SEI(6), AUD(9) — keep scanning
-            }
-            i = nal_off + 1;
-            let _ = sc_len; // suppress unused warning
-        } else {
-            i += 1;
-        }
-    }
-    false
-}
+use crate::media_tap::{reassemble_media_packet, tap_media_message, MediaFrameBuffer};
+pub use crate::media_tap::{
+    media_tcp_server, AudioStreamConfig, MediaSink, MediaStreamInfo, MediaStreamKind,
+};
 
 // module name for logging engine
 fn get_name(proxy_type: ProxyType) -> String {
@@ -283,6 +81,9 @@ pub struct ModifyContext {
     media_sinks: HashMap<u8, MediaSink>,
     /// channel_id→sink map. Populated from SDR. Used for tapping data packets.
     media_channels: HashMap<u8, MediaSink>,
+    /// Per-channel reassembly state for tapped media messages that span multiple
+    /// AA transport frames.
+    media_fragments: HashMap<u8, MediaFrameBuffer>,
 }
 
 #[derive(PartialEq, Copy, Clone, Debug)]
@@ -489,6 +290,7 @@ pub async fn pkt_modify_hook(
     proxy_type: ProxyType,
     pkt: &mut Packet,
     ctx: &mut ModifyContext,
+    tap_media: bool,
     sensor_channel: Arc<tokio::sync::Mutex<Option<u8>>>,
     cfg: &AppConfig,
     config: &mut SharedConfig,
@@ -708,47 +510,12 @@ pub async fn pkt_modify_hook(
     }
 
     // tap media frames for debug streaming (only on MobileDevice path = phone → HU direction)
-    if proxy_type == ProxyType::MobileDevice {
-        if let Some(sink) = ctx.media_channels.get(&pkt.channel) {
-            // payload[2..] strips the 2-byte message_id prefix
-            let frame_data = &pkt.payload[2..];
-            match protos::MediaMessageId::from_i32(message_id).unwrap_or(MEDIA_MESSAGE_DATA) {
-                MEDIA_MESSAGE_CODEC_CONFIG => {
-                    // CODEC_CONFIG is raw Annex-B H264 (SPS+PPS), send as-is
-                    info!(
-                        "{} <blue>media tap CODEC_CONFIG</> ch {:#04x}: {} bytes, bytes: {:02X?}",
-                        get_name(proxy_type), pkt.channel, frame_data.len(),
-                        &frame_data[..frame_data.len().min(32)]
-                    );
-                    sink.send_codec_config(frame_data.to_vec()).await;
+    if tap_media && proxy_type == ProxyType::MobileDevice {
+        if let Some(frame_data) = reassemble_media_packet(&mut ctx.media_fragments, pkt) {
+            if frame_data.len() >= 2 {
+                if let Some(sink) = ctx.media_channels.get(&pkt.channel).cloned() {
+                    tap_media_message(proxy_type, pkt, &sink, &frame_data).await;
                 }
-                MEDIA_MESSAGE_DATA => {
-                    // DATA frames have an 8-byte big-endian µs PTS before the Annex-B NAL data.
-                    // Skip frames that are too short (protobuf control messages on the channel).
-                    const TIMESTAMP_HEADER: usize = 8;
-                    if frame_data.len() > TIMESTAMP_HEADER {
-                        let pts_us = u64::from_be_bytes(
-                            frame_data[..TIMESTAMP_HEADER].try_into().unwrap(),
-                        );
-                        let nal_data = &frame_data[TIMESTAMP_HEADER..];
-                        let is_idr = is_idr_frame(nal_data);
-                        if is_idr {
-                            info!(
-                                "{} <blue>media tap IDR</> ch {:#04x}: pts={}µs, {} nal bytes, first: {:02X?}",
-                                get_name(proxy_type), pkt.channel, pts_us, nal_data.len(),
-                                &nal_data[..nal_data.len().min(16)]
-                            );
-                        } else {
-                            debug!(
-                                "{} media tap DATA ch {:#04x}: pts={}µs, {}b, first: {:02X?}",
-                                get_name(proxy_type), pkt.channel, pts_us, nal_data.len(),
-                                &nal_data[..nal_data.len().min(8)]
-                            );
-                        }
-                        sink.send_frame(pts_us, nal_data.to_vec()).await;
-                    }
-                }
-                _ => {}
             }
         }
     }
@@ -800,21 +567,63 @@ pub async fn pkt_modify_hook(
                     if !svc.media_sink_service.video_configs.is_empty() {
                         let offset = svc.media_sink_service.display_type().value() as u8;
                         if let Some(sink) = ctx.media_sinks.get(&offset).cloned() {
+                            sink.set_video_stream_info(
+                                svc.media_sink_service.available_type(),
+                                svc.media_sink_service.display_type(),
+                            )
+                            .await;
                             ctx.media_channels.insert(ch, sink);
                             info!(
-                                "{} <blue>media tap:</> video channel <b>{:#04x}</> → port offset <b>{}</>",
-                                get_name(proxy_type), ch, offset
+                                "{} <blue>media tap:</> video channel <b>{:#04x}</> → port offset <b>{}</> ({:?}, {:?})",
+                                get_name(proxy_type),
+                                ch,
+                                offset,
+                                svc.media_sink_service.available_type(),
+                                svc.media_sink_service.display_type()
                             );
                         }
-                    } else if !svc.media_sink_service.audio_configs.is_empty() {
+                    } else if !svc.media_sink_service.audio_configs.is_empty()
+                        || svc.media_sink_service.audio_type.is_some()
+                    {
                         // audio offset = audio_type value + 2 (offsets 0-2 reserved for video)
                         let offset = svc.media_sink_service.audio_type().value() as u8 + 2;
                         if let Some(sink) = ctx.media_sinks.get(&offset).cloned() {
+                            let audio_config = svc.media_sink_service.audio_configs.first().map(|acfg| {
+                                AudioStreamConfig {
+                                    sample_rate: acfg.sampling_rate(),
+                                    channels: acfg.number_of_channels(),
+                                    bits: acfg.number_of_bits(),
+                                }
+                            });
+                            sink.set_audio_stream_info(
+                                svc.media_sink_service.available_type(),
+                                svc.media_sink_service.audio_type(),
+                                audio_config,
+                            )
+                            .await;
                             ctx.media_channels.insert(ch, sink);
-                            info!(
-                                "{} <blue>media tap:</> audio channel <b>{:#04x}</> → port offset <b>{}</>",
-                                get_name(proxy_type), ch, offset
-                            );
+                            if let Some(acfg) = audio_config {
+                                info!(
+                                    "{} <blue>media tap:</> audio channel <b>{:#04x}</> → port offset <b>{}</> ({:?}, {:?}, {}Hz, {}ch, {}bit)",
+                                    get_name(proxy_type),
+                                    ch,
+                                    offset,
+                                    svc.media_sink_service.available_type(),
+                                    svc.media_sink_service.audio_type(),
+                                    acfg.sample_rate,
+                                    acfg.channels,
+                                    acfg.bits
+                                );
+                            } else {
+                                info!(
+                                    "{} <blue>media tap:</> audio channel <b>{:#04x}</> → port offset <b>{}</> ({:?}, {:?})",
+                                    get_name(proxy_type),
+                                    ch,
+                                    offset,
+                                    svc.media_sink_service.available_type(),
+                                    svc.media_sink_service.audio_type()
+                                );
+                            }
                         }
                     }
                 }
@@ -1427,6 +1236,7 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
         ev_tx,
         media_sinks,
         media_channels: HashMap::new(),
+        media_fragments: HashMap::new(),
     };
     loop {
         tokio::select! {
@@ -1436,6 +1246,7 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
                 proxy_type,
                 &mut pkt,
                 &mut ctx,
+                false,
                 sensor_channel.clone(),
                 &cfg,
                 &mut config,
@@ -1477,6 +1288,7 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
                         proxy_type,
                         &mut pkt,
                         &mut ctx,
+                        proxy_type == ProxyType::MobileDevice,
                         sensor_channel.clone(),
                         &cfg,
                         &mut config,
@@ -1495,5 +1307,76 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
             }
         }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::mpsc;
+
+    fn test_ctx() -> ModifyContext {
+        let (ev_tx, _) = mpsc::channel(1);
+        ModifyContext {
+            sensor_channel: None,
+            nav_channel: None,
+            audio_channels: vec![],
+            ev_tx,
+            media_sinks: HashMap::new(),
+            media_channels: HashMap::new(),
+            media_fragments: HashMap::new(),
+        }
+    }
+
+    fn test_packet(channel: u8, flags: u8, final_length: Option<u32>, payload: &[u8]) -> Packet {
+        Packet {
+            channel,
+            flags,
+            final_length,
+            payload: payload.to_vec(),
+        }
+    }
+
+    #[test]
+    fn media_tap_keeps_single_frame_packets_intact() {
+        let mut ctx = test_ctx();
+        let pkt = test_packet(
+            0x21,
+            FRAME_TYPE_FIRST | FRAME_TYPE_LAST,
+            None,
+            &[0x00, 0x01, 0xAA, 0xBB],
+        );
+
+        let assembled = reassemble_media_packet(&mut ctx.media_fragments, &pkt);
+
+        assert_eq!(assembled, Some(vec![0x00, 0x01, 0xAA, 0xBB]));
+        assert!(!ctx.media_fragments.contains_key(&0x21));
+    }
+
+    #[test]
+    fn media_tap_reassembles_fragmented_packets() {
+        let mut ctx = test_ctx();
+        let first = test_packet(0x21, FRAME_TYPE_FIRST, Some(6), &[0x00, 0x01, 0xAA]);
+        let middle = test_packet(0x21, 0, None, &[0xBB]);
+        let last = test_packet(0x21, FRAME_TYPE_LAST, None, &[0xCC, 0xDD]);
+
+        assert_eq!(reassemble_media_packet(&mut ctx.media_fragments, &first), None);
+        assert_eq!(reassemble_media_packet(&mut ctx.media_fragments, &middle), None);
+        assert_eq!(
+            reassemble_media_packet(&mut ctx.media_fragments, &last),
+            Some(vec![0x00, 0x01, 0xAA, 0xBB, 0xCC, 0xDD])
+        );
+        assert!(!ctx.media_fragments.contains_key(&0x21));
+    }
+
+    #[test]
+    fn media_tap_drops_length_mismatches() {
+        let mut ctx = test_ctx();
+        let first = test_packet(0x21, FRAME_TYPE_FIRST, Some(7), &[0x00, 0x01, 0xAA]);
+        let last = test_packet(0x21, FRAME_TYPE_LAST, None, &[0xBB, 0xCC]);
+
+        assert_eq!(reassemble_media_packet(&mut ctx.media_fragments, &first), None);
+        assert_eq!(reassemble_media_packet(&mut ctx.media_fragments, &last), None);
+        assert!(!ctx.media_fragments.contains_key(&0x21));
     }
 }
