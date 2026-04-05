@@ -175,6 +175,9 @@ pub struct MpegTsState {
     pat_counter: u8,
     pmt_counter: u8,
     video_counter: u8,
+    /// PTS of the first video frame seen; used to normalise all subsequent PTS
+    /// values so they start near zero regardless of the AA clock epoch or units.
+    first_pts_us: Option<u64>,
 }
 
 impl MpegTsState {
@@ -183,6 +186,7 @@ impl MpegTsState {
             pat_counter: 0,
             pmt_counter: 0,
             video_counter: 0,
+            first_pts_us: None,
         }
     }
 
@@ -230,13 +234,18 @@ impl MpegTsState {
     /// Wrap Annex-B `data` in PES packets and fragment into 188-byte TS packets.
     ///
     /// `pts_us` is the Android Auto presentation timestamp in microseconds
-    /// (from the 8-byte frame header).  `is_idr` triggers inclusion of a PCR
-    /// in the adaptation field of the first TS packet.
+    /// (from the 8-byte frame header).  The first call establishes the epoch;
+    /// all subsequent PTS values are normalised relative to it so the stream
+    /// starts at t=0 regardless of the AA clock origin.
+    /// `is_idr` triggers inclusion of a PCR in the adaptation field of the
+    /// first TS packet.
     pub fn video_pes(&mut self, pts_us: u64, data: &[u8], is_idr: bool) -> Vec<u8> {
-        // Convert µs to 90 kHz ticks, then mask to 33 bits (the PTS field width).
-        // Use u128 for the intermediate product to avoid overflow, then wrap into
-        // the 33-bit PTS space (≈ 26.5-hour cycle) as MPEG-TS requires.
-        let pts_90k = ((pts_us as u128 * 90 / 1000) & 0x1_FFFF_FFFF) as u64;
+        // Normalise PTS to avoid huge timestamps that cause players to drop frames.
+        let first = *self.first_pts_us.get_or_insert(pts_us);
+        let rel_us = pts_us.saturating_sub(first);
+
+        // Convert normalised µs to 90 kHz ticks, then mask to 33 bits.
+        let pts_90k = ((rel_us as u128 * 90 / 1000) & 0x1_FFFF_FFFF) as u64;
         let pts_bytes = encode_pts(pts_90k);
 
         // Build PES header (14 bytes):

@@ -209,14 +209,38 @@ pub async fn media_tcp_server(port: u16, label: String, sink: MediaSink) {
     }
 }
 
-/// Returns true if the Annex-B frame starts with an IDR NAL unit (type 5).
-/// Handles both 3-byte (00 00 01) and 4-byte (00 00 00 01) start codes.
+/// Scan all NAL units in an Annex-B buffer looking for IDR (type 5).
+/// Returns true if any NAL unit in the buffer is an IDR slice.
+/// Handles access units that begin with AUD (type 9) or SEI (type 6)
+/// before the IDR, which is common in Android Auto H.264 streams.
 fn is_idr_frame(data: &[u8]) -> bool {
-    if data.len() >= 5 && data[0] == 0 && data[1] == 0 && data[2] == 0 && data[3] == 1 {
-        return (data[4] & 0x1F) == 5;
-    }
-    if data.len() >= 4 && data[0] == 0 && data[1] == 0 && data[2] == 1 {
-        return (data[3] & 0x1F) == 5;
+    let mut i = 0;
+    while i + 3 <= data.len() {
+        // Scan for a start code: 00 00 01 or 00 00 00 01
+        if data[i] == 0 && data[i + 1] == 0 {
+            let (sc_len, nal_off) = if i + 4 <= data.len() && data[i + 2] == 0 && data[i + 3] == 1
+            {
+                (4usize, i + 4)
+            } else if data[i + 2] == 1 {
+                (3usize, i + 3)
+            } else {
+                i += 1;
+                continue;
+            };
+            if nal_off >= data.len() {
+                break;
+            }
+            let nal_type = data[nal_off] & 0x1F;
+            match nal_type {
+                5 => return true,  // IDR slice
+                1 => return false, // non-IDR coded slice ⇒ definitely not an IDR access unit
+                _ => {}            // SPS(7), PPS(8), SEI(6), AUD(9) — keep scanning
+            }
+            i = nal_off + 1;
+            let _ = sc_len; // suppress unused warning
+        } else {
+            i += 1;
+        }
     }
     false
 }
@@ -691,10 +715,10 @@ pub async fn pkt_modify_hook(
             match protos::MediaMessageId::from_i32(message_id).unwrap_or(MEDIA_MESSAGE_DATA) {
                 MEDIA_MESSAGE_CODEC_CONFIG => {
                     // CODEC_CONFIG is raw Annex-B H264 (SPS+PPS), send as-is
-                    debug!(
-                        "{} media tap: CODEC_CONFIG on ch {:#04x}, {} bytes, first bytes: {:02X?}",
+                    info!(
+                        "{} <blue>media tap CODEC_CONFIG</> ch {:#04x}: {} bytes, bytes: {:02X?}",
                         get_name(proxy_type), pkt.channel, frame_data.len(),
-                        &frame_data[..frame_data.len().min(16)]
+                        &frame_data[..frame_data.len().min(32)]
                     );
                     sink.send_codec_config(frame_data.to_vec()).await;
                 }
@@ -707,11 +731,20 @@ pub async fn pkt_modify_hook(
                             frame_data[..TIMESTAMP_HEADER].try_into().unwrap(),
                         );
                         let nal_data = &frame_data[TIMESTAMP_HEADER..];
-                        debug!(
-                            "{} media tap: DATA on ch {:#04x}, {} bytes ({}b after ts strip), pts={}µs, first NAL bytes: {:02X?}",
-                            get_name(proxy_type), pkt.channel, frame_data.len(), nal_data.len(),
-                            pts_us, &nal_data[..nal_data.len().min(8)]
-                        );
+                        let is_idr = is_idr_frame(nal_data);
+                        if is_idr {
+                            info!(
+                                "{} <blue>media tap IDR</> ch {:#04x}: pts={}µs, {} nal bytes, first: {:02X?}",
+                                get_name(proxy_type), pkt.channel, pts_us, nal_data.len(),
+                                &nal_data[..nal_data.len().min(16)]
+                            );
+                        } else {
+                            debug!(
+                                "{} media tap DATA ch {:#04x}: pts={}µs, {}b, first: {:02X?}",
+                                get_name(proxy_type), pkt.channel, pts_us, nal_data.len(),
+                                &nal_data[..nal_data.len().min(8)]
+                            );
+                        }
                         sink.send_frame(pts_us, nal_data.to_vec()).await;
                     }
                 }
