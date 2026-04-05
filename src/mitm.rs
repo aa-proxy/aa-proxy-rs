@@ -91,7 +91,7 @@ pub async fn media_tcp_server(port: u16, label: String, sink: MediaSink) {
         }
     };
     info!(
-        "<green>media_tcp_server</>: <b>{label}</> listening on port <b>{port}</>  →  vlc tcp://127.0.0.1:{port}"
+        "<green>media_tcp_server</>: <b>{label}</> listening on port <b>{port}</>  →  vlc --avcodec-hw=none --demux h264 tcp://127.0.0.1:{port}"
     );
 
     loop {
@@ -101,22 +101,33 @@ pub async fn media_tcp_server(port: u16, label: String, sink: MediaSink) {
                 let sink = sink.clone();
                 let label = label.clone();
                 tokio::spawn(async move {
-                    // Replay codec config so the client can decode from the start.
+                    // Replay cached SPS+PPS codec config so the client has the decoder parameters.
                     if let Some(cfg_frame) = sink.get_codec_cfg().await {
                         if stream.write_all(&cfg_frame).await.is_err() {
                             return;
                         }
                     }
                     let mut rx = sink.subscribe();
+                    // Skip frames until the next IDR (keyframe) so the decoder starts cleanly.
+                    // Without this, a client connecting mid-GOP receives P-frames it cannot decode.
+                    let mut synced = false;
                     loop {
                         match rx.recv().await {
                             Ok(frame) => {
+                                if !synced {
+                                    if is_idr_frame(&frame) {
+                                        synced = true;
+                                        debug!("media_tcp_server: {addr} ({label}) IDR sync'd, streaming");
+                                    } else {
+                                        continue;
+                                    }
+                                }
                                 if stream.write_all(&frame).await.is_err() {
                                     break;
                                 }
                             }
                             Err(broadcast::error::RecvError::Lagged(n)) => {
-                                warn!("media_tcp_server: client {addr} lagged by {n} frames, dropping");
+                                warn!("media_tcp_server: client {addr} ({label}) lagged by {n} frames, dropping");
                                 break;
                             }
                             Err(broadcast::error::RecvError::Closed) => break,
@@ -130,6 +141,18 @@ pub async fn media_tcp_server(port: u16, label: String, sink: MediaSink) {
             }
         }
     }
+}
+
+/// Returns true if the Annex-B frame starts with an IDR NAL unit (type 5).
+/// Handles both 3-byte (00 00 01) and 4-byte (00 00 00 01) start codes.
+fn is_idr_frame(data: &[u8]) -> bool {
+    if data.len() >= 5 && data[0] == 0 && data[1] == 0 && data[2] == 0 && data[3] == 1 {
+        return (data[4] & 0x1F) == 5;
+    }
+    if data.len() >= 4 && data[0] == 0 && data[1] == 0 && data[2] == 1 {
+        return (data[3] & 0x1F) == 5;
+    }
+    false
 }
 
 // module name for logging engine
