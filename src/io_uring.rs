@@ -4,6 +4,7 @@ use humantime::format_duration;
 use mac_address::MacAddress;
 use simplelog::*;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::net::IpAddr;
 use std::rc::Rc;
@@ -45,7 +46,9 @@ use crate::config::{TCP_DHU_PORT, TCP_SERVER_PORT};
 use crate::ev::spawn_ev_client_task;
 use crate::ev::EvTaskCommand;
 use crate::mitm::endpoint_reader;
+use crate::mitm::media_tcp_server;
 use crate::mitm::proxy;
+use crate::mitm::MediaSink;
 use crate::mitm::Packet;
 use crate::mitm::ProxyType;
 use crate::usb_stream;
@@ -494,6 +497,32 @@ pub async fn io_loop(
             *tx_lock = Some(tx_hu.clone());
         }
 
+        // create media tap sinks if configured (requires mitm=true)
+        let mut md_media_sinks: HashMap<u8, MediaSink> = HashMap::new();
+        if let Some(base_port) = config.media_dump_base_port {
+            if !config.mitm {
+                error!(
+                    "<red>media_dump_base_port is set but mitm = false — media tap disabled!</>"
+                );
+            } else {
+                let labels = [
+                    (0u8, "video-main"),
+                    (1u8, "video-cluster"),
+                    (2u8, "video-aux"),
+                    (3u8, "audio-guidance"),
+                    (4u8, "audio-system"),
+                    (5u8, "audio-media"),
+                    (6u8, "audio-telephony"),
+                ];
+                for (offset, label) in labels {
+                    let sink = MediaSink::new(128);
+                    let port = base_port + offset as u16;
+                    tokio::spawn(media_tcp_server(port, label.to_string(), sink.clone()));
+                    md_media_sinks.insert(offset, sink);
+                }
+            }
+        }
+
         // dedicated reading threads:
         reader_hu = tokio_uring::spawn(endpoint_reader(hu_r, txr_hu, true));
         reader_md = tokio_uring::spawn(endpoint_reader(md_r, txr_md, false));
@@ -508,6 +537,7 @@ pub async fn io_loop(
             shared_config.clone(),
             sensor_channel.clone(),
             ev_tx.clone(),
+            HashMap::new(),
         ));
         from_stream = tokio_uring::spawn(proxy(
             ProxyType::MobileDevice,
@@ -519,6 +549,7 @@ pub async fn io_loop(
             shared_config.clone(),
             sensor_channel.clone(),
             ev_tx.clone(),
+            md_media_sinks,
         ));
 
         // Thread for monitoring transfer

@@ -2,6 +2,7 @@ use anyhow::Context;
 use log::log_enabled;
 use openssl::ssl::{ErrorCode, Ssl, SslContextBuilder, SslFiletype, SslMethod};
 use simplelog::*;
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::fmt;
 use std::io::{Read, Write};
@@ -11,6 +12,8 @@ use std::sync::Mutex;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
+use tokio::net::TcpListener;
+use tokio::sync::broadcast;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::timeout;
 use tokio_uring::buf::BoundedBuf;
@@ -37,6 +40,97 @@ use crate::ev::EvTaskCommand;
 use crate::io_uring::Endpoint;
 use crate::io_uring::IoDevice;
 use crate::io_uring::BUFFER_LEN;
+
+/// Broadcast-based sink for tapping a single media channel over TCP.
+/// Multiple TCP clients can connect; each receives a copy of every frame.
+/// Lagging clients are dropped silently.
+#[derive(Clone)]
+pub struct MediaSink {
+    tx: broadcast::Sender<Arc<Vec<u8>>>,
+    /// Cached codec config frame sent to every new client on connect.
+    codec_cfg: Arc<tokio::sync::Mutex<Option<Arc<Vec<u8>>>>>,
+}
+
+impl MediaSink {
+    pub fn new(capacity: usize) -> Self {
+        let (tx, _) = broadcast::channel(capacity);
+        Self {
+            tx,
+            codec_cfg: Arc::new(tokio::sync::Mutex::new(None)),
+        }
+    }
+
+    pub async fn send_codec_config(&self, data: Vec<u8>) {
+        let frame = Arc::new(data);
+        *self.codec_cfg.lock().await = Some(frame.clone());
+        let _ = self.tx.send(frame);
+    }
+
+    pub async fn send_frame(&self, data: Vec<u8>) {
+        let _ = self.tx.send(Arc::new(data));
+    }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<Arc<Vec<u8>>> {
+        self.tx.subscribe()
+    }
+
+    pub async fn get_codec_cfg(&self) -> Option<Arc<Vec<u8>>> {
+        self.codec_cfg.lock().await.clone()
+    }
+}
+
+/// TCP server for one media channel tap. Binds on `0.0.0.0:port`.
+/// Logs the VLC connect command on startup.
+/// For each client: replays cached codec config frame first, then streams live frames.
+pub async fn media_tcp_server(port: u16, label: String, sink: MediaSink) {
+    let listener = match TcpListener::bind(format!("0.0.0.0:{port}")).await {
+        Ok(l) => l,
+        Err(e) => {
+            error!("<red>media_tcp_server</>: failed to bind port {port} for {label}: {e}");
+            return;
+        }
+    };
+    info!(
+        "<green>media_tcp_server</>: <b>{label}</> listening on port <b>{port}</>  →  vlc tcp://127.0.0.1:{port}"
+    );
+
+    loop {
+        match listener.accept().await {
+            Ok((mut stream, addr)) => {
+                info!("<green>media_tcp_server</>: client connected {addr} ({label})");
+                let sink = sink.clone();
+                let label = label.clone();
+                tokio::spawn(async move {
+                    // Replay codec config so the client can decode from the start.
+                    if let Some(cfg_frame) = sink.get_codec_cfg().await {
+                        if stream.write_all(&cfg_frame).await.is_err() {
+                            return;
+                        }
+                    }
+                    let mut rx = sink.subscribe();
+                    loop {
+                        match rx.recv().await {
+                            Ok(frame) => {
+                                if stream.write_all(&frame).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Err(broadcast::error::RecvError::Lagged(n)) => {
+                                warn!("media_tcp_server: client {addr} lagged by {n} frames, dropping");
+                                break;
+                            }
+                            Err(broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                    info!("<green>media_tcp_server</>: client disconnected {addr} ({label})");
+                });
+            }
+            Err(e) => {
+                error!("<red>media_tcp_server</>: accept error on port {port}: {e}");
+            }
+        }
+    }
+}
 
 // module name for logging engine
 fn get_name(proxy_type: ProxyType) -> String {
@@ -71,6 +165,8 @@ pub struct ModifyContext {
     nav_channel: Option<u8>,
     audio_channels: Vec<u8>,
     ev_tx: Sender<EvTaskCommand>,
+    /// Maps channel_id → MediaSink for active media tap, populated from SDR response.
+    media_sinks: HashMap<u8, MediaSink>,
 }
 
 #[derive(PartialEq, Copy, Clone, Debug)]
@@ -495,6 +591,18 @@ pub async fn pkt_modify_hook(
         }
     }
 
+    // tap media frames for debug streaming (only on MobileDevice path = phone → HU direction)
+    if proxy_type == ProxyType::MobileDevice {
+        if let Some(sink) = ctx.media_sinks.get(&pkt.channel) {
+            let frame_data = pkt.payload[2..].to_vec();
+            match protos::MediaMessageId::from_i32(message_id).unwrap_or(MEDIA_MESSAGE_DATA) {
+                MEDIA_MESSAGE_CODEC_CONFIG => sink.send_codec_config(frame_data).await,
+                MEDIA_MESSAGE_DATA => sink.send_frame(frame_data).await,
+                _ => {}
+            }
+        }
+    }
+
     if pkt.channel != 0 {
         return Ok(false);
     }
@@ -775,6 +883,34 @@ pub async fn pkt_modify_hook(
                 }
             }
 
+            // populate media_sinks channel map from pre-created offset map
+            // (only active when media_dump_base_port is configured)
+            if !ctx.media_sinks.is_empty() {
+                for svc in msg.services.iter() {
+                    let ch = svc.id() as u8;
+                    if !svc.media_sink_service.video_configs.is_empty() {
+                        let offset = svc.media_sink_service.display_type().value() as u8;
+                        if let Some(sink) = ctx.media_sinks.get(&offset).cloned() {
+                            ctx.media_sinks.insert(ch, sink);
+                            info!(
+                                "{} <blue>media tap:</> video channel <b>{:#04x}</> → port offset <b>{}</>",
+                                get_name(proxy_type), ch, offset
+                            );
+                        }
+                    } else if !svc.media_sink_service.audio_configs.is_empty() {
+                        // audio offset = audio_type enum value + 2 (offsets 0-2 reserved for video)
+                        let offset = svc.media_sink_service.audio_type().value() as u8 + 2;
+                        if let Some(sink) = ctx.media_sinks.get(&offset).cloned() {
+                            ctx.media_sinks.insert(ch, sink);
+                            info!(
+                                "{} <blue>media tap:</> audio channel <b>{:#04x}</> → port offset <b>{}</>",
+                                get_name(proxy_type), ch, offset
+                            );
+                        }
+                    }
+                }
+            }
+
             debug!(
                 "{} SDR after changes: {}",
                 get_name(proxy_type),
@@ -985,6 +1121,7 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
     mut config: SharedConfig,
     sensor_channel: Arc<tokio::sync::Mutex<Option<u8>>>,
     ev_tx: Sender<EvTaskCommand>,
+    media_sinks: HashMap<u8, MediaSink>,
 ) -> Result<()> {
     let cfg = config.read().await.clone();
     let passthrough = !cfg.mitm;
@@ -1136,6 +1273,7 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
         nav_channel: None,
         audio_channels: vec![],
         ev_tx,
+        media_sinks,
     };
     loop {
         tokio::select! {

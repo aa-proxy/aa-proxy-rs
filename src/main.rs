@@ -72,7 +72,7 @@ struct Args {
     #[clap(short, long)]
     generate_system_config: bool,
     /// Generate hostapd config and exit
-    #[clap(short, long)]
+    #[clap(short='o', long)]
     generate_hostapd: bool,
 }
 
