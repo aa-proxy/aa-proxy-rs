@@ -5,6 +5,7 @@ use aa_proxy_rs::config::SharedConfigJson;
 use aa_proxy_rs::config::WifiConfig;
 use aa_proxy_rs::config::{Action, AppConfig};
 use aa_proxy_rs::config::{DEFAULT_WLAN_ADDR, TCP_SERVER_PORT};
+use aa_proxy_rs::ev::BatteryData;
 use aa_proxy_rs::io_uring::io_loop;
 use aa_proxy_rs::led::{LedColor, LedManager, LedMode};
 use aa_proxy_rs::mitm::Packet;
@@ -192,6 +193,7 @@ async fn tokio_main(
     config_file: PathBuf,
     tx: Arc<Mutex<Option<Sender<Packet>>>>,
     sensor_channel: Arc<Mutex<Option<u8>>>,
+    last_battery_data: Arc<RwLock<Option<BatteryData>>>,
     led_support: bool,
     button_support: bool,
     profile_connected: Arc<AtomicBool>,
@@ -204,6 +206,7 @@ async fn tokio_main(
         config_file: config_file.into(),
         tx,
         sensor_channel,
+        last_battery_data,
     };
 
     // LED support
@@ -579,6 +582,8 @@ fn main() -> Result<()> {
     let sensor_channel = Arc::new(Mutex::new(None));
     let sensor_channel_cloned = sensor_channel.clone();
     let profile_connected = Arc::new(AtomicBool::new(false));
+    let last_battery_data = Arc::new(RwLock::new(None));
+    let last_battery_data_cloned = last_battery_data.clone();
 
     // build and spawn main tokio runtime
     let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
@@ -593,6 +598,7 @@ fn main() -> Result<()> {
             args.config.clone(),
             tx_cloned,
             sensor_channel_cloned,
+            last_battery_data_cloned,
             led_support,
             button_support,
             profile_connected_cloned,
@@ -607,6 +613,7 @@ fn main() -> Result<()> {
         config,
         tx,
         sensor_channel,
+        last_battery_data,
     ));
 
     info!(

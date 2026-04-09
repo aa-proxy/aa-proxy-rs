@@ -16,7 +16,7 @@ use tokio::net::TcpStream as TokioTcpStream;
 use tokio::process::Command;
 use tokio::sync::broadcast::Sender as BroadcastSender;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{mpsc, Mutex, Notify};
+use tokio::sync::{mpsc, Mutex, Notify, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 use tokio_uring::buf::BoundedBuf;
@@ -43,6 +43,7 @@ const COMP_APP_TCP_PORT: u16 = 9999;
 use crate::config::{Action, SharedConfig};
 use crate::config::{TCP_DHU_PORT, TCP_SERVER_PORT};
 use crate::ev::spawn_ev_client_task;
+use crate::ev::BatteryData;
 use crate::ev::EvTaskCommand;
 use crate::mitm::endpoint_reader;
 use crate::mitm::proxy;
@@ -321,6 +322,7 @@ pub async fn io_loop(
     config: SharedConfig,
     tx: Arc<Mutex<Option<Sender<Packet>>>>,
     sensor_channel: Arc<Mutex<Option<u8>>>,
+    last_battery: Arc<RwLock<Option<BatteryData>>>,
 ) -> Result<()> {
     let shared_config = config.clone();
     #[allow(unused_variables)]
@@ -507,6 +509,7 @@ pub async fn io_loop(
             rxr_md,
             shared_config.clone(),
             sensor_channel.clone(),
+            last_battery.clone(),
             ev_tx.clone(),
             Some(tx_hu.clone()),
         ));
@@ -519,6 +522,7 @@ pub async fn io_loop(
             rxr_hu,
             shared_config.clone(),
             sensor_channel.clone(),
+            last_battery.clone(),
             ev_tx.clone(),
             None,
         ));

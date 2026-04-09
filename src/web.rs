@@ -40,6 +40,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::io::DuplexStream;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use tokio_util::io::ReaderStream;
 
 const TEMPLATE: &str = include_str!("../static/index.html");
@@ -59,6 +60,7 @@ pub struct AppState {
     pub config_file: Arc<PathBuf>,
     pub tx: Arc<Mutex<Option<Sender<Packet>>>>,
     pub sensor_channel: Arc<Mutex<Option<u8>>>,
+    pub last_battery_data: Arc<RwLock<Option<BatteryData>>>,
 }
 
 pub fn app(state: Arc<AppState>) -> Router {
@@ -243,7 +245,9 @@ pub async fn battery_handler(
 
     if let Some(ch) = *state.sensor_channel.lock().await {
         if let Some(tx) = state.tx.lock().await.clone() {
-            if let Err(e) = send_ev_data(tx.clone(), ch, data).await {
+            if let Err(e) =
+                send_ev_data(tx.clone(), ch, data, state.last_battery_data.clone()).await
+            {
                 error!("{} EV model error: {}", NAME, e);
             }
         }

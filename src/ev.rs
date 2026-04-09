@@ -3,10 +3,11 @@ use nix::unistd::Pid;
 use shell_words;
 use simplelog::*;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::fs;
 use tokio::process::{Child, Command};
-use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
+use tokio::sync::{mpsc, RwLock};
 use tokio::time::{sleep, Duration};
 
 // protobuf stuff:
@@ -51,7 +52,12 @@ fn scale_percent_to_value(percent: f32, max_value: u64) -> u64 {
 }
 
 /// EV sensor batch data send
-pub async fn send_ev_data(tx: Sender<Packet>, sensor_ch: u8, batt: BatteryData) -> Result<()> {
+pub async fn send_ev_data(
+    tx: Sender<Packet>,
+    sensor_ch: u8,
+    batt: BatteryData,
+    last_battery: Arc<RwLock<Option<BatteryData>>>,
+) -> Result<()> {
     // obtain binary model data
     let model_path: PathBuf = PathBuf::from(EV_MODEL_FILE);
     let data = if fs::try_exists(&model_path).await? {
@@ -117,6 +123,9 @@ pub async fn send_ev_data(tx: Sender<Packet>, sensor_ch: u8, batt: BatteryData) 
     };
     tx.send(pkt).await?;
     info!("{} injecting ENERGY_MODEL_DATA packet...", NAME);
+
+    // save last battery state
+    *last_battery.write().await = Some(batt);
 
     Ok(())
 }

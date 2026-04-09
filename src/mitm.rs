@@ -14,6 +14,7 @@ use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::RwLock;
 use tokio::time::timeout;
 use tokio_uring::buf::BoundedBuf;
 
@@ -281,6 +282,7 @@ pub async fn pkt_modify_hook(
     pkt: &mut Packet,
     ctx: &mut ModifyContext,
     sensor_channel: Arc<tokio::sync::Mutex<Option<u8>>>,
+    last_battery: Arc<RwLock<Option<BatteryData>>>,
     cfg: &AppConfig,
     config: &mut SharedConfig,
 ) -> Result<bool> {
@@ -468,6 +470,7 @@ pub async fn pkt_modify_hook(
                                         reference_air_density: None,
                                         external_temp_celsius: None,
                                     },
+                                    last_battery,
                                 )
                                 .await;
                             }
@@ -1041,6 +1044,7 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
     mut rxr: Receiver<Packet>,
     mut config: SharedConfig,
     sensor_channel: Arc<tokio::sync::Mutex<Option<u8>>>,
+    last_battery: Arc<RwLock<Option<BatteryData>>>,
     ev_tx: Sender<EvTaskCommand>,
     hu_tx: Option<Sender<Packet>>,
 ) -> Result<()> {
@@ -1205,6 +1209,7 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
                 &mut pkt,
                 &mut ctx,
                 sensor_channel.clone(),
+                last_battery.clone(),
                 &cfg,
                 &mut config,
             )
@@ -1246,6 +1251,7 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
                         &mut pkt,
                         &mut ctx,
                         sensor_channel.clone(),
+                        last_battery.clone(),
                         &cfg,
                         &mut config,
                     )
