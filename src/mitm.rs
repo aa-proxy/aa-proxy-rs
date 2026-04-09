@@ -1,3 +1,5 @@
+use crate::ev::send_ev_data;
+use crate::ev::BatteryData;
 use anyhow::Context;
 use log::log_enabled;
 use openssl::ssl::{ErrorCode, Ssl, SslContextBuilder, SslFiletype, SslMethod};
@@ -71,6 +73,7 @@ pub struct ModifyContext {
     nav_channel: Option<u8>,
     audio_channels: Vec<u8>,
     ev_tx: Sender<EvTaskCommand>,
+    hu_tx: Option<Sender<Packet>>,
 }
 
 #[derive(PartialEq, Copy, Clone, Debug)]
@@ -295,36 +298,62 @@ pub async fn pkt_modify_hook(
         if ch == pkt.channel {
             match protos::SensorMessageId::from_i32(message_id).unwrap_or(SENSOR_MESSAGE_ERROR) {
                 SENSOR_MESSAGE_REQUEST => {
-                    if let Ok(msg) = SensorRequest::parse_from_bytes(data) {
+                    if let Ok(mut msg) = SensorRequest::parse_from_bytes(data) {
                         if msg.type_() == SensorType::SENSOR_VEHICLE_ENERGY_MODEL_DATA {
-                            debug!(
-                                "additional SENSOR_MESSAGE_REQUEST for {:?}, making a response with success...",
-                                msg.type_()
-                            );
-                            let mut response = SensorResponse::new();
-                            response.set_status(MessageStatus::STATUS_SUCCESS);
-
-                            let mut payload: Vec<u8> = response.write_to_bytes()?;
-                            payload.insert(0, ((SENSOR_MESSAGE_RESPONSE as u16) >> 8) as u8);
-                            payload.insert(1, ((SENSOR_MESSAGE_RESPONSE as u16) & 0xff) as u8);
-
-                            let reply = Packet {
-                                channel: ch,
-                                flags: ENCRYPTED | FRAME_TYPE_FIRST | FRAME_TYPE_LAST,
-                                final_length: None,
-                                payload: payload,
-                            };
-                            *pkt = reply;
-
-                            // start EV battery logger if neded
+                            // check if we have some battery logger configured
                             if let Some(path) = &cfg.ev_battery_logger {
+                                debug!(
+                                  "additional SENSOR_MESSAGE_REQUEST for {:?}, making a response with success...",
+                                  msg.type_()
+                                );
+                                let mut response = SensorResponse::new();
+                                response.set_status(MessageStatus::STATUS_SUCCESS);
+
+                                let mut payload: Vec<u8> = response.write_to_bytes()?;
+                                payload.insert(0, ((SENSOR_MESSAGE_RESPONSE as u16) >> 8) as u8);
+                                payload.insert(1, ((SENSOR_MESSAGE_RESPONSE as u16) & 0xff) as u8);
+
+                                let reply = Packet {
+                                    channel: ch,
+                                    flags: ENCRYPTED | FRAME_TYPE_FIRST | FRAME_TYPE_LAST,
+                                    final_length: None,
+                                    payload: payload,
+                                };
+                                *pkt = reply;
+
+                                // start EV battery logger if needed
                                 ctx.ev_tx
                                     .send(EvTaskCommand::Start(path.to_string()))
                                     .await?;
-                            }
 
-                            // return true => send own reply without processing
-                            return Ok(true);
+                                // return true => send own reply without processing
+                                return Ok(true);
+                            } else {
+                                // MD requests the energy model sensor from the HU. Since we do not
+                                // have any data logger configured for EV data, we assume the following
+                                // scenario: the vehicle provides battery level data via SENSOR_FUEL.
+                                //
+                                // Therefore, we redirect the request to SENSOR_FUEL so that the HU
+                                // starts streaming real fuel_data (no need to start eg ABRP on phone).
+                                //
+                                // We will inject the ENERGY_MODEL_DATA on every SENSOR_MESSAGE_BATCH
+                                // that contains fuel_data (see below).
+                                info!(
+                                    "{} EV: AA requested SENSOR_VEHICLE_ENERGY_MODEL_DATA \
+                                     → redirecting to SENSOR_FUEL",
+                                    get_name(proxy_type)
+                                );
+                                msg.set_type(SensorType::SENSOR_FUEL);
+
+                                let mut payload = msg.write_to_bytes()?;
+                                payload.insert(0, ((SENSOR_MESSAGE_REQUEST as u16) >> 8) as u8);
+                                payload.insert(1, ((SENSOR_MESSAGE_REQUEST as u16) & 0xff) as u8);
+                                pkt.payload = payload;
+
+                                // return false = forward the modified request to the HU,
+                                // do not send an early reply
+                                return Ok(false);
+                            }
                         }
                     }
                 }
@@ -414,6 +443,34 @@ pub async fn pkt_modify_hook(
                             pkt.payload = msg.write_to_bytes()?;
                             pkt.payload.insert(0, (message_id >> 8) as u8);
                             pkt.payload.insert(1, (message_id & 0xff) as u8);
+                        }
+
+                        // Parse fuel_data from HU SensorBatch (HU proxy only).
+                        // The HU sends SENSOR_FUEL data in response to our earlier
+                        // SENSOR_MESSAGE_REQUEST
+                        // We use the SoC to populate the EV model for MD/Android
+                        if cfg.ev && proxy_type == ProxyType::HeadUnit && !msg.fuel_data.is_empty()
+                        {
+                            let soc = msg.fuel_data[0].fuel_level();
+                            info!(
+                                "{} EV: received fuel_data from HU, SoC={}, sending as model...",
+                                get_name(proxy_type),
+                                soc
+                            );
+                            if let (Some(htx), Some(ch)) = (ctx.hu_tx.clone(), ctx.sensor_channel) {
+                                let _ = send_ev_data(
+                                    htx,
+                                    ch,
+                                    BatteryData {
+                                        battery_level_percentage: Some(soc as f32),
+                                        battery_level_wh: None,
+                                        battery_capacity_wh: None,
+                                        reference_air_density: None,
+                                        external_temp_celsius: None,
+                                    },
+                                )
+                                .await;
+                            }
                         }
                     }
                 }
@@ -985,6 +1042,7 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
     mut config: SharedConfig,
     sensor_channel: Arc<tokio::sync::Mutex<Option<u8>>>,
     ev_tx: Sender<EvTaskCommand>,
+    hu_tx: Option<Sender<Packet>>,
 ) -> Result<()> {
     let cfg = config.read().await.clone();
     let passthrough = !cfg.mitm;
@@ -1136,6 +1194,7 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
         nav_channel: None,
         audio_channels: vec![],
         ev_tx,
+        hu_tx,
     };
     loop {
         tokio::select! {

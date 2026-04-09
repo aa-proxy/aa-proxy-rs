@@ -508,6 +508,7 @@ pub async fn io_loop(
             shared_config.clone(),
             sensor_channel.clone(),
             ev_tx.clone(),
+            Some(tx_hu.clone()),
         ));
         from_stream = tokio_uring::spawn(proxy(
             ProxyType::MobileDevice,
@@ -519,6 +520,7 @@ pub async fn io_loop(
             shared_config.clone(),
             sensor_channel.clone(),
             ev_tx.clone(),
+            None,
         ));
 
         // Thread for monitoring transfer
