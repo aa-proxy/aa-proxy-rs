@@ -18,7 +18,7 @@ use crate::mitm::Packet;
 use crate::mitm::{ENCRYPTED, FRAME_TYPE_FIRST, FRAME_TYPE_LAST};
 use protobuf::Message;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub static FORD_EV_MODEL: &[u8] = include_bytes!("protos/ford_ev_model.bin");
 pub const EV_MODEL_FILE: &str = "/etc/aa-proxy-rs/ev_model.bin";
@@ -30,7 +30,7 @@ const NAME: &str = "<i><bright-black> ev: </>";
 // async contexts needs some extra restrictions
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct BatteryData {
     pub battery_level_percentage: Option<f32>,
     pub battery_level_wh: Option<u64>,

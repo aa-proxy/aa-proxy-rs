@@ -75,6 +75,7 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/upload-certs", post(upload_cert_bundle_handler))
         .route("/certs-info", get(certs_info_handler))
         .route("/battery", post(battery_handler))
+        .route("/battery-status", get(battery_status_handler))
         .route("/userdata-backup", get(userdata_backup_handler))
         .route("/userdata-restore", post(userdata_restore_handler))
         .route("/factory-reset", post(factory_reset_handler))
@@ -256,6 +257,14 @@ pub async fn battery_handler(
     }
 
     (StatusCode::OK, "OK").into_response()
+}
+
+async fn battery_status_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let data = state.last_battery_data.read().await;
+    match &*data {
+        Some(d) => Json(serde_json::to_value(d).unwrap()).into_response(),
+        None => (StatusCode::NO_CONTENT, "No battery data yet").into_response(),
+    }
 }
 
 fn generate_filename(kind: &str) -> String {
