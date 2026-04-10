@@ -341,35 +341,59 @@ impl Bluetooth {
                 // exit if we don't have anything to connect to
                 if !addresses.is_empty() {
                     info!("{} 🧲 Attempting to start an AndroidAuto session via bluetooth with the following devices, in this order: {:?}", NAME, addresses);
-                    let try_connect_bluetooth_addresses_retry = || async {
-                        let next_index = Bluetooth::try_connect_bluetooth_addresses(
-                            &adapter_cloned,
-                            &addresses,
-                            self.current_index,
-                        )
-                        .await?;
+                    if !self.dongle_mode {
+                        let try_connect_bluetooth_addresses_retry = || async {
+                            let next_index = Bluetooth::try_connect_bluetooth_addresses(
+                                &adapter_cloned,
+                                &addresses,
+                                self.current_index,
+                            )
+                            .await?;
 
-                        Ok(next_index)
-                    };
+                            Ok(next_index)
+                        };
 
-                    let retry_policy = ExponentialBuilder::default()
-                        .with_min_delay(Duration::from_secs(1))
-                        .with_max_delay(Duration::from_secs(15))
-                        .without_max_times();
+                        let retry_policy = ExponentialBuilder::default()
+                            .with_min_delay(Duration::from_secs(1))
+                            .with_max_delay(Duration::from_secs(15))
+                            .without_max_times();
 
-                    self.current_index = try_connect_bluetooth_addresses_retry
-                        // Retry with exponential backoff
-                        .retry(retry_policy)
-                        // Sleep implementation, required if no feature has been enabled
-                        .sleep(tokio::time::sleep)
-                        // Notify when retrying;
-                        .notify(
-                            |err: &Box<dyn std::error::Error + Send + Sync + 'static>,
-                             dur: Duration| {
-                                debug!("{} Retrying due to error: {:?} after {:?}", NAME, err, dur);
-                            },
-                        )
-                        .await?;
+                        self.current_index = try_connect_bluetooth_addresses_retry
+                            // Retry with exponential backoff
+                            .retry(retry_policy)
+                            // Sleep implementation, required if no feature has been enabled
+                            .sleep(tokio::time::sleep)
+                            // Notify when retrying;
+                            .notify(
+                                |err: &Box<dyn std::error::Error + Send + Sync + 'static>,
+                                 dur: Duration| {
+                                    debug!(
+                                        "{} Retrying due to error: {:?} after {:?}",
+                                        NAME, err, dur
+                                    );
+                                },
+                            )
+                            .await?;
+                    } else {
+                        for addr in addresses {
+                            if let Ok(device) = adapter_cloned.device(addr) {
+                                let dev_name = match device.name().await {
+                                    Ok(Some(name)) => format!(" (<b><blue>{}</>)", name),
+                                    _ => String::new(),
+                                };
+                                info!(
+                                    "{} 🧲 (dongle_mode) Forcing BR/EDR device.connect() to {} {}",
+                                    NAME, addr, dev_name
+                                );
+                                if let Err(e) = device.connect().await {
+                                    debug!(
+                                        "{} (dongle_mode) connect() returned {:?} (ignored)",
+                                        NAME, e
+                                    );
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
