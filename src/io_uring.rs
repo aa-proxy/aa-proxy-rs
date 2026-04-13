@@ -1,3 +1,4 @@
+use crate::script_wasm::ScriptRegistry;
 use bytesize::ByteSize;
 use core::net::SocketAddr;
 use humantime::format_duration;
@@ -323,6 +324,7 @@ pub async fn io_loop(
     tx: Arc<Mutex<Option<Sender<Packet>>>>,
     sensor_channel: Arc<Mutex<Option<u8>>>,
     last_battery: Arc<RwLock<Option<BatteryData>>>,
+    script_registry: Option<Arc<ScriptRegistry>>,
 ) -> Result<()> {
     let shared_config = config.clone();
     #[allow(unused_variables)]
@@ -512,19 +514,21 @@ pub async fn io_loop(
             last_battery.clone(),
             ev_tx.clone(),
             Some(tx_hu.clone()),
+            script_registry.clone(),
         ));
         from_stream = tokio_uring::spawn(proxy(
             ProxyType::MobileDevice,
             md_w,
             stream_bytes.clone(),
-            tx_md,
+            tx_md.clone(),
             rx_md,
             rxr_hu,
             shared_config.clone(),
             sensor_channel.clone(),
             last_battery.clone(),
             ev_tx.clone(),
-            None,
+            Some(tx_md.clone()),
+            script_registry.clone(),
         ));
 
         // Thread for monitoring transfer

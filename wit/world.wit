@@ -1,0 +1,53 @@
+package aa:packet;
+
+interface types {
+  enum proxy-type {
+    head-unit,
+    mobile-device,
+  }
+
+  record modify-context {
+    sensor-channel: option<u8>,
+    nav-channel: option<u8>,
+    audio-channels: list<u8>,
+  }
+
+  record packet {
+    proxy-type: proxy-type,
+    channel: u8,
+    packet-flags: u8,
+    final-length: option<u32>,
+    message-id: u16,
+    payload: list<u8>,
+  }
+
+  record config-view {
+    audio-max-unacked: u32,
+    remove-tap-restriction: bool,
+    video-in-motion: bool,
+    developer-mode: bool,
+    ev: bool,
+    waze-lht-workaround: bool,
+  }
+
+  enum decision {
+    forward,
+    drop,
+  }
+}
+
+interface host {
+  use types.{packet};
+
+  replace-current: func(pkt: packet);
+  send: func(pkt: packet);
+  info: func(msg: string);
+  error: func(msg: string);
+}
+
+world packet-hook {
+  use types.{modify-context, packet, config-view, decision};
+
+  import host;
+  export modify-packet: func(ctx: modify-context, pkt: packet, cfg: config-view) -> decision;
+}
