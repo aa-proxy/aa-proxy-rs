@@ -9,13 +9,16 @@ use aa_proxy_rs::ev::BatteryData;
 use aa_proxy_rs::io_uring::io_loop;
 use aa_proxy_rs::led::{LedColor, LedManager, LedMode};
 use aa_proxy_rs::mitm::Packet;
+use aa_proxy_rs::script_wasm::ScriptRegistry;
 use aa_proxy_rs::usb_gadget::uevent_listener;
 use aa_proxy_rs::usb_gadget::UsbGadgetState;
 use aa_proxy_rs::web;
 use clap::Parser;
 use humantime::format_duration;
+use notify::{recommended_watcher, EventKind, RecursiveMode, Watcher};
 use simplelog::*;
 use std::os::unix::fs::PermissionsExt;
+use time::macros::format_description;
 
 use std::fs;
 use std::fs::OpenOptions;
@@ -29,6 +32,7 @@ use std::time::Duration;
 use tokio::runtime::Builder;
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::Sender as BroadcastSender;
+use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
@@ -117,7 +121,9 @@ fn init_wifi_config(cfg: &AppConfig) -> WifiConfig {
 
 fn logging_init(debug: bool, disable_console_debug: bool, log_path: &PathBuf) {
     let conf = ConfigBuilder::new()
-        .set_time_format("%F, %H:%M:%S%.3f".to_string())
+        .set_time_format_custom(format_description!(
+            "[year]-[month]-[day], [hour]:[minute]:[second].[subsecond digits:3]"
+        ))
         .set_write_log_enable_colors(true)
         .build();
 
@@ -589,6 +595,70 @@ fn main() -> Result<()> {
     let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
     let restart_tx_cloned = restart_tx.clone();
     let profile_connected_cloned = profile_connected.clone();
+
+    let script_registry = Arc::new(ScriptRegistry::new());
+    script_registry.reload_dir("/data/wasm-hooks");
+
+    let errs: Vec<(std::path::PathBuf, String)> = script_registry.list_errors();
+    for (path, err) in errs {
+        error!("initial wasm script load error [{}]: {}", path.display(), err);
+    }
+
+    info!(
+        "initial loaded wasm script count={}",
+        script_registry.list_scripts().len()
+    );
+
+    let (watch_tx, mut watch_rx) = mpsc::unbounded_channel();
+
+    let mut wasm_watcher = recommended_watcher(move |res: notify::Result<notify::Event>| {
+        let _ = watch_tx.send(res);
+    })
+    .expect("failed to create wasm watcher");
+
+    wasm_watcher
+        .watch(std::path::Path::new("/data/wasm-hooks"), RecursiveMode::NonRecursive)
+        .expect("failed to watch /data/wasm-hooks");
+
+    let script_registry_for_watch = script_registry.clone();
+    runtime.spawn(async move {
+        while let Some(res) = watch_rx.recv().await {
+            match res {
+                Ok(event) => match event.kind {
+                    EventKind::Create(_)
+                    | EventKind::Modify(_)
+                    | EventKind::Remove(_) => {
+                        script_registry_for_watch.reload_dir("/data/wasm-hooks");
+
+                        let errs: Vec<(std::path::PathBuf, String)> =
+                            script_registry_for_watch.list_errors();
+                        for (path, err) in errs {
+                            error!("wasm script load error [{}]: {}", path.display(), err);
+                        }
+
+                        info!(
+                            "loaded wasm script count={}",
+                            script_registry_for_watch.list_scripts().len()
+                        );
+                    }
+                    _ => {}
+                },
+                Err(err) => {
+                    error!("wasm watcher error: {}", err);
+                }
+            }
+        }
+    });
+
+    let script_registry_for_tick = script_registry.clone();
+    runtime.spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(10));
+        loop {
+            interval.tick().await;
+            script_registry_for_tick.tick_all();
+        }
+    });
+
     runtime.spawn(async move {
         tokio_main(
             config_cloned,
@@ -614,6 +684,7 @@ fn main() -> Result<()> {
         tx,
         sensor_channel,
         last_battery_data,
+        Some(script_registry.clone())
     ));
 
     info!(

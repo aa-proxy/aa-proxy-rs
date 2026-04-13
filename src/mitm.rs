@@ -1,5 +1,10 @@
 use crate::ev::send_ev_data;
 use crate::ev::BatteryData;
+use crate::script_wasm::{
+    to_wasm_modify_context, apply_wasm_packet, from_wasm_packet, to_wasm_cfg, to_wasm_packet, LoadedScript,
+    ScriptProxyType, ScriptRegistry,
+};
+use crate::script_wasm::bindings::aa::packet::types::Decision;
 use anyhow::Context;
 use log::log_enabled;
 use openssl::ssl::{ErrorCode, Ssl, SslContextBuilder, SslFiletype, SslMethod};
@@ -70,9 +75,9 @@ pub const DHU_MAKE: &str = "Google";
 pub const DHU_MODEL: &str = "Desktop Head Unit";
 
 pub struct ModifyContext {
-    sensor_channel: Option<u8>,
-    nav_channel: Option<u8>,
-    audio_channels: Vec<u8>,
+    pub(crate) sensor_channel: Option<u8>,
+    pub(crate) nav_channel: Option<u8>,
+    pub(crate) audio_channels: Vec<u8>,
     ev_tx: Sender<EvTaskCommand>,
     hu_tx: Option<Sender<Packet>>,
 }
@@ -276,6 +281,67 @@ pub async fn pkt_debug(
     Ok(())
 }
 
+async fn run_wasm_hooks(
+    proxy_type: ProxyType,
+    pkt: &mut Packet,
+    ctx: &mut ModifyContext,
+    cfg: &AppConfig,
+    script_registry: Option<&ScriptRegistry>,
+) -> Result<Option<bool>> {
+    let Some(registry) = script_registry else {
+        return Ok(None);
+    };
+
+    let loaded: Vec<LoadedScript> = registry.list_scripts();
+    if loaded.is_empty() {
+        return Ok(None);
+    }
+
+    for script in loaded {
+        let wasm_ctx = to_wasm_modify_context(
+            ctx
+        );
+        let wasm_pkt = to_wasm_packet(
+            match proxy_type {
+                ProxyType::HeadUnit => ScriptProxyType::HeadUnit,
+                ProxyType::MobileDevice => ScriptProxyType::MobileDevice,
+            },
+            pkt,
+        )?;
+        let wasm_cfg = to_wasm_cfg(cfg);
+
+        match script.engine.run(wasm_ctx, wasm_pkt, wasm_cfg).await {
+            Ok((decision, effects)) => {
+                if let Some(replacement) = effects.replacement {
+                    apply_wasm_packet(pkt, replacement);
+                }
+
+                for out in effects.packets {
+                    if let Some(tx) = ctx.hu_tx.clone() {
+                        tx.send(from_wasm_packet(out)).await?;
+                    }
+                }
+
+                match decision {
+                    Decision::Forward => {}
+                    Decision::Drop => {
+                        log::info!("wasm script {} dropped packet", script.path.display());
+                        return Ok(Some(true));
+                    }
+                }
+            }
+            Err(err) => {
+                log::warn!(
+                    "wasm script runtime error [{}], forwarding original packet: {err:#}",
+                    script.path.display()
+                );
+            }
+        }
+    }
+
+    Ok(Some(false))
+}
+
 /// packet modification hook
 pub async fn pkt_modify_hook(
     proxy_type: ProxyType,
@@ -285,10 +351,17 @@ pub async fn pkt_modify_hook(
     last_battery: Arc<RwLock<Option<BatteryData>>>,
     cfg: &AppConfig,
     config: &mut SharedConfig,
+    script_registry: Option<&ScriptRegistry>,
 ) -> Result<bool> {
     // if for some reason we have too small packet, bail out
     if pkt.payload.len() < 2 {
         return Ok(false);
+    }
+
+    if let Some(handled) = run_wasm_hooks(proxy_type, pkt, ctx, cfg, script_registry).await? {
+        if handled {
+            return Ok(true);
+        }
     }
 
     // message_id is the first 2 bytes of payload
@@ -1047,6 +1120,7 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
     last_battery: Arc<RwLock<Option<BatteryData>>>,
     ev_tx: Sender<EvTaskCommand>,
     hu_tx: Option<Sender<Packet>>,
+    script_registry: Option<Arc<ScriptRegistry>>,
 ) -> Result<()> {
     let cfg = config.read().await.clone();
     let passthrough = !cfg.mitm;
@@ -1212,6 +1286,7 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
                 last_battery.clone(),
                 &cfg,
                 &mut config,
+                script_registry.as_deref(),
             )
             .await?;
             let _ = pkt_debug(
@@ -1254,6 +1329,7 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
                         last_battery.clone(),
                         &cfg,
                         &mut config,
+                        script_registry.as_deref(),
                     )
                     .await?;
                     let _ = pkt_debug(

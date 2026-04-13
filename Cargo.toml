@@ -24,7 +24,7 @@ tokio-fd = "0.3.0"
 tokio-uring = "0.5.0"
 mac_address = "1.1.7"
 bytesize = "1.3.0"
-simplelog = { version = "0.11.2", features = ["paris", "ansi_term"] }
+simplelog = { version = "0.12.1", features = ["paris", "ansi_term"] }
 clap = { version = "4.5.37", features = ["derive"] }
 humantime = "2.1.0"
 log = "0.4.22"
@@ -55,8 +55,11 @@ tokio-util = "0.7.16"
 uuid = "1"
 sha2 = "0.10.9"
 libc = "0.2.177"
-time = { version = "0.3", features = ["parsing"] }
+time = { version = "0.3", features = ["parsing", "macros"] }
 evdev = { version = "0.13", features = ["tokio"] }
+wasmtime = { version = "38", features = ["component-model", "async"] }
+wasmtime-wasi = "38"
+notify = "8"
 
 [patch.crates-io]
 tokio-uring = { git = "https://github.com/manio/tokio-uring", branch = "musl-riscv" }

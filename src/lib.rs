@@ -8,6 +8,7 @@ pub mod ev;
 pub mod io_uring;
 pub mod led;
 pub mod mitm;
+pub mod script_wasm;
 pub mod usb_gadget;
 pub mod usb_stream;
 pub mod web;
