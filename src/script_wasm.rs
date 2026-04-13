@@ -1,8 +1,13 @@
 use anyhow::{Context, Result};
+use notify::{recommended_watcher, EventKind, RecursiveMode, Watcher};
+use simplelog::*;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
+use tokio::runtime::Runtime;
+use tokio::sync::mpsc;
 use wasmtime::component::{Component, HasSelf, Linker};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
 
@@ -22,6 +27,78 @@ use self::bindings::aa::packet::types::{
     ConfigView, Decision, ModifyContext as WasmModifyContext, Packet as WasmPacket, ProxyType,
 };
 use self::bindings::PacketHook;
+
+pub fn start_wasm_engine(runtime: &mut Runtime, hook_dir: &str) -> Result<Arc<ScriptRegistry>> {
+    let script_registry = Arc::new(ScriptRegistry::new());
+    script_registry.reload_dir("/data/wasm-hooks");
+
+    let errs: Vec<(std::path::PathBuf, String)> = script_registry.list_errors();
+    for (path, err) in errs {
+        error!(
+            "initial wasm script load error [{}]: {}",
+            path.display(),
+            err
+        );
+    }
+
+    info!(
+        "initial loaded wasm script count={}",
+        script_registry.list_scripts().len()
+    );
+
+    let (watch_tx, mut watch_rx) = mpsc::unbounded_channel();
+
+    let mut wasm_watcher = recommended_watcher(move |res: notify::Result<notify::Event>| {
+        let _ = watch_tx.send(res);
+    })
+    .expect("failed to create wasm watcher");
+
+    wasm_watcher
+        .watch(
+            std::path::Path::new("/data/wasm-hooks"),
+            RecursiveMode::NonRecursive,
+        )
+        .expect("failed to watch /data/wasm-hooks");
+
+    let script_registry_for_watch = script_registry.clone();
+    runtime.spawn(async move {
+        while let Some(res) = watch_rx.recv().await {
+            match res {
+                Ok(event) => match event.kind {
+                    EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
+                        script_registry_for_watch.reload_dir("/data/wasm-hooks");
+
+                        let errs: Vec<(std::path::PathBuf, String)> =
+                            script_registry_for_watch.list_errors();
+                        for (path, err) in errs {
+                            error!("wasm script load error [{}]: {}", path.display(), err);
+                        }
+
+                        info!(
+                            "loaded wasm script count={}",
+                            script_registry_for_watch.list_scripts().len()
+                        );
+                    }
+                    _ => {}
+                },
+                Err(err) => {
+                    error!("wasm watcher error: {}", err);
+                }
+            }
+        }
+    });
+
+    let script_registry_for_tick = script_registry.clone();
+    runtime.spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(10));
+        loop {
+            interval.tick().await;
+            script_registry_for_tick.tick_all();
+        }
+    });
+
+    Ok(script_registry)
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct ScriptEffects {

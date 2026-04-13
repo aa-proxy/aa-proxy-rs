@@ -9,13 +9,12 @@ use aa_proxy_rs::ev::BatteryData;
 use aa_proxy_rs::io_uring::io_loop;
 use aa_proxy_rs::led::{LedColor, LedManager, LedMode};
 use aa_proxy_rs::mitm::Packet;
-use aa_proxy_rs::script_wasm::ScriptRegistry;
+use aa_proxy_rs::script_wasm::start_wasm_engine;
 use aa_proxy_rs::usb_gadget::uevent_listener;
 use aa_proxy_rs::usb_gadget::UsbGadgetState;
 use aa_proxy_rs::web;
 use clap::Parser;
 use humantime::format_duration;
-use notify::{recommended_watcher, EventKind, RecursiveMode, Watcher};
 use simplelog::*;
 use std::os::unix::fs::PermissionsExt;
 use time::macros::format_description;
@@ -32,7 +31,6 @@ use std::time::Duration;
 use tokio::runtime::Builder;
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::Sender as BroadcastSender;
-use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
@@ -54,6 +52,7 @@ const UMTPRD_CONF_OUT: &str = "/var/run/umtprd.conf";
 const GADGET_INIT_IN: &str = "/etc/S92usb_gadget.in";
 const GADGET_INIT_OUT: &str = "/var/run/S92usb_gadget";
 const REBOOT_CMD: &str = "/sbin/reboot";
+const WASM_HOOKS_DIR: &str = "/data/wasm-hooks";
 
 /// AndroidAuto wired/wireless proxy
 #[derive(Parser, Debug)]
@@ -592,77 +591,11 @@ fn main() -> Result<()> {
     let last_battery_data_cloned = last_battery_data.clone();
 
     // build and spawn main tokio runtime
-    let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
+    let mut runtime = Builder::new_multi_thread().enable_all().build().unwrap();
     let restart_tx_cloned = restart_tx.clone();
     let profile_connected_cloned = profile_connected.clone();
 
-    let script_registry = Arc::new(ScriptRegistry::new());
-    script_registry.reload_dir("/data/wasm-hooks");
-
-    let errs: Vec<(std::path::PathBuf, String)> = script_registry.list_errors();
-    for (path, err) in errs {
-        error!(
-            "initial wasm script load error [{}]: {}",
-            path.display(),
-            err
-        );
-    }
-
-    info!(
-        "initial loaded wasm script count={}",
-        script_registry.list_scripts().len()
-    );
-
-    let (watch_tx, mut watch_rx) = mpsc::unbounded_channel();
-
-    let mut wasm_watcher = recommended_watcher(move |res: notify::Result<notify::Event>| {
-        let _ = watch_tx.send(res);
-    })
-    .expect("failed to create wasm watcher");
-
-    wasm_watcher
-        .watch(
-            std::path::Path::new("/data/wasm-hooks"),
-            RecursiveMode::NonRecursive,
-        )
-        .expect("failed to watch /data/wasm-hooks");
-
-    let script_registry_for_watch = script_registry.clone();
-    runtime.spawn(async move {
-        while let Some(res) = watch_rx.recv().await {
-            match res {
-                Ok(event) => match event.kind {
-                    EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
-                        script_registry_for_watch.reload_dir("/data/wasm-hooks");
-
-                        let errs: Vec<(std::path::PathBuf, String)> =
-                            script_registry_for_watch.list_errors();
-                        for (path, err) in errs {
-                            error!("wasm script load error [{}]: {}", path.display(), err);
-                        }
-
-                        info!(
-                            "loaded wasm script count={}",
-                            script_registry_for_watch.list_scripts().len()
-                        );
-                    }
-                    _ => {}
-                },
-                Err(err) => {
-                    error!("wasm watcher error: {}", err);
-                }
-            }
-        }
-    });
-
-    let script_registry_for_tick = script_registry.clone();
-    runtime.spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(10));
-        loop {
-            interval.tick().await;
-            script_registry_for_tick.tick_all();
-        }
-    });
+    let script_registry = start_wasm_engine(&mut runtime, WASM_HOOKS_DIR).ok();
 
     runtime.spawn(async move {
         tokio_main(
@@ -689,7 +622,7 @@ fn main() -> Result<()> {
         tx,
         sensor_channel,
         last_battery_data,
-        Some(script_registry.clone()),
+        script_registry.clone(),
     ));
 
     info!(
