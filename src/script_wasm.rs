@@ -28,9 +28,9 @@ use self::bindings::aa::packet::types::{
 };
 use self::bindings::PacketHook;
 
-pub fn start_wasm_engine(runtime: &mut Runtime, hook_dir: &str) -> Result<Arc<ScriptRegistry>> {
+pub fn start_wasm_engine(runtime: &mut Runtime, hook_dir: String) -> Result<Arc<ScriptRegistry>> {
     let script_registry = Arc::new(ScriptRegistry::new());
-    script_registry.reload_dir("/data/wasm-hooks");
+    script_registry.reload_dir(&hook_dir);
 
     let errs: Vec<(std::path::PathBuf, String)> = script_registry.list_errors();
     for (path, err) in errs {
@@ -50,15 +50,11 @@ pub fn start_wasm_engine(runtime: &mut Runtime, hook_dir: &str) -> Result<Arc<Sc
 
     let mut wasm_watcher = recommended_watcher(move |res: notify::Result<notify::Event>| {
         let _ = watch_tx.send(res);
-    })
-    .expect("failed to create wasm watcher");
+    })?;
 
     wasm_watcher
-        .watch(
-            std::path::Path::new("/data/wasm-hooks"),
-            RecursiveMode::NonRecursive,
-        )
-        .expect("failed to watch /data/wasm-hooks");
+        .watch(std::path::Path::new(&hook_dir), RecursiveMode::NonRecursive)
+        .map_err(|e| anyhow::anyhow!("failed to watch {}: {}", hook_dir, e))?;
 
     let script_registry_for_watch = script_registry.clone();
     runtime.spawn(async move {
@@ -66,7 +62,7 @@ pub fn start_wasm_engine(runtime: &mut Runtime, hook_dir: &str) -> Result<Arc<Sc
             match res {
                 Ok(event) => match event.kind {
                     EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
-                        script_registry_for_watch.reload_dir("/data/wasm-hooks");
+                        script_registry_for_watch.reload_dir(&hook_dir);
 
                         let errs: Vec<(std::path::PathBuf, String)> =
                             script_registry_for_watch.list_errors();

@@ -595,7 +595,7 @@ fn main() -> Result<()> {
     let restart_tx_cloned = restart_tx.clone();
     let profile_connected_cloned = profile_connected.clone();
 
-    let script_registry = start_wasm_engine(&mut runtime, WASM_HOOKS_DIR).ok();
+    let script_registry = start_wasm_engine(&mut runtime, WASM_HOOKS_DIR.to_string()).ok();
 
     runtime.spawn(async move {
         tokio_main(
