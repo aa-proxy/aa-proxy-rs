@@ -57,6 +57,9 @@ sha2 = "0.10.9"
 libc = "0.2.177"
 time = { version = "0.3", features = ["parsing", "macros"] }
 evdev = { version = "0.13", features = ["tokio"] }
+wasmtime = { version = "38", features = ["component-model", "async"] }
+wasmtime-wasi = "38"
+notify = "8"
 
 [patch.crates-io]
 tokio-uring = { git = "https://github.com/manio/tokio-uring", branch = "musl-riscv" }
