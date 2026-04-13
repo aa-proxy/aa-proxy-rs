@@ -16,6 +16,7 @@ use clap::Parser;
 use humantime::format_duration;
 use simplelog::*;
 use std::os::unix::fs::PermissionsExt;
+use time::macros::format_description;
 
 use std::fs;
 use std::fs::OpenOptions;
@@ -117,7 +118,9 @@ fn init_wifi_config(cfg: &AppConfig) -> WifiConfig {
 
 fn logging_init(debug: bool, disable_console_debug: bool, log_path: &PathBuf) {
     let conf = ConfigBuilder::new()
-        .set_time_format("%F, %H:%M:%S%.3f".to_string())
+        .set_time_format_custom(format_description!(
+            "[year]-[month]-[day], [hour]:[minute]:[second].[subsecond digits:3]"
+        ))
         .set_write_log_enable_colors(true)
         .build();
 
