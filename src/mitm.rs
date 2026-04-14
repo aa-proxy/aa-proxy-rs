@@ -1,10 +1,14 @@
 use crate::ev::send_ev_data;
 use crate::ev::BatteryData;
+#[cfg(feature = "wasm-scripting")]
 use crate::script_wasm::bindings::aa::packet::types::Decision;
+#[cfg(feature = "wasm-scripting")]
 use crate::script_wasm::{
     apply_wasm_packet, from_wasm_packet, to_wasm_cfg, to_wasm_modify_context, to_wasm_packet,
     LoadedScript, ScriptProxyType, ScriptRegistry,
 };
+#[cfg(not(feature = "wasm-scripting"))]
+type ScriptRegistry = ();
 use anyhow::Context;
 use log::log_enabled;
 use openssl::ssl::{ErrorCode, Ssl, SslContextBuilder, SslFiletype, SslMethod};
@@ -281,6 +285,18 @@ pub async fn pkt_debug(
     Ok(())
 }
 
+#[cfg(not(feature = "wasm-scripting"))]
+async fn run_wasm_hooks(
+    _proxy_type: ProxyType,
+    _pkt: &mut Packet,
+    _ctx: &mut ModifyContext,
+    _cfg: &AppConfig,
+    _script_registry: Option<&ScriptRegistry>,
+) -> Result<Option<bool>> {
+    Ok(None)
+}
+
+#[cfg(feature = "wasm-scripting")]
 async fn run_wasm_hooks(
     proxy_type: ProxyType,
     pkt: &mut Packet,

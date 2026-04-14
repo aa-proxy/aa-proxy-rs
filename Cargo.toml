@@ -12,6 +12,10 @@ homepage = 'https://github.com/manio/aa-proxy-rs'
 repository = 'https://github.com/manio/aa-proxy-rs'
 default-run = "aa-proxy-rs"
 
+[features]
+default = ["wasm-scripting"]
+wasm-scripting = ["wasmtime", "wasmtime/component-model", "wasmtime-wasi", "notify"]
+
 [dependencies]
 dbus = { version = "0.9.7", features = ["vendored"] }
 bluer = { version = "0.17.4", features = ["full"] }
@@ -57,9 +61,9 @@ sha2 = "0.10.9"
 libc = "0.2.177"
 time = { version = "0.3", features = ["parsing", "macros"] }
 evdev = { version = "0.13", features = ["tokio"] }
-wasmtime = { version = "38", features = ["component-model", "async"] }
-wasmtime-wasi = "38"
-notify = "8"
+wasmtime = { version = "38", features = ["async"], optional = true }
+wasmtime-wasi = { version = "38", optional = true }
+notify = { version = "8", optional = true }
 
 [patch.crates-io]
 tokio-uring = { git = "https://github.com/manio/tokio-uring", branch = "musl-riscv" }

@@ -1,4 +1,7 @@
+#[cfg(feature = "wasm-scripting")]
 use crate::script_wasm::ScriptRegistry;
+#[cfg(not(feature = "wasm-scripting"))]
+type ScriptRegistry = ();
 use bytesize::ByteSize;
 use core::net::SocketAddr;
 use humantime::format_duration;
