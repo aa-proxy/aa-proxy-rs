@@ -8,6 +8,7 @@ use crate::ev::BatteryData;
 use crate::ev::EV_MODEL_FILE;
 use crate::mitm::protos::KeyCode;
 use crate::mitm::send_key_event;
+use crate::mitm::send_rotary_event;
 use crate::mitm::Packet;
 use axum::{
     body::Body,
@@ -62,6 +63,13 @@ pub struct InjectEventData {
     pub keycode: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct InjectRotaryData {
+    /// Positive = clockwise, negative = counterclockwise.
+    /// Absolute value of 1 = single UI step (scales linearly).
+    pub delta: i32,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub config: SharedConfig,
@@ -87,6 +95,7 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/battery", post(battery_handler))
         .route("/battery-status", get(battery_status_handler))
         .route("/inject_event", post(inject_event_handler))
+        .route("/inject_rotary", post(inject_rotary_handler))
         .route("/userdata-backup", get(userdata_backup_handler))
         .route("/userdata-restore", post(userdata_restore_handler))
         .route("/factory-reset", post(factory_reset_handler))
@@ -305,6 +314,38 @@ pub async fn inject_event_handler(
     } else {
         warn!(
             "{} Not sending key event because no input channel yet",
+            NAME
+        );
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "No input channel available yet",
+        )
+            .into_response();
+    }
+
+    (StatusCode::OK, "OK").into_response()
+}
+
+pub async fn inject_rotary_handler(
+    State(state): State<Arc<AppState>>,
+    Json(data): Json<InjectRotaryData>,
+) -> impl IntoResponse {
+    if data.delta == 0 {
+        return (StatusCode::BAD_REQUEST, "delta must be non-zero").into_response();
+    }
+
+    info!("{} Received inject_rotary: delta={}", NAME, data.delta);
+
+    if let Some(ch) = *state.input_channel.lock().await {
+        if let Some(tx) = state.tx.lock().await.clone() {
+            if let Err(e) = send_rotary_event(tx, ch, data.delta).await {
+                error!("{} inject_rotary error: {}", NAME, e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+            }
+        }
+    } else {
+        warn!(
+            "{} Not sending rotary event because no input channel yet",
             NAME
         );
         return (

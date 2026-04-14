@@ -33,6 +33,7 @@ use crate::mitm::protos::navigation_maneuver::NavigationType::*;
 use crate::mitm::protos::Config as AudioConfig;
 use crate::mitm::protos::InputMessageId::INPUT_MESSAGE_INPUT_REPORT;
 use crate::mitm::protos::*;
+use crate::mitm::protos::{relative_event, RelativeEvent};
 use crate::mitm::protos::{InputReport, KeyEvent};
 use crate::mitm::sensor_source_service::Sensor;
 use crate::mitm::AudioStreamType::*;
@@ -1011,6 +1012,44 @@ pub async fn send_key_event(tx: Sender<Packet>, input_ch: u8, keycode: u32) -> R
     ))
     .await?;
     info!("mitm/web: injecting key UP (keycode={})", keycode);
+
+    Ok(())
+}
+
+/// Injects a rotary dial turn event into the input channel.
+/// delta: positive = clockwise, negative = counterclockwise
+/// Per AAP spec: absolute value of 1 = single UI step, scales linearly
+pub async fn send_rotary_event(tx: Sender<Packet>, input_ch: u8, delta: i32) -> Result<()> {
+    let now_us = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros() as u64;
+
+    let mut rel = relative_event::Rel::new();
+    rel.set_keycode(KeyCode::KEYCODE_ROTARY_CONTROLLER as u32);
+    rel.set_delta(delta);
+
+    let mut rel_event = RelativeEvent::new();
+    rel_event.data.push(rel);
+
+    let mut report = InputReport::new();
+    report.set_timestamp(now_us);
+    report.relative_event = protobuf::MessageField::some(rel_event);
+
+    let mut payload = report.write_to_bytes()?;
+    let msg_id = InputMessageId::INPUT_MESSAGE_INPUT_REPORT as u16;
+    payload.insert(0, (msg_id >> 8) as u8);
+    payload.insert(1, (msg_id & 0xff) as u8);
+
+    let pkt = Packet {
+        channel: input_ch,
+        flags: ENCRYPTED | FRAME_TYPE_FIRST | FRAME_TYPE_LAST,
+        final_length: None,
+        payload,
+    };
+
+    tx.send(pkt).await?;
+    info!("mitm/web: injecting ROTARY delta={}", delta);
 
     Ok(())
 }
