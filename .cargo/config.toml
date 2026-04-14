@@ -1,6 +1,23 @@
 [build]
-#set default target
-target = "aarch64-unknown-linux-gnu"
+# optional default for local builds
+# target = "aarch64-unknown-linux-gnu"
 
 [target.aarch64-unknown-linux-gnu]
 linker = "aarch64-linux-gnu-gcc"
+ar = "aarch64-linux-gnu-ar"
+
+[target.arm-unknown-linux-gnueabihf]
+linker = "arm-linux-gnueabihf-gcc"
+ar = "arm-linux-gnueabihf-ar"
+
+[target.armv7-unknown-linux-gnueabihf]
+linker = "arm-linux-gnueabihf-gcc"
+ar = "arm-linux-gnueabihf-ar"
+
+[target.riscv64gc-unknown-linux-gnu]
+linker = "riscv64-linux-gnu-gcc"
+ar = "riscv64-linux-gnu-ar"
+
+[target.x86_64-unknown-linux-gnu]
+linker = "gcc"
+ar = "ar"

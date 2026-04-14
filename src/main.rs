@@ -9,6 +9,12 @@ use aa_proxy_rs::ev::BatteryData;
 use aa_proxy_rs::io_uring::io_loop;
 use aa_proxy_rs::led::{LedColor, LedManager, LedMode};
 use aa_proxy_rs::mitm::Packet;
+#[cfg(any(
+    target_arch = "x86_64",
+    target_arch = "aarch64",
+    target_arch = "riscv64",
+    all(target_arch = "arm", target_feature = "v7")
+))]
 use aa_proxy_rs::script_wasm::start_wasm_engine;
 use aa_proxy_rs::usb_gadget::uevent_listener;
 use aa_proxy_rs::usb_gadget::UsbGadgetState;
@@ -595,7 +601,20 @@ fn main() -> Result<()> {
     let restart_tx_cloned = restart_tx.clone();
     let profile_connected_cloned = profile_connected.clone();
 
+    #[cfg(any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "riscv64",
+        all(target_arch = "arm", target_feature = "v7")
+    ))]
     let script_registry = start_wasm_engine(&mut runtime, WASM_HOOKS_DIR.to_string()).ok();
+    #[cfg(not(any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "riscv64",
+        all(target_arch = "arm", target_feature = "v7")
+    )))]
+    let script_registry = None;
 
     runtime.spawn(async move {
         tokio_main(

@@ -57,7 +57,24 @@ sha2 = "0.10.9"
 libc = "0.2.177"
 time = { version = "0.3", features = ["parsing", "macros"] }
 evdev = { version = "0.13", features = ["tokio"] }
-wasmtime = { version = "38", features = ["component-model", "async"] }
+
+[target.x86_64-unknown-linux-gnu.dependencies]
+wasmtime = { version = "38", features = ["component-model"] }
+wasmtime-wasi = "38"
+notify = "8"
+
+[target.aarch64-unknown-linux-gnu.dependencies]
+wasmtime = { version = "38", features = ["component-model"] }
+wasmtime-wasi = "38"
+notify = "8"
+
+[target.riscv64gc-unknown-linux-gnu.dependencies]
+wasmtime = { version = "38", features = ["component-model"] }
+wasmtime-wasi = "38"
+notify = "8"
+
+[target.armv7-unknown-linux-gnueabihf.dependencies]
+wasmtime = { version = "38", features = ["component-model"] }
 wasmtime-wasi = "38"
 notify = "8"
 

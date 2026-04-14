@@ -1,10 +1,29 @@
 use crate::ev::send_ev_data;
 use crate::ev::BatteryData;
+#[cfg(any(
+    target_arch = "x86_64",
+    target_arch = "aarch64",
+    target_arch = "riscv64",
+    all(target_arch = "arm", target_feature = "v7")
+))]
 use crate::script_wasm::bindings::aa::packet::types::Decision;
+#[cfg(any(
+    target_arch = "x86_64",
+    target_arch = "aarch64",
+    target_arch = "riscv64",
+    all(target_arch = "arm", target_feature = "v7")
+))]
 use crate::script_wasm::{
     apply_wasm_packet, from_wasm_packet, to_wasm_cfg, to_wasm_modify_context, to_wasm_packet,
     LoadedScript, ScriptProxyType, ScriptRegistry,
 };
+#[cfg(not(any(
+    target_arch = "x86_64",
+    target_arch = "aarch64",
+    target_arch = "riscv64",
+    all(target_arch = "arm", target_feature = "v7")
+)))]
+type ScriptRegistry = ();
 use anyhow::Context;
 use log::log_enabled;
 use openssl::ssl::{ErrorCode, Ssl, SslContextBuilder, SslFiletype, SslMethod};
@@ -281,6 +300,12 @@ pub async fn pkt_debug(
     Ok(())
 }
 
+#[cfg(any(
+    target_arch = "x86_64",
+    target_arch = "aarch64",
+    target_arch = "riscv64",
+    all(target_arch = "arm", target_feature = "v7")
+))]
 async fn run_wasm_hooks(
     proxy_type: ProxyType,
     pkt: &mut Packet,
@@ -338,6 +363,22 @@ async fn run_wasm_hooks(
     }
 
     Ok(Some(false))
+}
+
+#[cfg(not(any(
+    target_arch = "x86_64",
+    target_arch = "aarch64",
+    target_arch = "riscv64",
+    all(target_arch = "arm", target_feature = "v7")
+)))]
+async fn run_wasm_hooks(
+    _proxy_type: ProxyType,
+    _pkt: &mut Packet,
+    _ctx: &mut ModifyContext,
+    _cfg: &AppConfig,
+    _script_registry: Option<&ScriptRegistry>,
+) -> Result<Option<bool>> {
+    Ok(None)
 }
 
 /// packet modification hook

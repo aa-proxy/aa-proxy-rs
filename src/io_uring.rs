@@ -1,4 +1,17 @@
+#[cfg(any(
+    target_arch = "x86_64",
+    target_arch = "aarch64",
+    target_arch = "riscv64",
+    all(target_arch = "arm", target_feature = "v7")
+))]
 use crate::script_wasm::ScriptRegistry;
+#[cfg(not(any(
+    target_arch = "x86_64",
+    target_arch = "aarch64",
+    target_arch = "riscv64",
+    all(target_arch = "arm", target_feature = "v7")
+)))]
+type ScriptRegistry = ();
 use bytesize::ByteSize;
 use core::net::SocketAddr;
 use humantime::format_duration;
