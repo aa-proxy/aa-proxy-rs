@@ -326,6 +326,7 @@ pub async fn io_loop(
     config: SharedConfig,
     tx: Arc<Mutex<Option<Sender<Packet>>>>,
     sensor_channel: Arc<Mutex<Option<u8>>>,
+    input_channel: Arc<Mutex<Option<u8>>>,
     last_battery: Arc<RwLock<Option<BatteryData>>>,
     script_registry: Option<Arc<ScriptRegistry>>,
 ) -> Result<()> {
@@ -514,6 +515,7 @@ pub async fn io_loop(
             rxr_md,
             shared_config.clone(),
             sensor_channel.clone(),
+            input_channel.clone(),
             last_battery.clone(),
             ev_tx.clone(),
             Some(tx_hu.clone()),
@@ -528,6 +530,7 @@ pub async fn io_loop(
             rxr_hu,
             shared_config.clone(),
             sensor_channel.clone(),
+            input_channel.clone(),
             last_battery.clone(),
             ev_tx.clone(),
             Some(tx_md.clone()),

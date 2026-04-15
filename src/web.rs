@@ -60,6 +60,7 @@ pub struct AppState {
     pub config_file: Arc<PathBuf>,
     pub tx: Arc<Mutex<Option<Sender<Packet>>>>,
     pub sensor_channel: Arc<Mutex<Option<u8>>>,
+    pub input_channel: Arc<Mutex<Option<u8>>>,
     pub last_battery_data: Arc<RwLock<Option<BatteryData>>>,
 }
 

@@ -199,6 +199,7 @@ async fn tokio_main(
     config_file: PathBuf,
     tx: Arc<Mutex<Option<Sender<Packet>>>>,
     sensor_channel: Arc<Mutex<Option<u8>>>,
+    input_channel: Arc<Mutex<Option<u8>>>,
     last_battery_data: Arc<RwLock<Option<BatteryData>>>,
     led_support: bool,
     button_support: bool,
@@ -212,6 +213,7 @@ async fn tokio_main(
         config_file: config_file.into(),
         tx,
         sensor_channel,
+        input_channel,
         last_battery_data,
     };
 
@@ -587,6 +589,8 @@ fn main() -> Result<()> {
     let tx_cloned = tx.clone();
     let sensor_channel = Arc::new(Mutex::new(None));
     let sensor_channel_cloned = sensor_channel.clone();
+    let input_channel = Arc::new(Mutex::new(None));
+    let input_channel_cloned = input_channel.clone();
     let profile_connected = Arc::new(AtomicBool::new(false));
     let last_battery_data = Arc::new(RwLock::new(None));
     let last_battery_data_cloned = last_battery_data.clone();
@@ -610,6 +614,7 @@ fn main() -> Result<()> {
             args.config.clone(),
             tx_cloned,
             sensor_channel_cloned,
+            input_channel_cloned,
             last_battery_data_cloned,
             led_support,
             button_support,
@@ -625,6 +630,7 @@ fn main() -> Result<()> {
         config,
         tx,
         sensor_channel,
+        input_channel,
         last_battery_data,
         script_registry.clone(),
     ));

@@ -83,6 +83,7 @@ pub struct ModifyContext {
     pub(crate) nav_channel: Option<u8>,
     pub(crate) audio_channels: Vec<u8>,
     ev_tx: Sender<EvTaskCommand>,
+    input_channel: Option<u8>,
     hu_tx: Option<Sender<Packet>>,
 }
 
@@ -362,6 +363,7 @@ pub async fn pkt_modify_hook(
     pkt: &mut Packet,
     ctx: &mut ModifyContext,
     sensor_channel: Arc<tokio::sync::Mutex<Option<u8>>>,
+    input_channel: Arc<tokio::sync::Mutex<Option<u8>>>,
     last_battery: Arc<RwLock<Option<BatteryData>>>,
     cfg: &AppConfig,
     config: &mut SharedConfig,
@@ -772,6 +774,22 @@ pub async fn pkt_modify_hook(
                 }
             }
 
+            // save input source channel
+            if let Some(svc) = msg
+                .services
+                .iter()
+                .find(|svc| svc.input_source_service.is_some())
+            {
+                ctx.input_channel = Some(svc.id() as u8);
+                let mut ic_lock = input_channel.lock().await;
+                *ic_lock = Some(svc.id() as u8);
+                info!(
+                    "{} <blue>input_source_service</> channel is: <b>{:#04x}</>",
+                    get_name(proxy_type),
+                    svc.id() as u8
+                );
+            }
+
             // save navigation channel in context
             if cfg.waze_lht_workaround {
                 if let Some(svc) = msg
@@ -1131,6 +1149,7 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
     mut rxr: Receiver<Packet>,
     mut config: SharedConfig,
     sensor_channel: Arc<tokio::sync::Mutex<Option<u8>>>,
+    input_channel: Arc<tokio::sync::Mutex<Option<u8>>>,
     last_battery: Arc<RwLock<Option<BatteryData>>>,
     ev_tx: Sender<EvTaskCommand>,
     hu_tx: Option<Sender<Packet>>,
@@ -1283,6 +1302,7 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
     // main data processing/transfer loop
     let mut ctx = ModifyContext {
         sensor_channel: None,
+        input_channel: None,
         nav_channel: None,
         audio_channels: vec![],
         ev_tx,
@@ -1297,6 +1317,7 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
                 &mut pkt,
                 &mut ctx,
                 sensor_channel.clone(),
+                input_channel.clone(),
                 last_battery.clone(),
                 &cfg,
                 &mut config,
@@ -1340,6 +1361,7 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
                         &mut pkt,
                         &mut ctx,
                         sensor_channel.clone(),
+                        input_channel.clone(),
                         last_battery.clone(),
                         &cfg,
                         &mut config,
