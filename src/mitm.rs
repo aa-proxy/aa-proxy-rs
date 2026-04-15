@@ -19,7 +19,7 @@ use std::io::{Read, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -31,7 +31,9 @@ use tokio_uring::buf::BoundedBuf;
 include!(concat!(env!("OUT_DIR"), "/protos/mod.rs"));
 use crate::mitm::protos::navigation_maneuver::NavigationType::*;
 use crate::mitm::protos::Config as AudioConfig;
+use crate::mitm::protos::InputMessageId::INPUT_MESSAGE_INPUT_REPORT;
 use crate::mitm::protos::*;
+use crate::mitm::protos::{InputReport, KeyEvent};
 use crate::mitm::sensor_source_service::Sensor;
 use crate::mitm::AudioStreamType::*;
 use crate::mitm::ByeByeReason::USER_SELECTION;
@@ -956,6 +958,61 @@ pub async fn pkt_modify_hook(
     };
 
     Ok(false)
+}
+
+pub async fn send_key_event(tx: Sender<Packet>, input_ch: u8, keycode: u32) -> Result<()> {
+    let now_us = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros() as u64;
+
+    // Helper to build one InputReport (down=true or down=false)
+    let build_pkt = |ch: u8, down: bool, flags: u8| -> Packet {
+        let mut key = crate::mitm::protos::key_event::Key::new();
+        key.set_keycode(keycode);
+        key.set_down(down);
+        key.set_metastate(0);
+        key.set_longpress(false);
+
+        let mut key_event = KeyEvent::new();
+        key_event.keys.push(key);
+
+        let mut report = InputReport::new();
+        report.set_timestamp(now_us);
+        report.key_event = protobuf::MessageField::some(key_event);
+
+        let mut payload = report.write_to_bytes().expect("serialize InputReport");
+        let msg_id = INPUT_MESSAGE_INPUT_REPORT as u16;
+        payload.insert(0, (msg_id >> 8) as u8);
+        payload.insert(1, (msg_id & 0xff) as u8);
+
+        Packet {
+            channel: ch,
+            flags,
+            final_length: None,
+            payload,
+        }
+    };
+
+    // Send key DOWN
+    tx.send(build_pkt(
+        input_ch,
+        true,
+        ENCRYPTED | FRAME_TYPE_FIRST | FRAME_TYPE_LAST,
+    ))
+    .await?;
+    info!("mitm/web: injecting key DOWN (keycode={})", keycode);
+
+    // Send key UP
+    tx.send(build_pkt(
+        input_ch,
+        false,
+        ENCRYPTED | FRAME_TYPE_FIRST | FRAME_TYPE_LAST,
+    ))
+    .await?;
+    info!("mitm/web: injecting key UP (keycode={})", keycode);
+
+    Ok(())
 }
 
 /// encapsulates SSL data into Packet

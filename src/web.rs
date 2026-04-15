@@ -6,6 +6,8 @@ use crate::config::SharedConfigJson;
 use crate::ev::send_ev_data;
 use crate::ev::BatteryData;
 use crate::ev::EV_MODEL_FILE;
+use crate::mitm::protos::KeyCode;
+use crate::mitm::send_key_event;
 use crate::mitm::Packet;
 use axum::{
     body::Body,
@@ -23,6 +25,7 @@ use futures::StreamExt;
 use glob::glob;
 use hyper::body::to_bytes;
 use regex::Regex;
+use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use simplelog::*;
@@ -53,6 +56,12 @@ const CERT_SHA_FILENAME: &str = "cert-bundle.sha";
 // module name for logging engine
 const NAME: &str = "<i><bright-black> web: </>";
 
+#[derive(Debug, Deserialize)]
+pub struct InjectEventData {
+    /// eg. "KEYCODE_HOME", "KEYCODE_BACK", "KEYCODE_SEARCH"
+    pub keycode: String,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub config: SharedConfig,
@@ -77,6 +86,7 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/certs-info", get(certs_info_handler))
         .route("/battery", post(battery_handler))
         .route("/battery-status", get(battery_status_handler))
+        .route("/inject_event", post(inject_event_handler))
         .route("/userdata-backup", get(userdata_backup_handler))
         .route("/userdata-restore", post(userdata_restore_handler))
         .route("/factory-reset", post(factory_reset_handler))
@@ -266,6 +276,45 @@ async fn battery_status_handler(State(state): State<Arc<AppState>>) -> impl Into
         Some(d) => Json(serde_json::to_value(d).unwrap()).into_response(),
         None => (StatusCode::NO_CONTENT, "No battery data yet").into_response(),
     }
+}
+
+pub async fn inject_event_handler(
+    State(state): State<Arc<AppState>>,
+    Json(data): Json<InjectEventData>,
+) -> impl IntoResponse {
+    let keycode = match <KeyCode as protobuf::Enum>::from_str(&data.keycode) {
+        Some(k) => k as u32,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("Unknown keycode: {}", data.keycode),
+            )
+                .into_response();
+        }
+    };
+
+    info!("{} Received inject_event: {:?}", NAME, data.keycode);
+
+    if let Some(ch) = *state.input_channel.lock().await {
+        if let Some(tx) = state.tx.lock().await.clone() {
+            if let Err(e) = send_key_event(tx, ch, keycode).await {
+                error!("{} inject_event error: {}", NAME, e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+            }
+        }
+    } else {
+        warn!(
+            "{} Not sending key event because no input channel yet",
+            NAME
+        );
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "No input channel available yet",
+        )
+            .into_response();
+    }
+
+    (StatusCode::OK, "OK").into_response()
 }
 
 fn generate_filename(kind: &str) -> String {
