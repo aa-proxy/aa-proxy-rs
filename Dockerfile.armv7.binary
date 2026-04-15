@@ -1,0 +1,35 @@
+# syntax=docker/dockerfile:1.7-labs
+
+FROM rust:bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    pkg-config \
+    gcc-aarch64-linux-gnu \
+    g++-aarch64-linux-gnu \
+    libc6-dev-arm64-cross \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN rustup target add aarch64-unknown-linux-gnu
+
+WORKDIR /usr/src/app
+
+COPY Cargo.toml Cargo.lock build.rs ./
+COPY src/protos ./src/protos
+
+RUN mkdir -p src && printf 'fn main() {}\n' > src/main.rs
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    cargo build --release --target aarch64-unknown-linux-gnu || true
+
+COPY . .
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    cargo build --release --target aarch64-unknown-linux-gnu
+
+FROM scratch AS export
+COPY --from=builder /usr/src/app/target/aarch64-unknown-linux-gnu/release/aa-proxy-rs /aa-proxy-rs
+
+# DOCKER_BUILDKIT=1 docker build -f Dockerfile.armv7.binary --target export --output type=local,dest=./output .
