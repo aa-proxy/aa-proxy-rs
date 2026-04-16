@@ -1,10 +1,10 @@
+use protobuf::Enum;
 use simplelog::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
-use protobuf::Enum;
 
 use crate::mitm::protos;
 use crate::mitm::protos::{AudioStreamType, DisplayType, MediaCodecType};
@@ -225,11 +225,8 @@ fn build_dvd_lpcm_header(cfg: AudioStreamConfig) -> Option<[u8; 6]> {
     let header4 = (bits << 6) | (rate << 4) | (chm1 & 0x07);
     Some([
         0x01, // number of frames in packet
-        0x00,
-        0x00,
-        0x00, // no emphasis/mute/current-frame flags
-        header4,
-        0x80, // required by VLC's VobHeader() frame-sync check
+        0x00, 0x00, 0x00, // no emphasis/mute/current-frame flags
+        header4, 0x80, // required by VLC's VobHeader() frame-sync check
     ])
 }
 
@@ -245,7 +242,11 @@ fn pcm_to_big_endian_samples(data: &[u8], bits: u32) -> Option<Vec<u8>> {
             if data.len() % 3 != 0 {
                 return None;
             }
-            Some(data.chunks_exact(3).flat_map(|c| [c[2], c[1], c[0]]).collect())
+            Some(
+                data.chunks_exact(3)
+                    .flat_map(|c| [c[2], c[1], c[0]])
+                    .collect(),
+            )
         }
         _ => None,
     }
@@ -314,12 +315,7 @@ fn prepare_ts_audio_data(stream_info: &MediaStreamInfo, data: &[u8]) -> Option<V
 /// All streams (both audio and video) are delivered as MPEG-TS.
 /// If ServiceDiscovery has not yet completed when a client connects, the server
 /// keeps the connection alive with TS null packets until stream info arrives.
-pub async fn media_tcp_server(
-    port: u16,
-    label: String,
-    sink: MediaSink,
-    wait_for_live_idr: bool,
-) {
+pub async fn media_tcp_server(port: u16, label: String, sink: MediaSink, wait_for_live_idr: bool) {
     let listener = match TcpListener::bind(format!("0.0.0.0:{port}")).await {
         Ok(l) => l,
         Err(e) => {
@@ -341,12 +337,11 @@ pub async fn media_tcp_server(
                         let mut info = sink.get_stream_info().await;
                         if info.is_none() {
                             let null_pkt = MpegTsState::null_packet();
-                            let mut ticker = tokio::time::interval(
-                                std::time::Duration::from_millis(200),
-                            );
+                            let mut ticker =
+                                tokio::time::interval(std::time::Duration::from_millis(200));
                             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                            let deadline = tokio::time::Instant::now()
-                                + std::time::Duration::from_secs(30);
+                            let deadline =
+                                tokio::time::Instant::now() + std::time::Duration::from_secs(30);
                             loop {
                                 ticker.tick().await;
                                 if stream.write_all(&null_pkt).await.is_err() {
@@ -383,7 +378,8 @@ pub async fn media_tcp_server(
                             return;
                         }
                         let mut rx = sink.subscribe();
-                        let mut psi_ticker = tokio::time::interval(std::time::Duration::from_secs(2));
+                        let mut psi_ticker =
+                            tokio::time::interval(std::time::Duration::from_secs(2));
                         psi_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                         psi_ticker.tick().await;
                         loop {
@@ -471,7 +467,8 @@ pub async fn media_tcp_server(
                     }
 
                     let null_pkt = MpegTsState::null_packet();
-                    let mut null_ticker = tokio::time::interval(std::time::Duration::from_millis(100));
+                    let mut null_ticker =
+                        tokio::time::interval(std::time::Duration::from_millis(100));
                     null_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
                     loop {
@@ -566,8 +563,7 @@ pub(crate) fn is_idr_frame(data: &[u8]) -> bool {
     let mut i = 0;
     while i + 3 <= data.len() {
         if data[i] == 0 && data[i + 1] == 0 {
-            let (sc_len, nal_off) = if i + 4 <= data.len() && data[i + 2] == 0 && data[i + 3] == 1
-            {
+            let (sc_len, nal_off) = if i + 4 <= data.len() && data[i + 2] == 0 && data[i + 3] == 1 {
                 (4usize, i + 4)
             } else if data[i + 2] == 1 {
                 (3usize, i + 3)

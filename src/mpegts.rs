@@ -127,8 +127,8 @@ fn make_ts_packet(
             pkt[9] = ((base >> 1) & 0xFF) as u8;
             pkt[10] = (((base & 1) << 7) | 0x7E) as u8; // reserved bits set
             pkt[11] = 0x00; // PCR extension = 0
-            // stuffing bytes (0xFF) already filled by the array initializer
-            // starting at pkt[12], for (stuff_needed) bytes.
+                            // stuffing bytes (0xFF) already filled by the array initializer
+                            // starting at pkt[12], for (stuff_needed) bytes.
         } else {
             // Flags byte = 0x00 (no special flags)
             pkt[5] = 0x00;
@@ -136,8 +136,7 @@ fn make_ts_packet(
         }
 
         let payload_start = 4 + af_total;
-        pkt[payload_start..payload_start + payload_chunk.len()]
-            .copy_from_slice(payload_chunk);
+        pkt[payload_start..payload_start + payload_chunk.len()].copy_from_slice(payload_chunk);
     }
 
     pkt
@@ -151,14 +150,18 @@ fn make_pat(counter: u8) -> [u8; TS_PACKET_SIZE] {
     //   section_number=0, last_section_number=0
     //   program_number=1, reserved=111, program_map_PID=PMT_PID
     let section: [u8; 12] = [
-        0x00,                                   // table_id
-        0xB0, 0x0D,                             // syntax + section_length = 13
-        0x00, 0x01,                             // transport_stream_id
-        0xC1,                                   // version=0, current=1
-        0x00, 0x00,                             // section/last_section numbers
-        0x00, 0x01,                             // program_number = 1
+        0x00, // table_id
+        0xB0,
+        0x0D, // syntax + section_length = 13
+        0x00,
+        0x01, // transport_stream_id
+        0xC1, // version=0, current=1
+        0x00,
+        0x00, // section/last_section numbers
+        0x00,
+        0x01,                                 // program_number = 1
         0xE0 | ((PMT_PID >> 8) & 0x1F) as u8, // reserved + PMT_PID high
-        (PMT_PID & 0xFF) as u8,                 // PMT_PID low
+        (PMT_PID & 0xFF) as u8,               // PMT_PID low
     ];
     let crc = mpeg_crc32(&section).to_be_bytes();
 
@@ -180,18 +183,23 @@ fn make_pmt(counter: u8, stream_type: u8) -> [u8; TS_PACKET_SIZE] {
     //   PCR_PID=ES_PID, program_info_length=0
     //   stream_type (caller-supplied), elementary_PID=ES_PID, ES_info_length=0
     let section: [u8; 17] = [
-        0x02,                                     // table_id
-        0xB0, 0x12,                               // syntax + section_length = 18
-        0x00, 0x01,                               // program_number
-        0xC1,                                     // version=0, current=1
-        0x00, 0x00,                               // section/last_section numbers
-        0xE0 | ((ES_PID >> 8) & 0x1F) as u8,     // reserved + PCR_PID high
-        (ES_PID & 0xFF) as u8,                    // PCR_PID low
-        0xF0, 0x00,                               // reserved + program_info_length=0
-        stream_type,                              // elementary stream type
-        0xE0 | ((ES_PID >> 8) & 0x1F) as u8,     // reserved + elementary_PID high
-        (ES_PID & 0xFF) as u8,                    // elementary_PID low
-        0xF0, 0x00,                               // reserved + ES_info_length=0
+        0x02, // table_id
+        0xB0,
+        0x12, // syntax + section_length = 18
+        0x00,
+        0x01, // program_number
+        0xC1, // version=0, current=1
+        0x00,
+        0x00,                                // section/last_section numbers
+        0xE0 | ((ES_PID >> 8) & 0x1F) as u8, // reserved + PCR_PID high
+        (ES_PID & 0xFF) as u8,               // PCR_PID low
+        0xF0,
+        0x00,                                // reserved + program_info_length=0
+        stream_type,                         // elementary stream type
+        0xE0 | ((ES_PID >> 8) & 0x1F) as u8, // reserved + elementary_PID high
+        (ES_PID & 0xFF) as u8,               // elementary_PID low
+        0xF0,
+        0x00, // reserved + ES_info_length=0
     ];
     let crc = mpeg_crc32(&section).to_be_bytes();
 
@@ -307,7 +315,7 @@ impl MpegTsState {
         pkt[1] = 0x1F; // PID high = 0x1F
         pkt[2] = 0xFF; // PID low  = 0xFF  → PID 0x1FFF (null packet)
         pkt[3] = 0x10; // payload only, counter = 0 (not significant for null PID)
-        // payload bytes already 0xFF
+                       // payload bytes already 0xFF
         pkt
     }
 
@@ -344,13 +352,20 @@ impl MpegTsState {
         // Build PES header (14 bytes):
         //   start_code(3) + stream_id(1) + PES_length(2) + flags(3) + PTS(5)
         let pes_header: [u8; 14] = [
-            0x00, 0x00, 0x01,   // start code
-            0xE0,               // stream_id: video
-            0x00, 0x00,         // PES_packet_length = 0 (unbounded; valid for video)
-            0x84,               // marker=10, data-alignment-indicator=1 for AU-aligned PES
-            0x80,               // PTS_DTS_flags = PTS only
-            0x05,               // PES_header_data_length = 5
-            pts_bytes[0], pts_bytes[1], pts_bytes[2], pts_bytes[3], pts_bytes[4],
+            0x00,
+            0x00,
+            0x01, // start code
+            0xE0, // stream_id: video
+            0x00,
+            0x00, // PES_packet_length = 0 (unbounded; valid for video)
+            0x84, // marker=10, data-alignment-indicator=1 for AU-aligned PES
+            0x80, // PTS_DTS_flags = PTS only
+            0x05, // PES_header_data_length = 5
+            pts_bytes[0],
+            pts_bytes[1],
+            pts_bytes[2],
+            pts_bytes[3],
+            pts_bytes[4],
         ];
 
         let total_data = pes_header.len() + data.len();
@@ -364,11 +379,7 @@ impl MpegTsState {
             first = false;
 
             // PCR adaptation field costs 8 bytes, leaving 176 bytes for payload.
-            let pcr = if is_first_pkt {
-                Some(pts_90k)
-            } else {
-                None
-            };
+            let pcr = if is_first_pkt { Some(pts_90k) } else { None };
             let pcr_af_cost = if pcr.is_some() { 8 } else { 0 };
             let max_chunk = 184 - pcr_af_cost;
 
@@ -412,14 +423,20 @@ impl MpegTsState {
         let pes_pkt_len = (8u16).saturating_add(data.len() as u16);
 
         let pes_header: [u8; 14] = [
-            0x00, 0x00, 0x01,              // start code
+            0x00,
+            0x00,
+            0x01, // start code
             stream_id,
-            (pes_pkt_len >> 8) as u8,      // PES_packet_length high
-            (pes_pkt_len & 0xFF) as u8,    // PES_packet_length low
-            0x84,                          // marker=10, data_alignment_indicator=1
-            0x80,                          // PTS_DTS_flags = PTS only
-            0x05,                          // PES_header_data_length = 5
-            pts_bytes[0], pts_bytes[1], pts_bytes[2], pts_bytes[3], pts_bytes[4],
+            (pes_pkt_len >> 8) as u8,   // PES_packet_length high
+            (pes_pkt_len & 0xFF) as u8, // PES_packet_length low
+            0x84,                       // marker=10, data_alignment_indicator=1
+            0x80,                       // PTS_DTS_flags = PTS only
+            0x05,                       // PES_header_data_length = 5
+            pts_bytes[0],
+            pts_bytes[1],
+            pts_bytes[2],
+            pts_bytes[3],
+            pts_bytes[4],
         ];
 
         let total_data = pes_header.len() + data.len();

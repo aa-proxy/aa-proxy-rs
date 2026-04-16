@@ -38,10 +38,10 @@ use crate::ev::EvTaskCommand;
 use crate::io_uring::Endpoint;
 use crate::io_uring::IoDevice;
 use crate::io_uring::BUFFER_LEN;
-use crate::media_tap::{reassemble_media_packet, tap_media_message, MediaFrameBuffer};
 pub use crate::media_tap::{
     media_tcp_server, AudioStreamConfig, MediaSink, MediaStreamInfo, MediaStreamKind,
 };
+use crate::media_tap::{reassemble_media_packet, tap_media_message, MediaFrameBuffer};
 
 // module name for logging engine
 fn get_name(proxy_type: ProxyType) -> String {
@@ -588,13 +588,14 @@ pub async fn pkt_modify_hook(
                         // audio offset = audio_type value + 2 (offsets 0-2 reserved for video)
                         let offset = svc.media_sink_service.audio_type().value() as u8 + 2;
                         if let Some(sink) = ctx.media_sinks.get(&offset).cloned() {
-                            let audio_config = svc.media_sink_service.audio_configs.first().map(|acfg| {
-                                AudioStreamConfig {
-                                    sample_rate: acfg.sampling_rate(),
-                                    channels: acfg.number_of_channels(),
-                                    bits: acfg.number_of_bits(),
-                                }
-                            });
+                            let audio_config =
+                                svc.media_sink_service.audio_configs.first().map(|acfg| {
+                                    AudioStreamConfig {
+                                        sample_rate: acfg.sampling_rate(),
+                                        channels: acfg.number_of_channels(),
+                                        bits: acfg.number_of_bits(),
+                                    }
+                                });
                             sink.set_audio_stream_info(
                                 svc.media_sink_service.available_type(),
                                 svc.media_sink_service.audio_type(),
@@ -1360,8 +1361,14 @@ mod tests {
         let middle = test_packet(0x21, 0, None, &[0xBB]);
         let last = test_packet(0x21, FRAME_TYPE_LAST, None, &[0xCC, 0xDD]);
 
-        assert_eq!(reassemble_media_packet(&mut ctx.media_fragments, &first), None);
-        assert_eq!(reassemble_media_packet(&mut ctx.media_fragments, &middle), None);
+        assert_eq!(
+            reassemble_media_packet(&mut ctx.media_fragments, &first),
+            None
+        );
+        assert_eq!(
+            reassemble_media_packet(&mut ctx.media_fragments, &middle),
+            None
+        );
         assert_eq!(
             reassemble_media_packet(&mut ctx.media_fragments, &last),
             Some(vec![0x00, 0x01, 0xAA, 0xBB, 0xCC, 0xDD])
@@ -1375,8 +1382,14 @@ mod tests {
         let first = test_packet(0x21, FRAME_TYPE_FIRST, Some(7), &[0x00, 0x01, 0xAA]);
         let last = test_packet(0x21, FRAME_TYPE_LAST, None, &[0xBB, 0xCC]);
 
-        assert_eq!(reassemble_media_packet(&mut ctx.media_fragments, &first), None);
-        assert_eq!(reassemble_media_packet(&mut ctx.media_fragments, &last), None);
+        assert_eq!(
+            reassemble_media_packet(&mut ctx.media_fragments, &first),
+            None
+        );
+        assert_eq!(
+            reassemble_media_packet(&mut ctx.media_fragments, &last),
+            None
+        );
         assert!(!ctx.media_fragments.contains_key(&0x21));
     }
 }
