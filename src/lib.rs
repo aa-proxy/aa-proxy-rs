@@ -7,9 +7,11 @@ pub mod config_types;
 pub mod ev;
 pub mod io_uring;
 pub mod led;
+pub mod media_tap;
 pub mod mitm;
 #[cfg(feature = "wasm-scripting")]
 pub mod script_wasm;
+pub mod mpegts;
 pub mod usb_gadget;
 pub mod usb_stream;
 pub mod web;

@@ -8,6 +8,7 @@ use humantime::format_duration;
 use mac_address::MacAddress;
 use simplelog::*;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::net::IpAddr;
 use std::rc::Rc;
@@ -50,7 +51,9 @@ use crate::ev::spawn_ev_client_task;
 use crate::ev::BatteryData;
 use crate::ev::EvTaskCommand;
 use crate::mitm::endpoint_reader;
+use crate::mitm::media_tcp_server;
 use crate::mitm::proxy;
+use crate::mitm::MediaSink;
 use crate::mitm::Packet;
 use crate::mitm::ProxyType;
 use crate::usb_stream;
@@ -344,6 +347,41 @@ pub async fn io_loop(
     let mut dhu_listener = Some(TcpListener::bind(bind_addr).unwrap());
     info!("{} 🛰️ DHU TCP server bound to: <u>{}</u>", NAME, bind_addr);
 
+    // create media tap sinks once — they persist across reconnects (requires mitm=true)
+    let persistent_media_sinks: HashMap<u8, MediaSink> = {
+        let config_snapshot = config.read().await.clone();
+        let mut map = HashMap::new();
+        if let Some(base_port) = config_snapshot.media_dump_base_port {
+            if !config_snapshot.mitm {
+                error!(
+                    "<red>media_dump_base_port is set but mitm = false — media tap disabled!</>"
+                );
+            } else {
+                let labels = [
+                    (0u8, "video-main"),
+                    (1u8, "video-cluster"),
+                    (2u8, "video-aux"),
+                    (3u8, "audio-guidance"),
+                    (4u8, "audio-system"),
+                    (5u8, "audio-media"),
+                    (6u8, "audio-telephony"),
+                ];
+                for (offset, label) in labels {
+                    let sink = MediaSink::new(128);
+                    let port = base_port + offset as u16;
+                    tokio::spawn(media_tcp_server(
+                        port,
+                        label.to_string(),
+                        sink.clone(),
+                        config_snapshot.media_wait_for_live_idr,
+                    ));
+                    map.insert(offset, sink);
+                }
+            }
+        }
+        map
+    };
+
     loop {
         // reload new config
         let config = config.read().await.clone();
@@ -520,6 +558,7 @@ pub async fn io_loop(
             ev_tx.clone(),
             Some(tx_hu.clone()),
             script_registry.clone(),
+            HashMap::new(),
         ));
         from_stream = tokio_uring::spawn(proxy(
             ProxyType::MobileDevice,
@@ -535,6 +574,7 @@ pub async fn io_loop(
             ev_tx.clone(),
             Some(tx_md.clone()),
             script_registry.clone(),
+            persistent_media_sinks.clone(),
         ));
 
         // Thread for monitoring transfer

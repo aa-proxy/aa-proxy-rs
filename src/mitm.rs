@@ -13,6 +13,7 @@ use anyhow::Context;
 use log::log_enabled;
 use openssl::ssl::{ErrorCode, Ssl, SslContextBuilder, SslFiletype, SslMethod};
 use simplelog::*;
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::fmt;
 use std::io::{Read, Write};
@@ -52,6 +53,10 @@ use crate::ev::EvTaskCommand;
 use crate::io_uring::Endpoint;
 use crate::io_uring::IoDevice;
 use crate::io_uring::BUFFER_LEN;
+pub use crate::media_tap::{
+    media_tcp_server, AudioStreamConfig, MediaSink, MediaStreamInfo, MediaStreamKind,
+};
+use crate::media_tap::{reassemble_media_packet, tap_media_message, MediaFrameBuffer};
 
 // module name for logging engine
 fn get_name(proxy_type: ProxyType) -> String {
@@ -88,6 +93,14 @@ pub struct ModifyContext {
     ev_tx: Sender<EvTaskCommand>,
     input_channel: Option<u8>,
     hu_tx: Option<Sender<Packet>>,
+    /// Offset→sink map (keys 0-6). Used only at SDR time to look up which sink
+    /// to assign to each real channel. Never used for tapping.
+    media_sinks: HashMap<u8, MediaSink>,
+    /// channel_id→sink map. Populated from SDR. Used for tapping data packets.
+    media_channels: HashMap<u8, MediaSink>,
+    /// Per-channel reassembly state for tapped media messages that span multiple
+    /// AA transport frames.
+    media_fragments: HashMap<u8, MediaFrameBuffer>,
 }
 
 #[derive(PartialEq, Copy, Clone, Debug)]
@@ -365,6 +378,7 @@ pub async fn pkt_modify_hook(
     proxy_type: ProxyType,
     pkt: &mut Packet,
     ctx: &mut ModifyContext,
+    tap_media: bool,
     sensor_channel: Arc<tokio::sync::Mutex<Option<u8>>>,
     input_channel: Arc<tokio::sync::Mutex<Option<u8>>>,
     last_battery: Arc<RwLock<Option<BatteryData>>>,
@@ -647,6 +661,17 @@ pub async fn pkt_modify_hook(
         }
     }
 
+    // tap media frames for debug streaming (only on MobileDevice path = phone → HU direction)
+    if tap_media && proxy_type == ProxyType::MobileDevice {
+        if let Some(frame_data) = reassemble_media_packet(&mut ctx.media_fragments, pkt) {
+            if frame_data.len() >= 2 {
+                if let Some(sink) = ctx.media_channels.get(&pkt.channel).cloned() {
+                    tap_media_message(proxy_type, pkt, &sink, &frame_data).await;
+                }
+            }
+        }
+    }
+
     if pkt.channel != 0 {
         return Ok(false);
     }
@@ -673,10 +698,6 @@ pub async fn pkt_modify_hook(
             }
         }
         MESSAGE_SERVICE_DISCOVERY_RESPONSE => {
-            // rewrite HeadUnit message only, exit if it is MobileDevice
-            if proxy_type == ProxyType::MobileDevice {
-                return Ok(false);
-            }
             let mut msg = match ServiceDiscoveryResponse::parse_from_bytes(data) {
                 Err(e) => {
                     error!(
@@ -688,6 +709,83 @@ pub async fn pkt_modify_hook(
                 }
                 Ok(msg) => msg,
             };
+
+            // Populate media_channels (channel_id→sink) from the offset→sink map.
+            // Must run in MobileDevice context where the sinks are held —
+            // the SDR response from HU passes through proxy(MobileDevice).rxr first.
+            if proxy_type == ProxyType::MobileDevice && !ctx.media_sinks.is_empty() {
+                for svc in msg.services.iter() {
+                    let ch = svc.id() as u8;
+                    if !svc.media_sink_service.video_configs.is_empty() {
+                        let offset = svc.media_sink_service.display_type().value() as u8;
+                        if let Some(sink) = ctx.media_sinks.get(&offset).cloned() {
+                            sink.set_video_stream_info(
+                                svc.media_sink_service.available_type(),
+                                svc.media_sink_service.display_type(),
+                            )
+                            .await;
+                            ctx.media_channels.insert(ch, sink);
+                            info!(
+                                "{} <blue>media tap:</> video channel <b>{:#04x}</> → port offset <b>{}</> ({:?}, {:?})",
+                                get_name(proxy_type),
+                                ch,
+                                offset,
+                                svc.media_sink_service.available_type(),
+                                svc.media_sink_service.display_type()
+                            );
+                        }
+                    } else if !svc.media_sink_service.audio_configs.is_empty()
+                        || svc.media_sink_service.audio_type.is_some()
+                    {
+                        // audio offset = audio_type value + 2 (offsets 0-2 reserved for video)
+                        let offset = svc.media_sink_service.audio_type().value() as u8 + 2;
+                        if let Some(sink) = ctx.media_sinks.get(&offset).cloned() {
+                            let audio_config =
+                                svc.media_sink_service.audio_configs.first().map(|acfg| {
+                                    AudioStreamConfig {
+                                        sample_rate: acfg.sampling_rate(),
+                                        channels: acfg.number_of_channels(),
+                                        bits: acfg.number_of_bits(),
+                                    }
+                                });
+                            sink.set_audio_stream_info(
+                                svc.media_sink_service.available_type(),
+                                svc.media_sink_service.audio_type(),
+                                audio_config,
+                            )
+                            .await;
+                            ctx.media_channels.insert(ch, sink);
+                            if let Some(acfg) = audio_config {
+                                info!(
+                                    "{} <blue>media tap:</> audio channel <b>{:#04x}</> → port offset <b>{}</> ({:?}, {:?}, {}Hz, {}ch, {}bit)",
+                                    get_name(proxy_type),
+                                    ch,
+                                    offset,
+                                    svc.media_sink_service.available_type(),
+                                    svc.media_sink_service.audio_type(),
+                                    acfg.sample_rate,
+                                    acfg.channels,
+                                    acfg.bits
+                                );
+                            } else {
+                                info!(
+                                    "{} <blue>media tap:</> audio channel <b>{:#04x}</> → port offset <b>{}</> ({:?}, {:?})",
+                                    get_name(proxy_type),
+                                    ch,
+                                    offset,
+                                    svc.media_sink_service.available_type(),
+                                    svc.media_sink_service.audio_type()
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            // SDR rewriting is HeadUnit-only; MobileDevice sees SDR read-only (for channel map above)
+            if proxy_type == ProxyType::MobileDevice {
+                return Ok(false);
+            }
 
             // DPI
             if cfg.dpi > 0 {
@@ -1250,6 +1348,7 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
     ev_tx: Sender<EvTaskCommand>,
     hu_tx: Option<Sender<Packet>>,
     script_registry: Option<Arc<ScriptRegistry>>,
+    media_sinks: HashMap<u8, MediaSink>,
 ) -> Result<()> {
     let cfg = config.read().await.clone();
     let passthrough = !cfg.mitm;
@@ -1403,6 +1502,9 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
         audio_channels: vec![],
         ev_tx,
         hu_tx,
+        media_sinks,
+        media_channels: HashMap::new(),
+        media_fragments: HashMap::new(),
     };
     loop {
         tokio::select! {
@@ -1412,6 +1514,7 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
                 proxy_type,
                 &mut pkt,
                 &mut ctx,
+                false,
                 sensor_channel.clone(),
                 input_channel.clone(),
                 last_battery.clone(),
@@ -1456,6 +1559,7 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
                         proxy_type,
                         &mut pkt,
                         &mut ctx,
+                        proxy_type == ProxyType::MobileDevice,
                         sensor_channel.clone(),
                         input_channel.clone(),
                         last_battery.clone(),
@@ -1477,5 +1581,88 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
             }
         }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::mpsc;
+
+    fn test_ctx() -> ModifyContext {
+        let (ev_tx, _) = mpsc::channel(1);
+        ModifyContext {
+            sensor_channel: None,
+            nav_channel: None,
+            audio_channels: vec![],
+            ev_tx,
+            media_sinks: HashMap::new(),
+            media_channels: HashMap::new(),
+            media_fragments: HashMap::new(),
+        }
+    }
+
+    fn test_packet(channel: u8, flags: u8, final_length: Option<u32>, payload: &[u8]) -> Packet {
+        Packet {
+            channel,
+            flags,
+            final_length,
+            payload: payload.to_vec(),
+        }
+    }
+
+    #[test]
+    fn media_tap_keeps_single_frame_packets_intact() {
+        let mut ctx = test_ctx();
+        let pkt = test_packet(
+            0x21,
+            FRAME_TYPE_FIRST | FRAME_TYPE_LAST,
+            None,
+            &[0x00, 0x01, 0xAA, 0xBB],
+        );
+
+        let assembled = reassemble_media_packet(&mut ctx.media_fragments, &pkt);
+
+        assert_eq!(assembled, Some(vec![0x00, 0x01, 0xAA, 0xBB]));
+        assert!(!ctx.media_fragments.contains_key(&0x21));
+    }
+
+    #[test]
+    fn media_tap_reassembles_fragmented_packets() {
+        let mut ctx = test_ctx();
+        let first = test_packet(0x21, FRAME_TYPE_FIRST, Some(6), &[0x00, 0x01, 0xAA]);
+        let middle = test_packet(0x21, 0, None, &[0xBB]);
+        let last = test_packet(0x21, FRAME_TYPE_LAST, None, &[0xCC, 0xDD]);
+
+        assert_eq!(
+            reassemble_media_packet(&mut ctx.media_fragments, &first),
+            None
+        );
+        assert_eq!(
+            reassemble_media_packet(&mut ctx.media_fragments, &middle),
+            None
+        );
+        assert_eq!(
+            reassemble_media_packet(&mut ctx.media_fragments, &last),
+            Some(vec![0x00, 0x01, 0xAA, 0xBB, 0xCC, 0xDD])
+        );
+        assert!(!ctx.media_fragments.contains_key(&0x21));
+    }
+
+    #[test]
+    fn media_tap_drops_length_mismatches() {
+        let mut ctx = test_ctx();
+        let first = test_packet(0x21, FRAME_TYPE_FIRST, Some(7), &[0x00, 0x01, 0xAA]);
+        let last = test_packet(0x21, FRAME_TYPE_LAST, None, &[0xBB, 0xCC]);
+
+        assert_eq!(
+            reassemble_media_packet(&mut ctx.media_fragments, &first),
+            None
+        );
+        assert_eq!(
+            reassemble_media_packet(&mut ctx.media_fragments, &last),
+            None
+        );
+        assert!(!ctx.media_fragments.contains_key(&0x21));
     }
 }

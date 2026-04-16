@@ -134,6 +134,16 @@ pub struct AppConfig {
     pub startup_delay: u8,
     pub ble_password: String,
     pub external_antenna: bool,
+    /// Base TCP port for media stream tapping. One port is allocated per media service
+    /// using fixed offsets: +0 video main, +1 video cluster, +2 video aux, +3 TTS audio,
+    /// +4 system audio, +5 media audio, +6 telephony audio.
+    /// Requires mitm = true. Connect with e.g. `vlc tcp://127.0.0.1:12345`.
+    #[serde(default)]
+    pub media_dump_base_port: Option<u16>,
+    /// Startup behavior for media TCP tap clients.
+    /// true  = wait for a fresh live IDR before forwarding inter-frames (clean decode)
+    /// false = forward immediately after cached-IDR preview (lower latency, may artifact)
+    pub media_wait_for_live_idr: bool,
 
     #[serde(skip)]
     pub action_requested: Option<Action>,
@@ -285,6 +295,8 @@ impl Default for AppConfig {
             startup_delay: 0,
             ble_password: String::new(),
             external_antenna: false,
+            media_dump_base_port: None,
+            media_wait_for_live_idr: true,
         }
     }
 }
@@ -371,6 +383,10 @@ impl AppConfig {
         doc["startup_delay"] = value(self.startup_delay as i64);
         doc["ble_password"] = value(&self.ble_password);
         doc["external_antenna"] = value(self.external_antenna);
+        if let Some(port) = self.media_dump_base_port {
+            doc["media_dump_base_port"] = value(port as i64);
+        }
+        doc["media_wait_for_live_idr"] = value(self.media_wait_for_live_idr);
 
         let _ = fs::write(config_file, doc.to_string());
     }
