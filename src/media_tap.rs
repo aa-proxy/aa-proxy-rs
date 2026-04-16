@@ -101,8 +101,9 @@ impl MediaSink {
     }
 
     pub async fn send_frame(&self, pts_us: u64, data: Vec<u8>) {
+        let stream_info = self.get_stream_info().await;
         let is_video = matches!(
-            self.get_stream_info().await,
+            stream_info,
             Some(MediaStreamInfo {
                 kind: MediaStreamKind::Video { .. },
                 ..
@@ -113,13 +114,13 @@ impl MediaSink {
             let mut cached = self.cached_video.lock().await;
             if cached.pending_pts_us == Some(pts_us) {
                 cached.pending_au.extend_from_slice(&data);
-            } else {
-                if let Some(prev_pts_us) = cached.pending_pts_us.replace(pts_us) {
-                    let au = std::mem::take(&mut cached.pending_au);
-                    if is_idr_frame(&au) {
-                        cached.last_idr = Some(Arc::new((prev_pts_us, au)));
-                    }
+            } else if let Some(prev_pts_us) = cached.pending_pts_us.replace(pts_us) {
+                let au = std::mem::take(&mut cached.pending_au);
+                if is_idr_frame(&au) {
+                    cached.last_idr = Some(Arc::new((prev_pts_us, au)));
                 }
+                cached.pending_au.extend_from_slice(&data);
+            } else {
                 cached.pending_au.extend_from_slice(&data);
             }
         }
