@@ -46,6 +46,7 @@ use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
 use tokio::sync::RwLock;
 use tokio_util::io::ReaderStream;
+use toml_edit::{value, DocumentMut};
 
 const TEMPLATE: &str = include_str!("../static/index.html");
 const PICO_CSS: &str = include_str!("../static/pico.min.css");
@@ -70,6 +71,14 @@ pub struct InjectRotaryData {
     pub delta: i32,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct UpdateConfigEntry {
+    /// Configuration key name (e.g., "dpi", "ssid", "mitm")
+    pub key: String,
+    /// New value for the configuration key
+    pub value: serde_json::Value,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub config: SharedConfig,
@@ -85,6 +94,7 @@ pub fn app(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/config", get(get_config).post(set_config))
+        .route("/config-entry", post(update_config_entry))
         .route("/config-data", get(get_config_data))
         .route("/download", get(download_handler))
         .route("/restart", post(restart_handler))
@@ -863,6 +873,110 @@ pub async fn set_time_handler(body: RawBody) -> impl IntoResponse {
 
     info!("{} 🕰️ system time set to: <b>{}</>", NAME, utc);
     (StatusCode::OK, format!("System time set to {utc}")).into_response()
+}
+
+async fn update_config_entry(
+    State(state): State<Arc<AppState>>,
+    Json(entry): Json<UpdateConfigEntry>,
+) -> impl IntoResponse {
+    let mut cfg = state.config.write().await;
+
+    let config_path = state.config_file.to_path_buf();
+    let raw = fs::read_to_string(&config_path).await.unwrap_or_default();
+    let mut doc = raw
+        .parse::<DocumentMut>()
+        .unwrap_or_else(|_| DocumentMut::new());
+
+    // Check if the key exists in the TOML document
+    if doc.get(&entry.key).is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "status": "error",
+                "key": entry.key,
+                "message": format!("Unknown configuration key: '{}'", entry.key)
+            })),
+        )
+            .into_response();
+    }
+
+    // Convert serde_json::Value to toml_edit value
+    let toml_val = match &entry.value {
+        serde_json::Value::Bool(b) => value(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                value(i)
+            } else if let Some(f) = n.as_f64() {
+                value(f)
+            } else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "status": "error",
+                        "key": entry.key,
+                        "message": "Unsupported number type"
+                    })),
+                )
+                    .into_response();
+            }
+        }
+        serde_json::Value::String(s) => value(s.as_str()),
+        serde_json::Value::Null => value(""),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "status": "error",
+                    "key": entry.key,
+                    "message": "Unsupported value type (arrays/objects not allowed)"
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    doc[&entry.key] = toml_val;
+
+    if let Err(e) = fs::write(&config_path, doc.to_string()).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "status": "error",
+                "message": format!("Failed to write config file: {}", e)
+            })),
+        )
+            .into_response();
+    }
+
+    match AppConfig::load(config_path) {
+        Ok(new_cfg) => {
+            *cfg = new_cfg;
+            info!(
+                "{} Config entry updated: {} = {}",
+                NAME, entry.key, entry.value
+            );
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "status": "success",
+                    "key": entry.key,
+                    "value": entry.value
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            warn!("{} Config reload failed after update: {}", NAME, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "message": format!("Config written but reload failed: {}", e)
+                })),
+            )
+                .into_response()
+        }
+    }
 }
 
 async fn set_config(
