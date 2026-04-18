@@ -114,6 +114,7 @@ pub struct AppConfig {
     pub wired: Option<UsbId>,
     pub dhu: bool,
     pub ev: bool,
+    pub odometer: bool,
     pub remove_bluetooth: bool,
     pub remove_wifi: bool,
     pub change_usb_order: bool,
@@ -260,6 +261,7 @@ impl Default for AppConfig {
             wired: None,
             dhu: false,
             ev: false,
+            odometer: false,
             remove_bluetooth: false,
             remove_wifi: false,
             change_usb_order: false,
@@ -362,6 +364,7 @@ impl AppConfig {
         doc["wired"] = value(self.wired.as_ref().map_or(String::new(), |w| w.to_string()));
         doc["dhu"] = value(self.dhu);
         doc["ev"] = value(self.ev);
+        doc["odometer"] = value(self.odometer);
         doc["remove_bluetooth"] = value(self.remove_bluetooth);
         doc["remove_wifi"] = value(self.remove_wifi);
         doc["change_usb_order"] = value(self.change_usb_order);

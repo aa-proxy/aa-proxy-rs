@@ -10,6 +10,7 @@ use crate::mitm::protos::KeyCode;
 use crate::mitm::send_key_event;
 use crate::mitm::send_rotary_event;
 use crate::mitm::Packet;
+use crate::mitm::{send_odometer_data, OdometerData};
 use axum::{
     body::Body,
     extract::{Query, RawBody, State},
@@ -88,6 +89,7 @@ pub struct AppState {
     pub sensor_channel: Arc<Mutex<Option<u8>>>,
     pub input_channel: Arc<Mutex<Option<u8>>>,
     pub last_battery_data: Arc<RwLock<Option<BatteryData>>>,
+    pub last_odometer_data: Arc<RwLock<Option<OdometerData>>>,
 }
 
 pub fn app(state: Arc<AppState>) -> Router {
@@ -104,6 +106,8 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/certs-info", get(certs_info_handler))
         .route("/battery", post(battery_handler))
         .route("/battery-status", get(battery_status_handler))
+        .route("/odometer", post(odometer_handler))
+        .route("/odometer-status", get(odometer_status_handler))
         .route("/inject_event", post(inject_event_handler))
         .route("/inject_rotary", post(inject_rotary_handler))
         .route("/userdata-backup", get(userdata_backup_handler))
@@ -294,6 +298,41 @@ async fn battery_status_handler(State(state): State<Arc<AppState>>) -> impl Into
     match &*data {
         Some(d) => Json(serde_json::to_value(d).unwrap()).into_response(),
         None => (StatusCode::NO_CONTENT, "No battery data yet").into_response(),
+    }
+}
+
+pub async fn odometer_handler(
+    State(state): State<Arc<AppState>>,
+    Json(data): Json<OdometerData>,
+) -> impl IntoResponse {
+    if data.odometer_km < 0.0 {
+        return (StatusCode::BAD_REQUEST, "odometer_km must be >= 0.0").into_response();
+    }
+
+    info!("{} Received odometer data: {:?}", NAME, data);
+
+    if let Some(ch) = *state.sensor_channel.lock().await {
+        if let Some(tx) = state.tx.lock().await.clone() {
+            if let Err(e) = send_odometer_data(tx, ch, data, state.last_odometer_data.clone()).await
+            {
+                error!("{} Odometer error: {}", NAME, e);
+            }
+        }
+    } else {
+        warn!(
+            "{} Not sending odometer because no sensor channel yet",
+            NAME
+        );
+    }
+
+    (StatusCode::OK, "OK").into_response()
+}
+
+async fn odometer_status_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let data = state.last_odometer_data.read().await;
+    match &*data {
+        Some(d) => Json(serde_json::to_value(d).unwrap()).into_response(),
+        None => (StatusCode::NO_CONTENT, "No odometer data yet").into_response(),
     }
 }
 

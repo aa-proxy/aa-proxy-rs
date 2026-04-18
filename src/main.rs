@@ -8,6 +8,7 @@ use aa_proxy_rs::config::{DEFAULT_WLAN_ADDR, TCP_SERVER_PORT};
 use aa_proxy_rs::ev::BatteryData;
 use aa_proxy_rs::io_uring::io_loop;
 use aa_proxy_rs::led::{LedColor, LedManager, LedMode};
+use aa_proxy_rs::mitm::OdometerData;
 use aa_proxy_rs::mitm::Packet;
 #[cfg(feature = "wasm-scripting")]
 use aa_proxy_rs::script_wasm::start_wasm_engine;
@@ -201,6 +202,7 @@ async fn tokio_main(
     sensor_channel: Arc<Mutex<Option<u8>>>,
     input_channel: Arc<Mutex<Option<u8>>>,
     last_battery_data: Arc<RwLock<Option<BatteryData>>>,
+    last_odometer_data: Arc<RwLock<Option<OdometerData>>>,
     led_support: bool,
     button_support: bool,
     profile_connected: Arc<AtomicBool>,
@@ -215,6 +217,7 @@ async fn tokio_main(
         sensor_channel,
         input_channel,
         last_battery_data,
+        last_odometer_data,
     };
 
     // LED support
@@ -594,6 +597,7 @@ fn main() -> Result<()> {
     let profile_connected = Arc::new(AtomicBool::new(false));
     let last_battery_data = Arc::new(RwLock::new(None));
     let last_battery_data_cloned = last_battery_data.clone();
+    let last_odometer_data = Arc::new(RwLock::new(None));
 
     // build and spawn main tokio runtime
     let mut runtime = Builder::new_multi_thread().enable_all().build().unwrap();
@@ -616,6 +620,7 @@ fn main() -> Result<()> {
             sensor_channel_cloned,
             input_channel_cloned,
             last_battery_data_cloned,
+            last_odometer_data,
             led_support,
             button_support,
             profile_connected_cloned,

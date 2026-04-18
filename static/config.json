@@ -198,6 +198,10 @@
         "waze_lht_workaround": {
           "typ": "boolean",
           "description": "Enable a Waze workaround for LHT (Left-Hand Traffic) countries by swapping U_TURN_LEFT with U_TURN_RIGHT in navigation and HUD."
+        },
+        "odometer": {
+          "typ": "boolean",
+          "description": "Enable odometer sensor reporting (for head units that don't provide this data). Once active, the current reading can be pushed via POST /odometer (value in km)."
         }
       }
     },

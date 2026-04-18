@@ -12,6 +12,7 @@ type ScriptRegistry = ();
 use anyhow::Context;
 use log::log_enabled;
 use openssl::ssl::{ErrorCode, Ssl, SslContextBuilder, SslFiletype, SslMethod};
+use serde::{Deserialize, Serialize};
 use simplelog::*;
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -101,6 +102,14 @@ pub struct ModifyContext {
     /// Per-channel reassembly state for tapped media messages that span multiple
     /// AA transport frames.
     media_fragments: HashMap<u8, MediaFrameBuffer>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct OdometerData {
+    /// Odometer reading in kilometers
+    pub odometer_km: f32,
+    /// Trip odometer in kilometers (optional)
+    pub trip_km: Option<f32>,
 }
 
 #[derive(PartialEq, Copy, Clone, Debug)]
@@ -855,7 +864,7 @@ pub async fn pkt_modify_hook(
             }
 
             // save sensor channel in context
-            if cfg.ev || cfg.video_in_motion {
+            if cfg.ev || cfg.video_in_motion || cfg.odometer {
                 if let Some(svc) = msg
                     .services
                     .iter()
@@ -1041,6 +1050,28 @@ pub async fn pkt_modify_hook(
                 }
             }
 
+            // Odometer sensor
+            if cfg.odometer {
+                if let Some(svc) = msg
+                    .services
+                    .iter_mut()
+                    .find(|svc| !svc.sensor_source_service.sensors.is_empty())
+                {
+                    info!(
+                        "{} <yellow>{:?}</>: adding <b><green>ODOMETER</> sensor...",
+                        get_name(proxy_type),
+                        control.unwrap(),
+                    );
+                    let mut sensor = Sensor::new();
+                    sensor.set_sensor_type(SENSOR_ODOMETER);
+                    svc.sensor_source_service
+                        .as_mut()
+                        .unwrap()
+                        .sensors
+                        .push(sensor);
+                }
+            }
+
             debug!(
                 "{} SDR after changes: {}",
                 get_name(proxy_type),
@@ -1149,6 +1180,42 @@ pub async fn send_rotary_event(tx: Sender<Packet>, input_ch: u8, delta: i32) -> 
     tx.send(pkt).await?;
     info!("mitm/web: injecting ROTARY delta={}", delta);
 
+    Ok(())
+}
+
+pub async fn send_odometer_data(
+    tx: Sender<Packet>,
+    sensor_ch: u8,
+    data: OdometerData,
+    last_odometer: Arc<RwLock<Option<OdometerData>>>,
+) -> Result<()> {
+    let mut msg = SensorBatch::new();
+
+    let mut od = protos::OdometerData::new();
+    // kms_e1 stores kilometers in tenths (0.1 km resolution), so multiply by 10
+    od.kms_e1 = Some((data.odometer_km * 10.0).round() as i32);
+    if let Some(trip) = data.trip_km {
+        od.trip_kms_e1 = Some((trip * 10.0).round() as i32);
+    }
+    msg.odometer_data.push(od);
+
+    let mut payload: Vec<u8> = msg.write_to_bytes()?;
+    payload.insert(0, ((SENSOR_MESSAGE_BATCH as u16) >> 8) as u8);
+    payload.insert(1, ((SENSOR_MESSAGE_BATCH as u16) & 0xff) as u8);
+
+    let pkt = Packet {
+        channel: sensor_ch,
+        flags: ENCRYPTED | FRAME_TYPE_FIRST | FRAME_TYPE_LAST,
+        final_length: None,
+        payload,
+    };
+    tx.send(pkt).await?;
+    info!(
+        "mitm/web: injecting ODOMETER packet ({} km, trip: {:?} km)...",
+        data.odometer_km, data.trip_km
+    );
+
+    *last_odometer.write().await = Some(data);
     Ok(())
 }
 
