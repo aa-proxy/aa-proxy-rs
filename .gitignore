@@ -1,3 +1,4 @@
 /target
 /output
 config.toml
+.DS_Store

@@ -202,6 +202,10 @@
         "odometer": {
           "typ": "boolean",
           "description": "Enable odometer sensor reporting (for head units that don't provide this data). Once active, the current reading can be pushed via POST /odometer (value in km)."
+        },
+        "collect_speed": {
+          "typ": "boolean",
+          "description": "Enable speed collection from speed sensor for companion app"
         }
       }
     },

@@ -13,7 +13,7 @@ use crate::mitm::Packet;
 use crate::mitm::{send_odometer_data, OdometerData};
 use axum::{
     body::Body,
-    extract::{Query, RawBody, State},
+    extract::{Query, RawBody, State, ws::{Message, WebSocket, WebSocketUpgrade}},
     http::{header, HeaderMap, Response, StatusCode},
     response::{Html, IntoResponse},
     routing::{get, post},
@@ -23,11 +23,11 @@ use chrono::Local;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use futures::StreamExt;
+use futures::{SinkExt, StreamExt};
 use glob::glob;
 use hyper::body::to_bytes;
 use regex::Regex;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use simplelog::*;
@@ -43,6 +43,7 @@ use tokio::fs::File;
 use tokio::io::duplex;
 use tokio::io::AsyncWriteExt;
 use tokio::io::DuplexStream;
+use tokio::sync::broadcast;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
 use tokio::sync::RwLock;
@@ -80,6 +81,28 @@ pub struct UpdateConfigEntry {
     pub value: serde_json::Value,
 }
 
+#[derive(Clone, Debug)]
+pub struct ServerEvent {
+    pub topic: String,
+    pub payload: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ClientWsMessage {
+    Subscribe { topic: String },
+    Unsubscribe { topic: String },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ServerWsMessage {
+    Event { topic: String, payload: String },
+    Subscribed { topic: String },
+    Unsubscribed { topic: String },
+    Error { message: String },
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub config: SharedConfig,
@@ -90,6 +113,8 @@ pub struct AppState {
     pub input_channel: Arc<Mutex<Option<u8>>>,
     pub last_battery_data: Arc<RwLock<Option<BatteryData>>>,
     pub last_odometer_data: Arc<RwLock<Option<OdometerData>>>,
+    pub last_speed: Arc<RwLock<Option<u32>>>,
+    pub ws_event_tx: broadcast::Sender<ServerEvent>,
 }
 
 pub fn app(state: Arc<AppState>) -> Router {
@@ -114,6 +139,10 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/userdata-restore", post(userdata_restore_handler))
         .route("/factory-reset", post(factory_reset_handler))
         .route("/set-time", post(set_time_handler))
+        .route("/speed", get(speed_handler))
+
+        .route("/ws", get(ws_handler))
+
         .with_state(state)
 }
 
@@ -313,7 +342,7 @@ pub async fn odometer_handler(
 
     if let Some(ch) = *state.sensor_channel.lock().await {
         if let Some(tx) = state.tx.lock().await.clone() {
-            if let Err(e) = send_odometer_data(tx, ch, data, state.last_odometer_data.clone()).await
+            if let Err(e) = send_odometer_data(tx, ch, data, state.last_odometer_data.clone(), state.ws_event_tx.clone()).await
             {
                 error!("{} Odometer error: {}", NAME, e);
             }
@@ -855,6 +884,15 @@ pub async fn factory_reset_handler(State(state): State<Arc<AppState>>) -> impl I
     )
 }
 
+async fn speed_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let data = state.last_speed.read().await;
+    if let Some(d) = *data {
+        Json(serde_json::json!({ "speed": d })).into_response()
+    } else {
+        (StatusCode::NO_CONTENT, "No speed data yet").into_response()
+    }
+}
+
 async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let cfg = state.config.read().await.clone();
     Json(cfg)
@@ -1028,4 +1066,104 @@ async fn set_config(
         cfg.save((&state.config_file).to_path_buf());
     }
     Json(new_cfg)
+}
+
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    debug!("WS Handler called");
+    ws.on_upgrade(move |socket| handle_socket(socket, state))
+}
+
+async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
+    let (mut sender, mut receiver) = socket.split();
+    let mut ws_event_rx = state.ws_event_tx.subscribe();
+    let mut subscriptions: HashSet<String> = HashSet::new();
+
+    let hello = ServerWsMessage::Event {
+        topic: "system".to_string(),
+        payload: "connected".to_string(),
+    };
+
+    if sender
+        .send(Message::Text(serde_json::to_string(&hello).unwrap()))
+        .await
+        .is_err()
+    {
+        return;
+    }
+
+    loop {
+        tokio::select! {
+            incoming = receiver.next() => {
+                match incoming {
+                    Some(Ok(Message::Text(text))) => {
+                        match serde_json::from_str::<ClientWsMessage>(&text) {
+                            Ok(ClientWsMessage::Subscribe { topic }) => {
+                                subscriptions.insert(topic.clone());
+                                let msg = ServerWsMessage::Subscribed { topic };
+                                if sender.send(Message::Text(serde_json::to_string(&msg).unwrap())).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Ok(ClientWsMessage::Unsubscribe { topic }) => {
+                                subscriptions.remove(&topic);
+                                let msg = ServerWsMessage::Unsubscribed { topic };
+                                if sender.send(Message::Text(serde_json::to_string(&msg).unwrap())).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Err(_) => {
+                                let msg = ServerWsMessage::Error {
+                                    message: "invalid json message".to_string(),
+                                };
+                                if sender.send(Message::Text(serde_json::to_string(&msg).unwrap())).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Some(Ok(Message::Binary(_))) => {}
+                    Some(Ok(Message::Ping(payload))) => {
+                        if sender.send(Message::Pong(payload)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Pong(_))) => {}
+                    Some(Ok(Message::Close(_))) => break,
+                    Some(Err(_)) => break,
+                    None => break,
+                }
+            }
+
+            event = ws_event_rx.recv() => {
+                match event {
+                    Ok(ev) => {
+                        if subscriptions.contains(&ev.topic) {
+                            let msg = ServerWsMessage::Event {
+                                topic: ev.topic,
+                                payload: ev.payload,
+                            };
+
+                            if sender.send(Message::Text(serde_json::to_string(&msg).unwrap())).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        let msg = ServerWsMessage::Error {
+                            message: "event stream lagged".to_string(),
+                        };
+                        if sender.send(Message::Text(serde_json::to_string(&msg).unwrap())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        break;
+                    }
+                }
+            }
+        }
+    }
 }

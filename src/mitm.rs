@@ -9,6 +9,7 @@ use crate::script_wasm::{
 };
 #[cfg(not(feature = "wasm-scripting"))]
 type ScriptRegistry = ();
+use crate::web::ServerEvent;
 use anyhow::Context;
 use log::log_enabled;
 use openssl::ssl::{ErrorCode, Ssl, SslContextBuilder, SslFiletype, SslMethod};
@@ -24,6 +25,7 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::broadcast::Sender as BroadcastSender;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::RwLock;
 use tokio::time::timeout;
@@ -391,9 +393,11 @@ pub async fn pkt_modify_hook(
     sensor_channel: Arc<tokio::sync::Mutex<Option<u8>>>,
     input_channel: Arc<tokio::sync::Mutex<Option<u8>>>,
     last_battery: Arc<RwLock<Option<BatteryData>>>,
+    last_speed: Arc<RwLock<Option<u32>>>,
     cfg: &AppConfig,
     config: &mut SharedConfig,
     script_registry: Option<&ScriptRegistry>,
+    ws_event_tx: BroadcastSender<ServerEvent>,
 ) -> Result<bool> {
     // if for some reason we have too small packet, bail out
     if pkt.payload.len() < 2 {
@@ -560,6 +564,17 @@ pub async fn pkt_modify_hook(
                             pkt.payload = msg.write_to_bytes()?;
                             pkt.payload.insert(0, (message_id >> 8) as u8);
                             pkt.payload.insert(1, (message_id & 0xff) as u8);
+                        }
+
+                        if cfg.collect_speed
+                        {
+                            if !msg.speed_data.is_empty() {
+                                *last_speed.write().await = Some(msg.speed_data[0].speed_e3().try_into().unwrap());
+                                let _ = ws_event_tx.send(ServerEvent {
+                                    topic: "speed".to_string(),
+                                    payload: msg.speed_data[0].speed_e3().to_string(),
+                                });
+                            }
                         }
 
                         // Parse fuel_data from HU SensorBatch (HU proxy only).
@@ -1188,6 +1203,7 @@ pub async fn send_odometer_data(
     sensor_ch: u8,
     data: OdometerData,
     last_odometer: Arc<RwLock<Option<OdometerData>>>,
+    ws_event_tx: BroadcastSender<ServerEvent>,
 ) -> Result<()> {
     let mut msg = SensorBatch::new();
 
@@ -1197,7 +1213,21 @@ pub async fn send_odometer_data(
     if let Some(trip) = data.trip_km {
         od.trip_kms_e1 = Some((trip * 10.0).round() as i32);
     }
+
+    let od_json = serde_json::json!({
+        "kms": od.kms_e1,
+        "trip_kms": od.trip_kms_e1,
+    });
+
     msg.odometer_data.push(od);
+
+    let payload = od_json.to_string();
+
+    //Send to ws    
+    let _ = ws_event_tx.send(ServerEvent {
+        topic: "odometer".to_string(),
+        payload: payload,
+    });
 
     let mut payload: Vec<u8> = msg.write_to_bytes()?;
     payload.insert(0, ((SENSOR_MESSAGE_BATCH as u16) >> 8) as u8);
@@ -1412,10 +1442,12 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
     sensor_channel: Arc<tokio::sync::Mutex<Option<u8>>>,
     input_channel: Arc<tokio::sync::Mutex<Option<u8>>>,
     last_battery: Arc<RwLock<Option<BatteryData>>>,
+    last_speed: Arc<RwLock<Option<u32>>>,
     ev_tx: Sender<EvTaskCommand>,
     hu_tx: Option<Sender<Packet>>,
     script_registry: Option<Arc<ScriptRegistry>>,
     media_sinks: HashMap<u8, MediaSink>,
+    ws_event_tx: BroadcastSender<ServerEvent>,
 ) -> Result<()> {
     let cfg = config.read().await.clone();
     let passthrough = !cfg.mitm;
@@ -1585,9 +1617,11 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
                 sensor_channel.clone(),
                 input_channel.clone(),
                 last_battery.clone(),
+                last_speed.clone(),
                 &cfg,
                 &mut config,
                 script_registry.as_deref(),
+                ws_event_tx.clone()
             )
             .await?;
             let _ = pkt_debug(
@@ -1630,9 +1664,11 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
                         sensor_channel.clone(),
                         input_channel.clone(),
                         last_battery.clone(),
+                        last_speed.clone(),
                         &cfg,
                         &mut config,
                         script_registry.as_deref(),
+                        ws_event_tx.clone(),
                     )
                     .await?;
                     let _ = pkt_debug(
