@@ -10,6 +10,7 @@ use aa_proxy_rs::io_uring::io_loop;
 use aa_proxy_rs::led::{LedColor, LedManager, LedMode};
 use aa_proxy_rs::mitm::OdometerData;
 use aa_proxy_rs::mitm::Packet;
+use aa_proxy_rs::mitm::TirePressureData;
 #[cfg(feature = "wasm-scripting")]
 use aa_proxy_rs::script_wasm::start_wasm_engine;
 use aa_proxy_rs::usb_gadget::uevent_listener;
@@ -203,6 +204,7 @@ async fn tokio_main(
     input_channel: Arc<Mutex<Option<u8>>>,
     last_battery_data: Arc<RwLock<Option<BatteryData>>>,
     last_odometer_data: Arc<RwLock<Option<OdometerData>>>,
+    last_tire_pressure_data: Arc<RwLock<Option<TirePressureData>>>,
     led_support: bool,
     button_support: bool,
     profile_connected: Arc<AtomicBool>,
@@ -218,6 +220,7 @@ async fn tokio_main(
         input_channel,
         last_battery_data,
         last_odometer_data,
+        last_tire_pressure_data,
     };
 
     // LED support
@@ -598,6 +601,7 @@ fn main() -> Result<()> {
     let last_battery_data = Arc::new(RwLock::new(None));
     let last_battery_data_cloned = last_battery_data.clone();
     let last_odometer_data = Arc::new(RwLock::new(None));
+    let last_tire_pressure_data = Arc::new(RwLock::new(None));
 
     // build and spawn main tokio runtime
     let mut runtime = Builder::new_multi_thread().enable_all().build().unwrap();
@@ -621,6 +625,7 @@ fn main() -> Result<()> {
             input_channel_cloned,
             last_battery_data_cloned,
             last_odometer_data,
+            last_tire_pressure_data,
             led_support,
             button_support,
             profile_connected_cloned,
