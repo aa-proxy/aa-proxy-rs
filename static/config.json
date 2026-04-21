@@ -203,6 +203,10 @@
           "typ": "boolean",
           "description": "Enable odometer sensor reporting (for head units that don't provide this data). Once active, the current reading can be pushed via POST /odometer (value in km)."
         },
+        "collect_speed": {
+          "typ": "boolean",
+          "description": "Enable speed collection from speed sensor for web socket, this value disables `remove_tap_restriction` by design."
+        },
         "disable_driving_status": {
           "typ": "boolean",
           "description": "Enable to disable driving restrictions."

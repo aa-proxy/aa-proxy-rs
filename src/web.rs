@@ -91,6 +91,7 @@ pub struct AppState {
     pub input_channel: Arc<Mutex<Option<u8>>>,
     pub last_battery_data: Arc<RwLock<Option<BatteryData>>>,
     pub last_odometer_data: Arc<RwLock<Option<OdometerData>>>,
+    pub last_speed: Arc<RwLock<Option<u32>>>,
     pub last_tire_pressure_data: Arc<RwLock<Option<TirePressureData>>>,
 }
 
@@ -118,6 +119,7 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/userdata-restore", post(userdata_restore_handler))
         .route("/factory-reset", post(factory_reset_handler))
         .route("/set-time", post(set_time_handler))
+        .route("/speed", get(speed_handler))
         .with_state(state)
 }
 
@@ -904,6 +906,15 @@ pub async fn factory_reset_handler(State(state): State<Arc<AppState>>) -> impl I
         StatusCode::OK,
         "Factory reset requested. Device will now reboot.".to_string(),
     )
+}
+
+async fn speed_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let data = state.last_speed.read().await;
+    if let Some(d) = *data {
+        Json(serde_json::json!({ "speed": d })).into_response()
+    } else {
+        (StatusCode::NO_CONTENT, "No speed data yet").into_response()
+    }
 }
 
 async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {

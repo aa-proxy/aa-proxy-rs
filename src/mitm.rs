@@ -397,6 +397,7 @@ pub async fn pkt_modify_hook(
     sensor_channel: Arc<tokio::sync::Mutex<Option<u8>>>,
     input_channel: Arc<tokio::sync::Mutex<Option<u8>>>,
     last_battery: Arc<RwLock<Option<BatteryData>>>,
+    last_speed: Arc<RwLock<Option<u32>>>,
     cfg: &AppConfig,
     config: &mut SharedConfig,
     script_registry: Option<&ScriptRegistry>,
@@ -568,6 +569,13 @@ pub async fn pkt_modify_hook(
                             pkt.payload = msg.write_to_bytes()?;
                             pkt.payload.insert(0, (message_id >> 8) as u8);
                             pkt.payload.insert(1, (message_id & 0xff) as u8);
+                        }
+
+                        if cfg.collect_speed {
+                            if !msg.speed_data.is_empty() {
+                                *last_speed.write().await =
+                                    Some(msg.speed_data[0].speed_e3().try_into().unwrap());
+                            }
                         }
 
                         // Parse fuel_data from HU SensorBatch (HU proxy only).
@@ -872,7 +880,12 @@ pub async fn pkt_modify_hook(
             }
 
             // save sensor channel in context
-            if cfg.ev || cfg.video_in_motion || cfg.odometer || cfg.tire_pressure {
+            if cfg.ev
+                || cfg.video_in_motion
+                || cfg.odometer
+                || cfg.collect_speed
+                || cfg.tire_pressure
+            {
                 if let Some(svc) = msg
                     .services
                     .iter()
@@ -927,7 +940,7 @@ pub async fn pkt_modify_hook(
             }
 
             // remove tap restriction by removing SENSOR_SPEED
-            if cfg.remove_tap_restriction {
+            if cfg.remove_tap_restriction && !cfg.collect_speed {
                 if let Some(svc) = msg
                     .services
                     .iter_mut()
@@ -1477,6 +1490,7 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
     sensor_channel: Arc<tokio::sync::Mutex<Option<u8>>>,
     input_channel: Arc<tokio::sync::Mutex<Option<u8>>>,
     last_battery: Arc<RwLock<Option<BatteryData>>>,
+    last_speed: Arc<RwLock<Option<u32>>>,
     ev_tx: Sender<EvTaskCommand>,
     hu_tx: Option<Sender<Packet>>,
     script_registry: Option<Arc<ScriptRegistry>>,
@@ -1650,6 +1664,7 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
                 sensor_channel.clone(),
                 input_channel.clone(),
                 last_battery.clone(),
+                last_speed.clone(),
                 &cfg,
                 &mut config,
                 script_registry.as_deref(),
@@ -1695,6 +1710,7 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
                         sensor_channel.clone(),
                         input_channel.clone(),
                         last_battery.clone(),
+                        last_speed.clone(),
                         &cfg,
                         &mut config,
                         script_registry.as_deref(),

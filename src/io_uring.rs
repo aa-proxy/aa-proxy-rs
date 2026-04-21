@@ -331,6 +331,7 @@ pub async fn io_loop(
     sensor_channel: Arc<Mutex<Option<u8>>>,
     input_channel: Arc<Mutex<Option<u8>>>,
     last_battery: Arc<RwLock<Option<BatteryData>>>,
+    last_speed: Arc<RwLock<Option<u32>>>,
     script_registry: Option<Arc<ScriptRegistry>>,
 ) -> Result<()> {
     let shared_config = config.clone();
@@ -555,6 +556,7 @@ pub async fn io_loop(
             sensor_channel.clone(),
             input_channel.clone(),
             last_battery.clone(),
+            last_speed.clone(),
             ev_tx.clone(),
             Some(tx_hu.clone()),
             script_registry.clone(),
@@ -571,6 +573,7 @@ pub async fn io_loop(
             sensor_channel.clone(),
             input_channel.clone(),
             last_battery.clone(),
+            last_speed.clone(),
             ev_tx.clone(),
             Some(tx_md.clone()),
             script_registry.clone(),
