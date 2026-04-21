@@ -482,14 +482,16 @@ pub async fn pkt_modify_hook(
                 }
                 SENSOR_MESSAGE_BATCH => {
                     if let Ok(mut msg) = SensorBatch::parse_from_bytes(data) {
-                        if cfg.video_in_motion {
+                        if cfg.video_in_motion || cfg.disable_driving_status {
                             // === DRIVING STATUS: must be UNRESTRICTED (0) ===
                             // This is the primary flag AA checks. Value is a bitmask:
                             // 0 = unrestricted, 1 = no video, 2 = no keyboard, etc.
                             if !msg.driving_status_data.is_empty() {
                                 msg.driving_status_data[0].set_status(0);
                             }
+                        }
 
+                        if cfg.video_in_motion {
                             // === GEAR: force PARK ===
                             if !msg.gear_data.is_empty() {
                                 msg.gear_data[0].set_gear(GEAR_PARK);
