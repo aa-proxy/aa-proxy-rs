@@ -1099,6 +1099,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
             incoming = receiver.next() => {
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
+                        info!("incoming ws message {}", &text);
                         match serde_json::from_str::<ClientWsMessage>(&text) {
                             Ok(ClientWsMessage::Subscribe { topic }) => {
                                 subscriptions.insert(topic.clone());
@@ -1140,6 +1141,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
             event = ws_event_rx.recv() => {
                 match event {
                     Ok(ev) => {
+                        info!("Received event {}, payload {}", &ev.topic, &ev.payload);
                         if subscriptions.contains(&ev.topic) {
                             let msg = ServerWsMessage::Event {
                                 topic: ev.topic,

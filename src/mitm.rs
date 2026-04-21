@@ -480,14 +480,16 @@ pub async fn pkt_modify_hook(
                 }
                 SENSOR_MESSAGE_BATCH => {
                     if let Ok(mut msg) = SensorBatch::parse_from_bytes(data) {
-                        if cfg.video_in_motion {
+                        if cfg.video_in_motion || cfg.disable_driving_status {
                             // === DRIVING STATUS: must be UNRESTRICTED (0) ===
                             // This is the primary flag AA checks. Value is a bitmask:
                             // 0 = unrestricted, 1 = no video, 2 = no keyboard, etc.
                             if !msg.driving_status_data.is_empty() {
                                 msg.driving_status_data[0].set_status(0);
                             }
+                        }
 
+                        if cfg.video_in_motion {
                             // === GEAR: force PARK ===
                             if !msg.gear_data.is_empty() {
                                 msg.gear_data[0].set_gear(GEAR_PARK);
@@ -573,6 +575,25 @@ pub async fn pkt_modify_hook(
                                 let _ = ws_event_tx.send(ServerEvent {
                                     topic: "speed".to_string(),
                                     payload: msg.speed_data[0].speed_e3().to_string(),
+                                });
+                            }
+                        }
+
+                        if cfg.odometer
+                        {
+                            if !msg.odometer_data.is_empty() {
+                                
+                                let od_json = serde_json::json!({
+                                    "kms": msg.odometer_data[0].kms_e1(),
+                                    "trip_kms": msg.odometer_data[0].trip_kms_e1(),
+                                });
+                            
+                                let payload = od_json.to_string();
+                            
+                                //Send to ws    
+                                let _ = ws_event_tx.send(ServerEvent {
+                                    topic: "odometer".to_string(),
+                                    payload: payload,
                                 });
                             }
                         }
@@ -879,7 +900,7 @@ pub async fn pkt_modify_hook(
             }
 
             // save sensor channel in context
-            if cfg.ev || cfg.video_in_motion || cfg.odometer {
+            if cfg.ev || cfg.video_in_motion || cfg.odometer || cfg.collect_speed {
                 if let Some(svc) = msg
                     .services
                     .iter()
@@ -934,7 +955,7 @@ pub async fn pkt_modify_hook(
             }
 
             // remove tap restriction by removing SENSOR_SPEED
-            if cfg.remove_tap_restriction {
+            if cfg.remove_tap_restriction && !cfg.collect_speed {
                 if let Some(svc) = msg
                     .services
                     .iter_mut()

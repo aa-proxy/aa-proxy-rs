@@ -146,6 +146,7 @@ pub struct AppConfig {
     /// false = forward immediately after cached-IDR preview (lower latency, may artifact)
     pub media_wait_for_live_idr: bool,
     pub collect_speed: bool,
+    pub disable_driving_status: bool,
 
     #[serde(skip)]
     pub action_requested: Option<Action>,
@@ -301,6 +302,7 @@ impl Default for AppConfig {
             media_dump_base_port: None,
             media_wait_for_live_idr: true,
             collect_speed: false,
+            disable_driving_status: false,
         }
     }
 }
@@ -393,6 +395,7 @@ impl AppConfig {
         }
         doc["media_wait_for_live_idr"] = value(self.media_wait_for_live_idr);
         doc["collect_speed"] = value(self.collect_speed);
+        doc["disable_driving_status"] = value(self.disable_driving_status);
 
         let _ = fs::write(config_file, doc.to_string());
     }
