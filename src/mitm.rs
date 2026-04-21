@@ -585,6 +585,23 @@ pub async fn pkt_modify_hook(
                             }
                         }
 
+                        if cfg.odometer {
+                            if !msg.odometer_data.is_empty() {
+                                let od_json = serde_json::json!({
+                                    "kms": msg.odometer_data[0].kms_e1(),
+                                    "trip_kms": msg.odometer_data[0].trip_kms_e1(),
+                                });
+
+                                let payload = od_json.to_string();
+
+                                //Send to ws
+                                let _ = ws_event_tx.send(ServerEvent {
+                                    topic: "odometer".to_string(),
+                                    payload: payload,
+                                });
+                            }
+                        }
+
                         // Parse fuel_data from HU SensorBatch (HU proxy only).
                         // The HU sends SENSOR_FUEL data in response to our earlier
                         // SENSOR_MESSAGE_REQUEST
@@ -1248,7 +1265,21 @@ pub async fn send_odometer_data(
     if let Some(trip) = data.trip_km {
         od.trip_kms_e1 = Some((trip * 10.0).round() as i32);
     }
+
+    let od_json = serde_json::json!({
+        "kms": od.kms_e1,
+        "trip_kms": od.trip_kms_e1,
+    });
+
     msg.odometer_data.push(od);
+
+    let payload = od_json.to_string();
+
+    //Send to ws
+    let _ = ws_event_tx.send(ServerEvent {
+        topic: "odometer".to_string(),
+        payload: payload,
+    });
 
     let mut payload: Vec<u8> = msg.write_to_bytes()?;
     payload.insert(0, ((SENSOR_MESSAGE_BATCH as u16) >> 8) as u8);
