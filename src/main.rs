@@ -10,6 +10,7 @@ use aa_proxy_rs::io_uring::io_loop;
 use aa_proxy_rs::led::{LedColor, LedManager, LedMode};
 use aa_proxy_rs::mitm::OdometerData;
 use aa_proxy_rs::mitm::Packet;
+use aa_proxy_rs::mitm::TirePressureData;
 #[cfg(feature = "wasm-scripting")]
 use aa_proxy_rs::script_wasm::start_wasm_engine;
 use aa_proxy_rs::usb_gadget::uevent_listener;
@@ -205,6 +206,7 @@ async fn tokio_main(
     last_battery_data: Arc<RwLock<Option<BatteryData>>>,
     last_odometer_data: Arc<RwLock<Option<OdometerData>>>,
     last_speed: Arc<RwLock<Option<u32>>>,
+    last_tire_pressure_data: Arc<RwLock<Option<TirePressureData>>>,
     led_support: bool,
     button_support: bool,
     profile_connected: Arc<AtomicBool>,
@@ -222,6 +224,7 @@ async fn tokio_main(
         last_battery_data,
         last_odometer_data,
         last_speed,
+        last_tire_pressure_data,
         ws_event_tx
     };
 
@@ -605,6 +608,7 @@ fn main() -> Result<()> {
     let last_odometer_data = Arc::new(RwLock::new(None));
     let last_speed: Arc<RwLock<Option<u32>>> = Arc::new(RwLock::new(None));
     let last_speed_cloned = last_speed.clone();
+    let last_tire_pressure_data = Arc::new(RwLock::new(None));
     let (ws_event_tx, _ws_event_rx) = broadcast::channel(256);
     let ws_event_tx_cloned = ws_event_tx.clone();
 
@@ -631,6 +635,7 @@ fn main() -> Result<()> {
             last_battery_data_cloned,
             last_odometer_data,
             last_speed_cloned,
+            last_tire_pressure_data,
             led_support,
             button_support,
             profile_connected_cloned,

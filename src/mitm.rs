@@ -114,6 +114,12 @@ pub struct OdometerData {
     pub trip_km: Option<f32>,
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct TirePressureData {
+    /// Tire pressure in kPa, in order: front-left, front-right, rear-left, rear-right
+    pub pressures_kpa: Vec<f32>,
+}
+
 #[derive(PartialEq, Copy, Clone, Debug)]
 pub enum ProxyType {
     HeadUnit,
@@ -900,7 +906,7 @@ pub async fn pkt_modify_hook(
             }
 
             // save sensor channel in context
-            if cfg.ev || cfg.video_in_motion || cfg.odometer || cfg.collect_speed {
+            if cfg.ev || cfg.video_in_motion || cfg.odometer || cfg.collect_speed || cfg.tire_pressure {
                 if let Some(svc) = msg
                     .services
                     .iter()
@@ -1108,6 +1114,28 @@ pub async fn pkt_modify_hook(
                 }
             }
 
+            // Tire pressure sensor
+            if cfg.tire_pressure {
+                if let Some(svc) = msg
+                    .services
+                    .iter_mut()
+                    .find(|svc| !svc.sensor_source_service.sensors.is_empty())
+                {
+                    info!(
+                        "{} <yellow>{:?}</>: adding <b><green>TIRE_PRESSURE</> sensor...",
+                        get_name(proxy_type),
+                        control.unwrap(),
+                    );
+                    let mut sensor = Sensor::new();
+                    sensor.set_sensor_type(SENSOR_TIRE_PRESSURE_DATA);
+                    svc.sensor_source_service
+                        .as_mut()
+                        .unwrap()
+                        .sensors
+                        .push(sensor);
+                }
+            }
+
             debug!(
                 "{} SDR after changes: {}",
                 get_name(proxy_type),
@@ -1267,6 +1295,41 @@ pub async fn send_odometer_data(
     );
 
     *last_odometer.write().await = Some(data);
+    Ok(())
+}
+
+pub async fn send_tire_pressure_data(
+    tx: Sender<Packet>,
+    sensor_ch: u8,
+    data: TirePressureData,
+    last_tire_pressure: Arc<RwLock<Option<TirePressureData>>>,
+) -> Result<()> {
+    let mut msg = SensorBatch::new();
+
+    let mut tp = protos::TirePressureData::new();
+    // tire_pressures_e2 stores kPa in hundredths (0.01 kPa resolution), so multiply by 100
+    for p in &data.pressures_kpa {
+        tp.tire_pressures_e2.push((p * 100.0).round() as i32);
+    }
+    msg.tire_pressure_data.push(tp);
+
+    let mut payload: Vec<u8> = msg.write_to_bytes()?;
+    payload.insert(0, ((SENSOR_MESSAGE_BATCH as u16) >> 8) as u8);
+    payload.insert(1, ((SENSOR_MESSAGE_BATCH as u16) & 0xff) as u8);
+
+    let pkt = Packet {
+        channel: sensor_ch,
+        flags: ENCRYPTED | FRAME_TYPE_FIRST | FRAME_TYPE_LAST,
+        final_length: None,
+        payload,
+    };
+    tx.send(pkt).await?;
+    info!(
+        "mitm/web: injecting TIRE_PRESSURE packet ({:?} kPa)...",
+        data.pressures_kpa
+    );
+
+    *last_tire_pressure.write().await = Some(data);
     Ok(())
 }
 

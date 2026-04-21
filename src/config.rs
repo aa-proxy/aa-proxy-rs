@@ -115,6 +115,7 @@ pub struct AppConfig {
     pub dhu: bool,
     pub ev: bool,
     pub odometer: bool,
+    pub tire_pressure: bool,
     pub remove_bluetooth: bool,
     pub remove_wifi: bool,
     pub change_usb_order: bool,
@@ -264,6 +265,7 @@ impl Default for AppConfig {
             dhu: false,
             ev: false,
             odometer: false,
+            tire_pressure: false,
             remove_bluetooth: false,
             remove_wifi: false,
             change_usb_order: false,
@@ -369,6 +371,7 @@ impl AppConfig {
         doc["dhu"] = value(self.dhu);
         doc["ev"] = value(self.ev);
         doc["odometer"] = value(self.odometer);
+        doc["tire_pressure"] = value(self.tire_pressure);
         doc["remove_bluetooth"] = value(self.remove_bluetooth);
         doc["remove_wifi"] = value(self.remove_wifi);
         doc["change_usb_order"] = value(self.change_usb_order);

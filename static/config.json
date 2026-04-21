@@ -210,6 +210,10 @@
         "disable_driving_status": {
           "typ": "boolean",
           "description": "Enable to disable driving restrictions."
+        },
+        "tire_pressure": {
+          "typ": "boolean",
+          "description": "Enable tire pressure sensor reporting (for head units that don't provide this data). Once active, readings for up to 4 tires can be pushed via POST /tire-pressure (values in kPa, order: FL, FR, RL, RR)."
         }
       }
     },
