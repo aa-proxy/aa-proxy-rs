@@ -1306,6 +1306,7 @@ pub async fn send_tire_pressure_data(
     sensor_ch: u8,
     data: TirePressureData,
     last_tire_pressure: Arc<RwLock<Option<TirePressureData>>>,
+    ws_event_tx: BroadcastSender<ServerEvent>,
 ) -> Result<()> {
     let mut msg = SensorBatch::new();
 
@@ -1314,7 +1315,20 @@ pub async fn send_tire_pressure_data(
     for p in &data.pressures_kpa {
         tp.tire_pressures_e2.push((p * 100.0).round() as i32);
     }
+
+    let tp_json = serde_json::json!({
+        "tire_pressures": tp.tire_pressures_e2,
+    });
+
     msg.tire_pressure_data.push(tp);
+
+    let payload = tp_json.to_string();
+
+    //Send to ws
+    let _ = ws_event_tx.send(ServerEvent {
+        topic: "tpms".to_string(),
+        payload: payload,
+    });
 
     let mut payload: Vec<u8> = msg.write_to_bytes()?;
     payload.insert(0, ((SENSOR_MESSAGE_BATCH as u16) >> 8) as u8);

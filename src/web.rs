@@ -400,8 +400,14 @@ pub async fn tire_pressure_handler(
 
     if let Some(ch) = *state.sensor_channel.lock().await {
         if let Some(tx) = state.tx.lock().await.clone() {
-            if let Err(e) =
-                send_tire_pressure_data(tx, ch, data, state.last_tire_pressure_data.clone()).await
+            if let Err(e) = send_tire_pressure_data(
+                tx,
+                ch,
+                data,
+                state.last_tire_pressure_data.clone(),
+                state.ws_event_tx.clone(),
+            )
+            .await
             {
                 error!("{} Tire pressure error: {}", NAME, e);
             }
