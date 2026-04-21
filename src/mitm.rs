@@ -1037,6 +1037,9 @@ pub async fn pkt_modify_hook(
                 );
             }
 
+            //remove navigation_status_service
+            msg.services.retain(|svc| svc.navigation_status_service.is_none());
+
             if cfg.remove_bluetooth {
                 msg.services.retain(|svc| svc.bluetooth_service.is_none());
             }
