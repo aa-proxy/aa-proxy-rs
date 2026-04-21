@@ -2,6 +2,7 @@
 use crate::script_wasm::ScriptRegistry;
 #[cfg(not(feature = "wasm-scripting"))]
 type ScriptRegistry = ();
+use crate::web::ServerEvent;
 use bytesize::ByteSize;
 use core::net::SocketAddr;
 use humantime::format_duration;
@@ -44,6 +45,7 @@ const USB_ACCESSORY_PATH: &str = "/dev/usb_accessory";
 pub const BUFFER_LEN: usize = 16 * 1024;
 const TCP_CLIENT_TIMEOUT: Duration = Duration::new(30, 0);
 const COMP_APP_TCP_PORT: u16 = 9999;
+const COMP_APP_TCP_PORT_WS: u16 = 9998;
 
 use crate::config::{Action, SharedConfig};
 use crate::config::{TCP_DHU_PORT, TCP_SERVER_PORT};
@@ -316,6 +318,21 @@ async fn tcp_wait_for_connection(listener: &mut TcpListener) -> Result<(TcpStrea
         .await;
     });
 
+    tokio::spawn(async move {
+        info!(
+            "{} starting TCP reverse connection for WS, Android IP: {}",
+            NAME,
+            addr.ip()
+        );
+        // FIXME use port configured by user for webserver
+        // or ignore when webserver disabled...
+        tcp_bridge(
+            &format!("{}:{}", addr.ip(), COMP_APP_TCP_PORT_WS),
+            "127.0.0.1:80",
+        )
+        .await;
+    });
+
     // disable Nagle algorithm, so segments are always sent as soon as possible,
     // even if there is only a small amount of data
     stream.set_nodelay(true)?;
@@ -333,6 +350,7 @@ pub async fn io_loop(
     last_battery: Arc<RwLock<Option<BatteryData>>>,
     last_speed: Arc<RwLock<Option<u32>>>,
     script_registry: Option<Arc<ScriptRegistry>>,
+    ws_event_tx: BroadcastSender<ServerEvent>,
 ) -> Result<()> {
     let shared_config = config.clone();
     #[allow(unused_variables)]
@@ -561,6 +579,7 @@ pub async fn io_loop(
             Some(tx_hu.clone()),
             script_registry.clone(),
             HashMap::new(),
+            ws_event_tx.clone(),
         ));
         from_stream = tokio_uring::spawn(proxy(
             ProxyType::MobileDevice,
@@ -578,6 +597,7 @@ pub async fn io_loop(
             Some(tx_md.clone()),
             script_registry.clone(),
             persistent_media_sinks.clone(),
+            ws_event_tx.clone(),
         ));
 
         // Thread for monitoring transfer

@@ -16,6 +16,7 @@ use aa_proxy_rs::script_wasm::start_wasm_engine;
 use aa_proxy_rs::usb_gadget::uevent_listener;
 use aa_proxy_rs::usb_gadget::UsbGadgetState;
 use aa_proxy_rs::web;
+use aa_proxy_rs::web::ServerEvent;
 use clap::Parser;
 use humantime::format_duration;
 use simplelog::*;
@@ -209,6 +210,7 @@ async fn tokio_main(
     led_support: bool,
     button_support: bool,
     profile_connected: Arc<AtomicBool>,
+    ws_event_tx: broadcast::Sender<ServerEvent>,
 ) -> Result<()> {
     let accessory_started = Arc::new(Notify::new());
     let accessory_started_cloned = accessory_started.clone();
@@ -223,6 +225,7 @@ async fn tokio_main(
         last_odometer_data,
         last_speed,
         last_tire_pressure_data,
+        ws_event_tx,
     };
 
     // LED support
@@ -606,6 +609,8 @@ fn main() -> Result<()> {
     let last_speed: Arc<RwLock<Option<u32>>> = Arc::new(RwLock::new(None));
     let last_speed_cloned = last_speed.clone();
     let last_tire_pressure_data = Arc::new(RwLock::new(None));
+    let (ws_event_tx, _ws_event_rx) = broadcast::channel(256);
+    let ws_event_tx_cloned = ws_event_tx.clone();
 
     // build and spawn main tokio runtime
     let mut runtime = Builder::new_multi_thread().enable_all().build().unwrap();
@@ -634,6 +639,7 @@ fn main() -> Result<()> {
             led_support,
             button_support,
             profile_connected_cloned,
+            ws_event_tx_cloned,
         )
         .await
     });
@@ -649,6 +655,7 @@ fn main() -> Result<()> {
         last_battery_data,
         last_speed,
         script_registry.clone(),
+        ws_event_tx.clone(),
     ));
 
     info!(

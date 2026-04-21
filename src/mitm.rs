@@ -9,6 +9,7 @@ use crate::script_wasm::{
 };
 #[cfg(not(feature = "wasm-scripting"))]
 type ScriptRegistry = ();
+use crate::web::ServerEvent;
 use anyhow::Context;
 use log::log_enabled;
 use openssl::ssl::{ErrorCode, Ssl, SslContextBuilder, SslFiletype, SslMethod};
@@ -24,6 +25,7 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::broadcast::Sender as BroadcastSender;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::RwLock;
 use tokio::time::timeout;
@@ -401,6 +403,7 @@ pub async fn pkt_modify_hook(
     cfg: &AppConfig,
     config: &mut SharedConfig,
     script_registry: Option<&ScriptRegistry>,
+    ws_event_tx: BroadcastSender<ServerEvent>,
 ) -> Result<bool> {
     // if for some reason we have too small packet, bail out
     if pkt.payload.len() < 2 {
@@ -1231,6 +1234,7 @@ pub async fn send_odometer_data(
     sensor_ch: u8,
     data: OdometerData,
     last_odometer: Arc<RwLock<Option<OdometerData>>>,
+    ws_event_tx: BroadcastSender<ServerEvent>,
 ) -> Result<()> {
     let mut msg = SensorBatch::new();
 
@@ -1495,6 +1499,7 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
     hu_tx: Option<Sender<Packet>>,
     script_registry: Option<Arc<ScriptRegistry>>,
     media_sinks: HashMap<u8, MediaSink>,
+    ws_event_tx: BroadcastSender<ServerEvent>,
 ) -> Result<()> {
     let cfg = config.read().await.clone();
     let passthrough = !cfg.mitm;
@@ -1668,6 +1673,7 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
                 &cfg,
                 &mut config,
                 script_registry.as_deref(),
+                ws_event_tx.clone()
             )
             .await?;
             let _ = pkt_debug(
@@ -1714,6 +1720,7 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
                         &cfg,
                         &mut config,
                         script_registry.as_deref(),
+                        ws_event_tx.clone(),
                     )
                     .await?;
                     let _ = pkt_debug(
