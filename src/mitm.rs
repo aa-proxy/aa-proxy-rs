@@ -578,6 +578,10 @@ pub async fn pkt_modify_hook(
                             if !msg.speed_data.is_empty() {
                                 *last_speed.write().await =
                                     Some(msg.speed_data[0].speed_e3().try_into().unwrap());
+                                let _ = ws_event_tx.send(ServerEvent {
+                                    topic: "speed".to_string(),
+                                    payload: msg.speed_data[0].speed_e3().to_string(),
+                                });
                             }
                         }
 
