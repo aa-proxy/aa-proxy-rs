@@ -733,6 +733,12 @@ pub async fn pkt_modify_hook(
 
     // parsing data
     match control.unwrap_or(MESSAGE_UNEXPECTED_MESSAGE) {
+        MESSAGE_NAV_FOCUS_REQUEST => {
+            if let Ok(mut msg) = NavFocusRequestNotification::parse_from_bytes(data) {
+                info!("NAV_FOCUS: {:?}", msg);
+            }
+            return Ok(true);
+        }
         MESSAGE_BYEBYE_REQUEST => {
             if cfg.stop_on_disconnect && proxy_type == ProxyType::MobileDevice {
                 if let Ok(msg) = ByeByeRequest::parse_from_bytes(data) {
