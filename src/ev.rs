@@ -57,6 +57,7 @@ pub async fn send_ev_data(
     sensor_ch: u8,
     batt: BatteryData,
     last_battery: Arc<RwLock<Option<BatteryData>>>,
+    inject_fuel: bool,
 ) -> Result<()> {
     // obtain binary model data
     let model_path: PathBuf = PathBuf::from(EV_MODEL_FILE);
@@ -123,6 +124,30 @@ pub async fn send_ev_data(
     };
     tx.send(pkt).await?;
     info!("{} injecting ENERGY_MODEL_DATA packet...", NAME);
+
+    // optionally inject a synthetic SENSOR_FUEL packet towards MD
+    // so that apps reading fuel_level see the same SoC value
+    if inject_fuel {
+        if let Some(level) = batt.battery_level_percentage {
+            let mut fuel_msg = SensorBatch::new();
+            let mut fuel_data = FuelData::new();
+            fuel_data.set_fuel_level(level as i32);
+            fuel_msg.fuel_data.push(fuel_data);
+
+            let mut fuel_payload: Vec<u8> = fuel_msg.write_to_bytes()?;
+            fuel_payload.insert(0, ((SENSOR_MESSAGE_BATCH as u16) >> 8) as u8);
+            fuel_payload.insert(1, ((SENSOR_MESSAGE_BATCH as u16) & 0xff) as u8);
+
+            let fuel_pkt = Packet {
+                channel: sensor_ch,
+                flags: ENCRYPTED | FRAME_TYPE_FIRST | FRAME_TYPE_LAST,
+                final_length: None,
+                payload: fuel_payload,
+            };
+            tx.send(fuel_pkt).await?;
+            info!("{} injecting SENSOR_FUEL packet (level={})...", NAME, level);
+        }
+    }
 
     // save last battery state
     *last_battery.write().await = Some(batt);

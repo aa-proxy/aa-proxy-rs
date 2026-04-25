@@ -224,6 +224,10 @@
           "typ": "boolean",
           "description": "Enable EV routing"
         },
+        "fuel_sensor_inject": {
+          "typ": "boolean",
+          "description": "When EV routing is active, also inject a synthetic `SENSOR_FUEL` packet towards the phone with the same SoC value. Useful for apps that read fuel level instead of the EV energy model (e.g. ABRP, Home Assistant)."
+        },
         "ev_battery_logger": {
           "typ": "string",
           "description": "Path to executable for providing EV battery data (e.g. from an OBD dongle). It is started automatically when an Android Auto session begins and terminated when the session ends.\nAny parameters provided at the end of the path are passed to the executable as-is."

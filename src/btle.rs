@@ -504,8 +504,14 @@ async fn craft_response(req: &Request, state: AppState) -> Response {
 
             if let Some(ch) = *state.sensor_channel.lock().await {
                 if let Some(tx) = state.tx.lock().await.clone() {
-                    if let Err(e) =
-                        send_ev_data(tx.clone(), ch, data, state.last_battery_data).await
+                    if let Err(e) = send_ev_data(
+                        tx.clone(),
+                        ch,
+                        data,
+                        state.last_battery_data,
+                        state.config.read().await.fuel_sensor_inject,
+                    )
+                    .await
                     {
                         error!("{} EV model error: {}", NAME, e);
                         return Response {

@@ -626,6 +626,7 @@ pub async fn pkt_modify_hook(
                                         external_temp_celsius: None,
                                     },
                                     last_battery,
+                                    cfg.fuel_sensor_inject,
                                 )
                                 .await;
                             }
@@ -1092,6 +1093,36 @@ pub async fn pkt_modify_hook(
                         .as_mut()
                         .unwrap()
                         .supported_ev_connector_types = connectors;
+                }
+            }
+
+            // fuel_sensor_inject: advertise SENSOR_FUEL to MD if not already present
+            if cfg.fuel_sensor_inject {
+                if let Some(svc) = msg
+                    .services
+                    .iter_mut()
+                    .find(|svc| !svc.sensor_source_service.sensors.is_empty())
+                {
+                    let already_present = svc
+                        .sensor_source_service
+                        .sensors
+                        .iter()
+                        .any(|s| s.sensor_type() == SENSOR_FUEL);
+
+                    if !already_present {
+                        info!(
+                            "{} <yellow>{:?}</>: adding <b><green>SENSOR_FUEL</> for fuel_sensor_inject...",
+                            get_name(proxy_type),
+                            control.unwrap(),
+                        );
+                        let mut sensor = Sensor::new();
+                        sensor.set_sensor_type(SENSOR_FUEL);
+                        svc.sensor_source_service
+                            .as_mut()
+                            .unwrap()
+                            .sensors
+                            .push(sensor);
+                    }
                 }
             }
 

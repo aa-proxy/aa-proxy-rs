@@ -114,6 +114,7 @@ pub struct AppConfig {
     pub wired: Option<UsbId>,
     pub dhu: bool,
     pub ev: bool,
+    pub fuel_sensor_inject: bool,
     pub odometer: bool,
     pub tire_pressure: bool,
     pub remove_bluetooth: bool,
@@ -264,6 +265,7 @@ impl Default for AppConfig {
             wired: None,
             dhu: false,
             ev: false,
+            fuel_sensor_inject: false,
             odometer: false,
             tire_pressure: false,
             remove_bluetooth: false,
@@ -370,6 +372,7 @@ impl AppConfig {
         doc["wired"] = value(self.wired.as_ref().map_or(String::new(), |w| w.to_string()));
         doc["dhu"] = value(self.dhu);
         doc["ev"] = value(self.ev);
+        doc["fuel_sensor_inject"] = value(self.fuel_sensor_inject);
         doc["odometer"] = value(self.odometer);
         doc["tire_pressure"] = value(self.tire_pressure);
         doc["remove_bluetooth"] = value(self.remove_bluetooth);

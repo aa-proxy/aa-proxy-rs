@@ -314,8 +314,14 @@ pub async fn battery_handler(
 
     if let Some(ch) = *state.sensor_channel.lock().await {
         if let Some(tx) = state.tx.lock().await.clone() {
-            if let Err(e) =
-                send_ev_data(tx.clone(), ch, data, state.last_battery_data.clone()).await
+            if let Err(e) = send_ev_data(
+                tx.clone(),
+                ch,
+                data,
+                state.last_battery_data.clone(),
+                state.config.read().await.fuel_sensor_inject,
+            )
+            .await
             {
                 error!("{} EV model error: {}", NAME, e);
             }
