@@ -1,3 +1,4 @@
+use crate::web::ServerEvent;
 use anyhow::{Context, Result};
 use notify::{recommended_watcher, EventKind, RecursiveMode, Watcher};
 use simplelog::*;
@@ -7,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::runtime::Runtime;
+use tokio::sync::broadcast::Sender as BroadcastSender;
 use tokio::sync::mpsc;
 use wasmtime::component::{Component, HasSelf, Linker};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
@@ -28,8 +30,12 @@ use self::bindings::aa::packet::types::{
 };
 use self::bindings::PacketHook;
 
-pub fn start_wasm_engine(runtime: &mut Runtime, hook_dir: String) -> Result<Arc<ScriptRegistry>> {
-    let script_registry = Arc::new(ScriptRegistry::new());
+pub fn start_wasm_engine(
+    runtime: &mut Runtime,
+    hook_dir: String,
+    script_parameters: ScriptParameters,
+) -> Result<Arc<ScriptRegistry>> {
+    let script_registry = Arc::new(ScriptRegistry::new(script_parameters));
     script_registry.reload_dir(&hook_dir);
 
     let errs: Vec<(std::path::PathBuf, String)> = script_registry.list_errors();
@@ -96,19 +102,34 @@ pub fn start_wasm_engine(runtime: &mut Runtime, hook_dir: String) -> Result<Arc<
     Ok(script_registry)
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct ScriptEffects {
     pub replacement: Option<host::Packet>,
     pub packets: Vec<host::Packet>,
+    pub script_parameters: ScriptParameters,
 }
 
+impl ScriptEffects {
+    pub fn new(script_parameters: ScriptParameters) -> Self {
+        Self {
+            replacement: None,
+            packets: Vec::new(),
+            script_parameters,
+        }
+    }
+}
 pub struct ScriptState {
     pub effects: ScriptEffects,
     pub limits: StoreLimits,
 }
 
+#[derive(Clone, Debug)]
+pub struct ScriptParameters {
+    pub ws_event_tx: BroadcastSender<ServerEvent>,
+}
+
 impl ScriptState {
-    fn new() -> Self {
+    fn new(script_parameters: ScriptParameters) -> Self {
         let limits = StoreLimitsBuilder::new()
             .memory_size(5 * 1024 * 1024)
             .instances(16)
@@ -118,7 +139,7 @@ impl ScriptState {
             .build();
 
         Self {
-            effects: ScriptEffects::default(),
+            effects: ScriptEffects::new(script_parameters),
             limits,
         }
     }
@@ -147,10 +168,14 @@ pub struct WasmScriptEngine {
     component: Component,
     linker: Linker<ScriptState>,
     pub path: PathBuf,
+    script_parameters: ScriptParameters,
 }
 
 impl WasmScriptEngine {
-    pub fn load(component_path: impl AsRef<Path>) -> Result<Self> {
+    pub fn load(
+        component_path: impl AsRef<Path>,
+        script_parameters: ScriptParameters,
+    ) -> Result<Self> {
         let mut cfg = Config::new();
         cfg.async_support(false);
         cfg.wasm_component_model(true);
@@ -173,6 +198,7 @@ impl WasmScriptEngine {
             component,
             linker,
             path,
+            script_parameters,
         })
     }
 
@@ -182,7 +208,10 @@ impl WasmScriptEngine {
         pkt: WasmPacket,
         cfg: ConfigView,
     ) -> Result<(Decision, ScriptEffects)> {
-        let mut store = Store::new(&self.engine, ScriptState::new());
+        let mut store = Store::new(
+            &self.engine,
+            ScriptState::new(self.script_parameters.clone()),
+        );
         store.limiter(|state| &mut state.limits);
         store.set_epoch_deadline(1);
 
@@ -207,23 +236,40 @@ pub struct LoadedScript {
     pub engine: Arc<WasmScriptEngine>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct ScriptRegistry {
     inner: Arc<RwLock<ScriptRegistryInner>>,
 }
 
-#[derive(Default)]
 struct ScriptRegistryInner {
     scripts: Vec<LoadedScript>,
     errors: HashMap<PathBuf, String>,
+    script_parameters: ScriptParameters,
+}
+
+impl ScriptRegistryInner {
+    fn new(script_parameters: ScriptParameters) -> Self {
+        Self {
+            scripts: Vec::new(),
+            errors: HashMap::new(),
+            script_parameters,
+        }
+    }
 }
 
 impl ScriptRegistry {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(script_parameters: ScriptParameters) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(ScriptRegistryInner::new(script_parameters))),
+        }
     }
 
     pub fn reload_dir(&self, dir: impl AsRef<Path>) {
+        let script_parameters = {
+            let g = self.inner.read().unwrap();
+            g.script_parameters.clone()
+        };
+
         let dir = dir.as_ref();
         let mut scripts = Vec::<LoadedScript>::new();
         let mut errors = HashMap::<PathBuf, String>::new();
@@ -246,7 +292,7 @@ impl ScriptRegistry {
                 continue;
             }
 
-            match WasmScriptEngine::load(&path) {
+            match WasmScriptEngine::load(&path, script_parameters.clone()) {
                 Ok(engine) => {
                     log::info!("loaded wasm script: {}", path.display());
                     scripts.push(LoadedScript {
