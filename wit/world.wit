@@ -43,6 +43,10 @@ interface host {
   send: func(pkt: packet);
   info: func(msg: string);
   error: func(msg: string);
+  send-ws-event: func(topic: string, payload: string) -> bool;
+  rest-call: func(method: string, path: string, body: string) -> string;
+  rest-call-async: func(method: string, path: string, body: string) -> string;
+  rest-result-topic: func() -> string;
 }
 
 world packet-hook {
@@ -50,4 +54,5 @@ world packet-hook {
 
   import host;
   export modify-packet: func(ctx: modify-context, pkt: packet, cfg: config-view) -> decision;
+  export ws-script-handler: func(topic: string, payload: string) -> string;
 }

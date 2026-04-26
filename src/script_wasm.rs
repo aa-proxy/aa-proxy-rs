@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use crate::web::ServerEvent;
 use notify::{recommended_watcher, EventKind, RecursiveMode, Watcher};
 use simplelog::*;
 use std::collections::HashMap;
@@ -7,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::runtime::Runtime;
+use tokio::sync::broadcast::Sender as BroadcastSender;
 use tokio::sync::mpsc;
 use wasmtime::component::{Component, HasSelf, Linker};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
@@ -28,21 +30,25 @@ use self::bindings::aa::packet::types::{
 };
 use self::bindings::PacketHook;
 
-pub fn start_wasm_engine(runtime: &mut Runtime, hook_dir: String) -> Result<Arc<ScriptRegistry>> {
-    let script_registry = Arc::new(ScriptRegistry::new());
+pub fn start_wasm_engine(
+    runtime: &mut Runtime,
+    hook_dir: String,
+    script_parameters: ScriptParameters,
+) -> Result<Arc<ScriptRegistry>> {
+    let script_registry = Arc::new(ScriptRegistry::new(script_parameters));
     script_registry.reload_dir(&hook_dir);
 
     let errs: Vec<(std::path::PathBuf, String)> = script_registry.list_errors();
     for (path, err) in errs {
         error!(
-            "initial wasm script load error [{}]: {}",
+            "[wasm] initial wasm script load error [{}]: {}",
             path.display(),
             err
         );
     }
 
     info!(
-        "initial loaded wasm script count={}",
+        "[wasm] initial loaded wasm script count={}",
         script_registry.list_scripts().len()
     );
 
@@ -54,7 +60,7 @@ pub fn start_wasm_engine(runtime: &mut Runtime, hook_dir: String) -> Result<Arc<
 
     wasm_watcher
         .watch(std::path::Path::new(&hook_dir), RecursiveMode::NonRecursive)
-        .map_err(|e| anyhow::anyhow!("failed to watch {}: {}", hook_dir, e))?;
+        .map_err(|e| anyhow::anyhow!("[wasm] failed to watch {}: {}", hook_dir, e))?;
 
     let script_registry_for_watch = script_registry.clone();
     runtime.spawn(async move {
@@ -67,18 +73,18 @@ pub fn start_wasm_engine(runtime: &mut Runtime, hook_dir: String) -> Result<Arc<
                         let errs: Vec<(std::path::PathBuf, String)> =
                             script_registry_for_watch.list_errors();
                         for (path, err) in errs {
-                            error!("wasm script load error [{}]: {}", path.display(), err);
+                            error!("[wasm] script load error [{}]: {}", path.display(), err);
                         }
 
                         info!(
-                            "loaded wasm script count={}",
+                            "[wasm] loaded wasm script count={}",
                             script_registry_for_watch.list_scripts().len()
                         );
                     }
                     _ => {}
                 },
                 Err(err) => {
-                    error!("wasm watcher error: {}", err);
+                    error!("[wasm] watcher error: {}", err);
                 }
             }
         }
@@ -96,19 +102,34 @@ pub fn start_wasm_engine(runtime: &mut Runtime, hook_dir: String) -> Result<Arc<
     Ok(script_registry)
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct ScriptEffects {
     pub replacement: Option<host::Packet>,
     pub packets: Vec<host::Packet>,
+    pub script_parameters: ScriptParameters,
 }
 
+impl ScriptEffects {
+    pub fn new(script_parameters: ScriptParameters) -> Self {
+        Self {
+            replacement: None,
+            packets: Vec::new(),
+            script_parameters,
+        }
+    }
+}
 pub struct ScriptState {
     pub effects: ScriptEffects,
     pub limits: StoreLimits,
 }
 
+#[derive(Clone, Debug)]
+pub struct ScriptParameters {
+    pub ws_event_tx: BroadcastSender<ServerEvent>,
+}
+
 impl ScriptState {
-    fn new() -> Self {
+    fn new(script_parameters: ScriptParameters) -> Self {
         let limits = StoreLimitsBuilder::new()
             .memory_size(5 * 1024 * 1024)
             .instances(16)
@@ -118,7 +139,7 @@ impl ScriptState {
             .build();
 
         Self {
-            effects: ScriptEffects::default(),
+            effects: ScriptEffects::new(script_parameters),
             limits,
         }
     }
@@ -140,6 +161,55 @@ impl host::Host for ScriptState {
     fn error(&mut self, msg: String) {
         log::error!("[wasm] {}", msg);
     }
+
+    fn send_ws_event(&mut self, topic: String, payload: String) -> bool {
+        match self
+            .effects
+            .script_parameters
+            .ws_event_tx
+            .send(ServerEvent { topic, payload })
+        {
+            Ok(_) => true,
+            Err(err) => {
+                log::warn!("[wasm] failed to send websocket event from wasm host: {err}");
+                false
+            }
+        }
+    }
+
+    fn rest_call(&mut self, method: String, path: String, body: String) -> String {
+        rest_call_blocking(method, path, body)
+    }
+    
+    fn rest_call_async(&mut self, method: String, path: String, body: String) -> String {
+        let request_id = uuid::Uuid::new_v4().to_string();
+    
+        let tx = self.effects.script_parameters.ws_event_tx.clone();
+        let request_id_for_task = request_id.clone();
+    
+        std::thread::spawn(move || {
+            let result_payload = rest_call_blocking(method.clone(), path.clone(), body);
+    
+            let payload = serde_json::json!({
+                "requestId": request_id_for_task,
+                "method": method,
+                "path": path,
+                "result": result_payload,
+            })
+            .to_string();
+    
+            let _ = tx.send(ServerEvent {
+                topic: SCRIPT_REST_RESULT_TOPIC.to_string(),
+                payload,
+            });
+        });
+    
+        request_id
+    }
+
+    fn rest_result_topic(&mut self) -> String {
+        SCRIPT_REST_RESULT_TOPIC.to_string()
+    }
 }
 
 pub struct WasmScriptEngine {
@@ -147,10 +217,11 @@ pub struct WasmScriptEngine {
     component: Component,
     linker: Linker<ScriptState>,
     pub path: PathBuf,
+    script_parameters: ScriptParameters,
 }
 
 impl WasmScriptEngine {
-    pub fn load(component_path: impl AsRef<Path>) -> Result<Self> {
+    pub fn load(component_path: impl AsRef<Path>, script_parameters: ScriptParameters) -> Result<Self> {
         let mut cfg = Config::new();
         cfg.async_support(false);
         cfg.wasm_component_model(true);
@@ -160,7 +231,7 @@ impl WasmScriptEngine {
         let path = component_path.as_ref().to_path_buf();
 
         let component = Component::from_file(&engine, &path)
-            .with_context(|| format!("loading wasm component {}", path.display()))?;
+            .with_context(|| format!("[wasm] loading wasm component {}", path.display()))?;
 
         let mut linker = Linker::<ScriptState>::new(&engine);
         bindings::aa::packet::host::add_to_linker::<ScriptState, HasSelf<ScriptState>>(
@@ -173,27 +244,47 @@ impl WasmScriptEngine {
             component,
             linker,
             path,
+            script_parameters,
         })
     }
 
-    pub async fn run(
+    pub async fn modify_packet(
         &self,
         ctx: WasmModifyContext,
         pkt: WasmPacket,
         cfg: ConfigView,
     ) -> Result<(Decision, ScriptEffects)> {
-        let mut store = Store::new(&self.engine, ScriptState::new());
+        let mut store = Store::new(&self.engine, ScriptState::new(self.script_parameters.clone()));
         store.limiter(|state| &mut state.limits);
-        store.set_epoch_deadline(1);
+        store.set_epoch_deadline(100);
 
         let bindings =
             PacketHook::instantiate_async(&mut store, &self.component, &self.linker).await?;
 
         let decision = bindings
             .call_modify_packet(&mut store, &ctx, &pkt, cfg)
-            .with_context(|| format!("running wasm script {}", self.path.display()))?;
+            .with_context(|| format!("[wasm] running wasm script {}", self.path.display()))?;
 
         Ok((decision, store.data().effects.clone()))
+    }
+
+    pub async fn ws_script_handler(
+        &self,
+        topic: String,
+        payload: String
+    ) -> Result<(String, ScriptEffects)> {
+        let mut store = Store::new(&self.engine, ScriptState::new(self.script_parameters.clone()));
+        store.limiter(|state: &mut ScriptState| &mut state.limits);
+        store.set_epoch_deadline(1000);
+
+        let bindings =
+            PacketHook::instantiate_async(&mut store, &self.component, &self.linker).await?;
+
+        let payload = bindings
+            .call_ws_script_handler(&mut store, &topic, &payload)
+            .with_context(|| format!("[wasm] running wasm script {}", self.path.display()))?;
+
+        Ok((payload, store.data().effects.clone()))
     }
 
     pub fn tick_epoch(&self) {
@@ -207,23 +298,40 @@ pub struct LoadedScript {
     pub engine: Arc<WasmScriptEngine>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct ScriptRegistry {
     inner: Arc<RwLock<ScriptRegistryInner>>,
 }
 
-#[derive(Default)]
 struct ScriptRegistryInner {
     scripts: Vec<LoadedScript>,
     errors: HashMap<PathBuf, String>,
+    script_parameters: ScriptParameters,
+}
+
+impl ScriptRegistryInner {
+    fn new(script_parameters: ScriptParameters) -> Self {
+        Self {
+            scripts: Vec::new(),
+            errors: HashMap::new(),
+            script_parameters,
+        }
+    }
 }
 
 impl ScriptRegistry {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(script_parameters: ScriptParameters) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(ScriptRegistryInner::new(script_parameters))),
+        }
     }
 
     pub fn reload_dir(&self, dir: impl AsRef<Path>) {
+        let script_parameters = {
+            let g = self.inner.read().unwrap();
+            g.script_parameters.clone()
+        };
+
         let dir = dir.as_ref();
         let mut scripts = Vec::<LoadedScript>::new();
         let mut errors = HashMap::<PathBuf, String>::new();
@@ -231,7 +339,7 @@ impl ScriptRegistry {
         let entries = match fs::read_dir(dir) {
             Ok(v) => v,
             Err(e) => {
-                errors.insert(dir.to_path_buf(), format!("read_dir failed: {e}"));
+                errors.insert(dir.to_path_buf(), format!("[wasm] read_dir failed: {e}"));
                 let mut g = self.inner.write().unwrap();
                 g.scripts.clear();
                 g.errors = errors;
@@ -246,9 +354,9 @@ impl ScriptRegistry {
                 continue;
             }
 
-            match WasmScriptEngine::load(&path) {
+            match WasmScriptEngine::load(&path, script_parameters.clone()) {
                 Ok(engine) => {
-                    log::info!("loaded wasm script: {}", path.display());
+                    log::info!("[wasm] loaded wasm script: {}", path.display());
                     scripts.push(LoadedScript {
                         path: path.clone(),
                         engine: Arc::new(engine),
@@ -256,7 +364,7 @@ impl ScriptRegistry {
                 }
                 Err(e) => {
                     let msg = format!("{e:#}");
-                    log::error!("failed to load wasm script {}: {}", path.display(), msg);
+                    log::error!("[wasm] failed to load wasm script {}: {}", path.display(), msg);
                     errors.insert(path.clone(), msg);
                 }
             }
@@ -294,6 +402,75 @@ impl ScriptRegistry {
 pub enum ScriptProxyType {
     HeadUnit,
     MobileDevice,
+}
+
+const SCRIPT_REST_RESULT_TOPIC: &str = "script.rest.result";
+
+fn rest_call_blocking(method: String, path: String, body: String) -> String {
+    let path = path.trim();
+
+    //Whitelist calls
+    match (method.as_str(), path) {
+        ("POST", "/battery")
+        | ("POST", "/odometer")
+        | ("POST", "/tire-pressure")
+        | ("POST", "/inject_event")
+        | ("POST", "/inject_rotary")
+        | ("GET", "/speed")
+        | ("GET", "/battery-status")
+        | ("GET", "/odometer-status")
+        | ("GET", "/tire-pressure-status") => {}
+
+        _ => {
+            return format!(
+                r#"{{"ok":false,"status":403,"error":"route not allowed from script: {} {}"}}"#,
+                method, path
+            );
+        }
+    }
+
+    let url = format!("http://127.0.0.1{}", path);
+
+    let result = match method.as_str() {
+        "GET" => ureq::get(&url).call(),
+
+        "POST" => ureq::post(&url)
+            .set("content-type", "application/json")
+            .send_string(&body),
+
+        _ => {
+            return r#"{"ok":false,"status":405,"error":"unsupported method"}"#.to_string();
+        }
+    };
+
+    match result {
+        Ok(response) => {
+            let status = response.status();
+
+            let text = response.into_string().unwrap_or_else(|err| {
+                format!(
+                    r#"{{"ok":false,"error":"failed to read response: {}"}}"#,
+                    err
+                )
+            });
+
+            format!(
+                r#"{{"ok":true,"status":{},"body":{}}}"#,
+                status,
+                serde_json::to_string(&text).unwrap_or_else(|_| "\"\"".to_string())
+            )
+        }
+
+        Err(err) => {
+            log::warn!("wasm rest_call failed: {err}");
+
+            format!(
+                r#"{{"ok":false,"status":500,"error":{}}}"#,
+                serde_json::to_string(&err.to_string())
+                    .unwrap_or_else(|_| "\"request failed\"".to_string())
+            )
+        }
+    }
 }
 
 pub fn to_wasm_modify_context(ctx: &ModifyContext) -> WasmModifyContext {

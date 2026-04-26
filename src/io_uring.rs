@@ -46,6 +46,7 @@ pub const BUFFER_LEN: usize = 16 * 1024;
 const TCP_CLIENT_TIMEOUT: Duration = Duration::new(30, 0);
 const COMP_APP_TCP_PORT: u16 = 9999;
 const COMP_APP_TCP_PORT_WS: u16 = 9998;
+const COMP_APP_TCP_PORT_SWUPDATE: u16 = 9997;
 
 use crate::config::{Action, SharedConfig};
 use crate::config::{TCP_DHU_PORT, TCP_SERVER_PORT};
@@ -329,6 +330,21 @@ async fn tcp_wait_for_connection(listener: &mut TcpListener) -> Result<(TcpStrea
         tcp_bridge(
             &format!("{}:{}", addr.ip(), COMP_APP_TCP_PORT_WS),
             "127.0.0.1:80",
+        )
+        .await;
+    });
+
+    tokio::spawn(async move {
+        info!(
+            "{} starting TCP reverse connection for SWUpdate, Android IP: {}",
+            NAME,
+            addr.ip()
+        );
+        // FIXME use port configured by user for webserver
+        // or ignore when webserver disabled...
+        tcp_bridge(
+            &format!("{}:{}", addr.ip(), COMP_APP_TCP_PORT_SWUPDATE),
+            "127.0.0.1:8080",
         )
         .await;
     });

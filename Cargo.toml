@@ -64,6 +64,7 @@ evdev = { version = "0.13", features = ["tokio"] }
 wasmtime = { version = "38", features = ["async"], optional = true }
 wasmtime-wasi = { version = "38", optional = true }
 notify = { version = "8", optional = true }
+ureq = "2"
 
 [patch.crates-io]
 tokio-uring = { git = "https://github.com/manio/tokio-uring", branch = "musl-riscv" }
