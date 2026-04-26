@@ -377,19 +377,35 @@ impl Bluetooth {
                     } else {
                         for addr in addresses {
                             if let Ok(device) = adapter_cloned.device(addr) {
-                                let dev_name = match device.name().await {
-                                    Ok(Some(name)) => format!(" (<b><blue>{}</>)", name),
-                                    _ => String::new(),
-                                };
-                                info!(
-                                    "{} 🧲 (dongle_mode) Forcing BR/EDR device.connect() to {} {}",
-                                    NAME, addr, dev_name
-                                );
-                                if let Err(e) = device.connect().await {
-                                    debug!(
-                                        "{} (dongle_mode) connect() returned {:?} (ignored)",
-                                        NAME, e
-                                    );
+                                match device.name().await {
+                                    Ok(Some(name)) => {
+                                        if name.starts_with("AndroidAuto-") {
+                                            let dev_name = format!(" (<b><blue>{}</>)", name);
+                                            info!(
+                                                "{} 🧲 (dongle_mode) Forcing BR/EDR device.connect() to {} {}",
+                                                NAME, addr, dev_name
+                                            );
+                                            if let Err(e) = device.connect().await {
+                                                debug!(
+                                                    "{} (dongle_mode) connect() returned {:?} (ignored)",
+                                                    NAME, e
+                                                );
+                                            }
+                                        } else {
+                                            debug!(
+                                                "{} 🧲 (dongle_mode) skipping {} - name doesn't start with AndroidAuto-",
+                                                NAME,
+                                                addr
+                                            );
+                                        }
+                                    }
+                                    _ => {
+                                        debug!(
+                                            "{} 🧲 (dongle_mode) skipping {} - no device name available",
+                                            NAME,
+                                            addr
+                                        );
+                                    }
                                 }
                             }
                         }
