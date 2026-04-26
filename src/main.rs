@@ -13,6 +13,8 @@ use aa_proxy_rs::mitm::Packet;
 use aa_proxy_rs::mitm::TirePressureData;
 #[cfg(feature = "wasm-scripting")]
 use aa_proxy_rs::script_wasm::start_wasm_engine;
+#[cfg(feature = "wasm-scripting")]
+use aa_proxy_rs::script_wasm::{ScriptParameters, ScriptRegistry};
 use aa_proxy_rs::usb_gadget::uevent_listener;
 use aa_proxy_rs::usb_gadget::UsbGadgetState;
 use aa_proxy_rs::web;
@@ -211,6 +213,7 @@ async fn tokio_main(
     button_support: bool,
     profile_connected: Arc<AtomicBool>,
     ws_event_tx: broadcast::Sender<ServerEvent>,
+    script_registry: Option<Arc<ScriptRegistry>>,
 ) -> Result<()> {
     let accessory_started = Arc::new(Notify::new());
     let accessory_started_cloned = accessory_started.clone();
@@ -226,6 +229,7 @@ async fn tokio_main(
         last_speed,
         last_tire_pressure_data,
         ws_event_tx,
+        script_registry,
     };
 
     // LED support
@@ -618,9 +622,15 @@ fn main() -> Result<()> {
     let profile_connected_cloned = profile_connected.clone();
 
     #[cfg(feature = "wasm-scripting")]
-    let script_registry = start_wasm_engine(&mut runtime, WASM_HOOKS_DIR.to_string()).ok();
+    let script_parameters = ScriptParameters {
+        ws_event_tx: ws_event_tx.clone(),
+    };
+    #[cfg(feature = "wasm-scripting")]
+    let script_registry =
+        start_wasm_engine(&mut runtime, WASM_HOOKS_DIR.to_string(), script_parameters).ok();
     #[cfg(not(feature = "wasm-scripting"))]
     let script_registry = None;
+    let script_registry_cloned = script_registry.clone();
 
     runtime.spawn(async move {
         tokio_main(
@@ -640,6 +650,7 @@ fn main() -> Result<()> {
             button_support,
             profile_connected_cloned,
             ws_event_tx_cloned,
+            script_registry_cloned,
         )
         .await
     });
