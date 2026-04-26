@@ -265,18 +265,10 @@ impl AsyncWrite for UsbStreamWrite {
         let pin = self.get_mut();
 
         // extend to local buffer
+        // Submit the buffer to the underlying endpoint queue and return
+        // the number of bytes queued immediately (non-blocking).
         pin.write_queue.submit(buf.to_vec().into());
-        use futures::executor::block_on;
-
-        if pin.write_queue.pending() > 0 {
-            let res = block_on(pin.write_queue.next_complete());
-            match res.status {
-                Ok(_) => Poll::Ready(Ok(0 /*res.data.actual_length()*/)),
-                Err(e) => Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e))),
-            }
-        } else {
-            Poll::Ready(Ok(0))
-        }
+        Poll::Ready(Ok(buf.len()))
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
