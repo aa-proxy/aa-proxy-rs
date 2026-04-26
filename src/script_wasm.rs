@@ -41,14 +41,14 @@ pub fn start_wasm_engine(
     let errs: Vec<(std::path::PathBuf, String)> = script_registry.list_errors();
     for (path, err) in errs {
         error!(
-            "initial wasm script load error [{}]: {}",
+            "[wasm] initial wasm script load error [{}]: {}",
             path.display(),
             err
         );
     }
 
     info!(
-        "initial loaded wasm script count={}",
+        "[wasm] initial loaded wasm script count={}",
         script_registry.list_scripts().len()
     );
 
@@ -60,7 +60,7 @@ pub fn start_wasm_engine(
 
     wasm_watcher
         .watch(std::path::Path::new(&hook_dir), RecursiveMode::NonRecursive)
-        .map_err(|e| anyhow::anyhow!("failed to watch {}: {}", hook_dir, e))?;
+        .map_err(|e| anyhow::anyhow!("[wasm] failed to watch {}: {}", hook_dir, e))?;
 
     let script_registry_for_watch = script_registry.clone();
     runtime.spawn(async move {
@@ -73,18 +73,18 @@ pub fn start_wasm_engine(
                         let errs: Vec<(std::path::PathBuf, String)> =
                             script_registry_for_watch.list_errors();
                         for (path, err) in errs {
-                            error!("wasm script load error [{}]: {}", path.display(), err);
+                            error!("[wasm] script load error [{}]: {}", path.display(), err);
                         }
 
                         info!(
-                            "loaded wasm script count={}",
+                            "[wasm] loaded wasm script count={}",
                             script_registry_for_watch.list_scripts().len()
                         );
                     }
                     _ => {}
                 },
                 Err(err) => {
-                    error!("wasm watcher error: {}", err);
+                    error!("[wasm] watcher error: {}", err);
                 }
             }
         }
@@ -185,7 +185,7 @@ impl WasmScriptEngine {
         let path = component_path.as_ref().to_path_buf();
 
         let component = Component::from_file(&engine, &path)
-            .with_context(|| format!("loading wasm component {}", path.display()))?;
+            .with_context(|| format!("[wasm] loading wasm component {}", path.display()))?;
 
         let mut linker = Linker::<ScriptState>::new(&engine);
         bindings::aa::packet::host::add_to_linker::<ScriptState, HasSelf<ScriptState>>(
@@ -220,7 +220,7 @@ impl WasmScriptEngine {
 
         let decision = bindings
             .call_modify_packet(&mut store, &ctx, &pkt, cfg)
-            .with_context(|| format!("running wasm script {}", self.path.display()))?;
+            .with_context(|| format!("[wasm] running wasm script {}", self.path.display()))?;
 
         Ok((decision, store.data().effects.clone()))
     }
@@ -277,7 +277,7 @@ impl ScriptRegistry {
         let entries = match fs::read_dir(dir) {
             Ok(v) => v,
             Err(e) => {
-                errors.insert(dir.to_path_buf(), format!("read_dir failed: {e}"));
+                errors.insert(dir.to_path_buf(), format!("[wasm] read_dir failed: {e}"));
                 let mut g = self.inner.write().unwrap();
                 g.scripts.clear();
                 g.errors = errors;
@@ -294,7 +294,7 @@ impl ScriptRegistry {
 
             match WasmScriptEngine::load(&path, script_parameters.clone()) {
                 Ok(engine) => {
-                    log::info!("loaded wasm script: {}", path.display());
+                    log::info!("[wasm] loaded wasm script: {}", path.display());
                     scripts.push(LoadedScript {
                         path: path.clone(),
                         engine: Arc::new(engine),
@@ -302,7 +302,11 @@ impl ScriptRegistry {
                 }
                 Err(e) => {
                     let msg = format!("{e:#}");
-                    log::error!("failed to load wasm script {}: {}", path.display(), msg);
+                    log::error!(
+                        "[wasm] failed to load wasm script {}: {}",
+                        path.display(),
+                        msg
+                    );
                     errors.insert(path.clone(), msg);
                 }
             }
