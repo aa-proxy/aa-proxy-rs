@@ -202,7 +202,7 @@ impl WasmScriptEngine {
         })
     }
 
-    pub async fn run(
+    pub async fn modify_packet(
         &self,
         ctx: WasmModifyContext,
         pkt: WasmPacket,
@@ -213,7 +213,7 @@ impl WasmScriptEngine {
             ScriptState::new(self.script_parameters.clone()),
         );
         store.limiter(|state| &mut state.limits);
-        store.set_epoch_deadline(1);
+        store.set_epoch_deadline(100);
 
         let bindings =
             PacketHook::instantiate_async(&mut store, &self.component, &self.linker).await?;

@@ -358,7 +358,11 @@ async fn run_wasm_hooks(
         )?;
         let wasm_cfg = to_wasm_cfg(cfg);
 
-        match script.engine.run(wasm_ctx, wasm_pkt, wasm_cfg).await {
+        match script
+            .engine
+            .modify_packet(wasm_ctx, wasm_pkt, wasm_cfg)
+            .await
+        {
             Ok((decision, effects)) => {
                 if let Some(replacement) = effects.replacement {
                     apply_wasm_packet(pkt, replacement);
