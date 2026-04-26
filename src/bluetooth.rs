@@ -154,7 +154,10 @@ async fn send_message(
         NAME, stage, STAGES, id
     );
 
-    Ok(stream.write(&packet).await?)
+    // Ensure the full packet is written
+    stream.write_all(&packet).await?;
+
+    Ok(packet.len())
 }
 
 async fn read_message(
