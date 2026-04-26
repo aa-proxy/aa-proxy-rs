@@ -142,9 +142,9 @@ async fn send_message(
     let mut packet: Vec<u8> = vec![];
     let mut data = message.write_to_bytes()?;
 
-    // create header: 2 bytes message length + 2 bytes MessageID
-    packet.write_u16(data.len() as u16).await?;
-    packet.write_u16(id.clone() as u16).await?;
+    // create header: 2 bytes message length (big-endian) + 2 bytes MessageID
+    packet.extend_from_slice(&(data.len() as u16).to_be_bytes());
+    packet.extend_from_slice(&((id.clone() as u16).to_be_bytes()));
 
     // append data and send
     packet.append(&mut data);
