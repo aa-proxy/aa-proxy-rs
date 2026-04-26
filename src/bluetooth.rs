@@ -685,6 +685,8 @@ impl Bluetooth {
                 let _ = restart_tx.send(None);
             }));
         } else {
+            // attempt graceful shutdown of the RFCOMM stream before disconnect
+            let _ = stream.shutdown().await;
             // let some phones that have problems with handshake time to
             // finish all bluetooth frames before disconnect
             let _ = tokio::time::sleep(Duration::from_millis(150));
