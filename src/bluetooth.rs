@@ -166,13 +166,13 @@ async fn read_message(
     id: MessageId,
     started: Instant,
 ) -> Result<usize> {
-    let mut buf = vec![0; HEADER_LEN];
-    let n = stream.read_exact(&mut buf).await?;
-    debug!("received {} bytes: {:02X?}", n, buf);
+    let mut header = [0u8; HEADER_LEN];
+    stream.read_exact(&mut header).await?;
+    debug!("received header bytes: {:02X?}", header);
     let elapsed = started.elapsed();
 
-    let len: usize = u16::from_be_bytes(buf[0..=1].try_into()?).into();
-    let message_id = u16::from_be_bytes(buf[2..=3].try_into()?);
+    let len: usize = u16::from_be_bytes(header[0..2].try_into()?).into();
+    let message_id = u16::from_be_bytes(header[2..4].try_into()?);
     debug!("MessageID = {}, len = {}", message_id, len);
 
     if message_id != id.clone() as u16 {
