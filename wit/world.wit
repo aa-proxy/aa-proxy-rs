@@ -54,4 +54,5 @@ world packet-hook {
 
   import host;
   export modify-packet: func(ctx: modify-context, pkt: packet, cfg: config-view) -> decision;
+  export ws-script-handler: func(topic: string, payload: string) -> string;
 }

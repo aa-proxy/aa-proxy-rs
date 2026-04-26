@@ -274,6 +274,28 @@ impl WasmScriptEngine {
         Ok((decision, store.data().effects.clone()))
     }
 
+    pub async fn ws_script_handler(
+        &self,
+        topic: String,
+        payload: String,
+    ) -> Result<(String, ScriptEffects)> {
+        let mut store = Store::new(
+            &self.engine,
+            ScriptState::new(self.script_parameters.clone()),
+        );
+        store.limiter(|state: &mut ScriptState| &mut state.limits);
+        store.set_epoch_deadline(1000);
+
+        let bindings =
+            PacketHook::instantiate_async(&mut store, &self.component, &self.linker).await?;
+
+        let payload = bindings
+            .call_ws_script_handler(&mut store, &topic, &payload)
+            .with_context(|| format!("[wasm] running wasm script {}", self.path.display()))?;
+
+        Ok((payload, store.data().effects.clone()))
+    }
+
     pub fn tick_epoch(&self) {
         self.engine.increment_epoch();
     }
