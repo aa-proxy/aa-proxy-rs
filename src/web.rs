@@ -10,8 +10,11 @@ use crate::mitm::protos::KeyCode;
 use crate::mitm::send_key_event;
 use crate::mitm::send_rotary_event;
 use crate::mitm::Packet;
+use crate::mitm::Result;
 use crate::mitm::{send_odometer_data, OdometerData};
 use crate::mitm::{send_tire_pressure_data, TirePressureData};
+#[cfg(feature = "wasm-scripting")]
+use crate::script_wasm::{LoadedScript, ScriptRegistry};
 use axum::{
     body::Body,
     extract::{
@@ -96,6 +99,7 @@ pub struct ServerEvent {
 enum ClientWsMessage {
     Subscribe { topic: String },
     Unsubscribe { topic: String },
+    ScriptEvent { topic: String, payload: String },
 }
 
 #[derive(Debug, Serialize)]
@@ -120,6 +124,7 @@ pub struct AppState {
     pub last_speed: Arc<RwLock<Option<u32>>>,
     pub last_tire_pressure_data: Arc<RwLock<Option<TirePressureData>>>,
     pub ws_event_tx: broadcast::Sender<ServerEvent>,
+    pub script_registry: Option<Arc<ScriptRegistry>>,
 }
 
 pub fn app(state: Arc<AppState>) -> Router {
@@ -1138,6 +1143,58 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) ->
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
+#[cfg(not(feature = "wasm-scripting"))]
+async fn run_wasm_ws_hooks(
+    _topic: String,
+    _payload: String,
+    _state: Arc<AppState>,
+) -> Result<Option<bool>> {
+    Ok(None)
+}
+
+#[cfg(feature = "wasm-scripting")]
+async fn run_wasm_ws_hooks(
+    topic: String,
+    payload: String,
+    state: Arc<AppState>,
+) -> Result<Option<bool>> {
+    let Some(registry) = state.script_registry.clone() else {
+        return Ok(None);
+    };
+
+    let loaded: Vec<LoadedScript> = registry.list_scripts();
+    if loaded.is_empty() {
+        return Ok(None);
+    }
+
+    for script in loaded {
+        match script
+            .engine
+            .ws_script_handler(topic.clone(), payload.clone())
+            .await
+        {
+            Ok((result_payload, _effects)) => {
+                if !result_payload.is_empty() {
+                    let _ = state.ws_event_tx.send(ServerEvent {
+                        topic: topic.clone(),
+                        payload: result_payload,
+                    });
+
+                    return Ok(Some(true));
+                }
+            }
+            Err(err) => {
+                log::warn!(
+                    "wasm script runtime error [{}], forwarding original packet: {err:#}",
+                    script.path.display()
+                );
+            }
+        }
+    }
+
+    Ok(Some(false))
+}
+
 async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     let (mut sender, mut receiver) = socket.split();
     let mut ws_event_rx = state.ws_event_tx.subscribe();
@@ -1161,7 +1218,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
             incoming = receiver.next() => {
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
-                        info!("incoming ws message {}", &text);
+                        info!("[ws] incoming ws message {}", &text);
                         match serde_json::from_str::<ClientWsMessage>(&text) {
                             Ok(ClientWsMessage::Subscribe { topic }) => {
                                 subscriptions.insert(topic.clone());
@@ -1175,6 +1232,28 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                 let msg = ServerWsMessage::Unsubscribed { topic };
                                 if sender.send(Message::Text(serde_json::to_string(&msg).unwrap())).await.is_err() {
                                     break;
+                                }
+                            }
+                            Ok(ClientWsMessage::ScriptEvent { topic, payload }) => {
+                                match run_wasm_ws_hooks(topic.clone(), payload.clone(), state.clone()).await {
+                                    Ok(Some(true)) => {
+                                        // wasm handled it and already emitted replacement event
+                                    }
+                                    Ok(Some(false)) | Ok(None) => {
+                                        // wasm did not handle it, forward original event
+                                        let _ = state.ws_event_tx.send(ServerEvent {
+                                            topic,
+                                            payload,
+                                        });
+                                    }
+                                    Err(err) => {
+                                        log::warn!("wasm ws hook failed, forwarding original packet: {err:#}");
+
+                                        let _ = state.ws_event_tx.send(ServerEvent {
+                                            topic,
+                                            payload,
+                                        });
+                                    }
                                 }
                             }
                             Err(_) => {
@@ -1205,13 +1284,33 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                     Ok(ev) => {
                         info!("Received event {}, payload {}", &ev.topic, &ev.payload);
                         if subscriptions.contains(&ev.topic) {
-                            let msg = ServerWsMessage::Event {
-                                topic: ev.topic,
-                                payload: ev.payload,
-                            };
+                            match run_wasm_ws_hooks(ev.topic.clone(), ev.payload.clone(), state.clone()).await {
+                                Ok(Some(true)) => {
+                                    // wasm handled it and already emitted replacement event
+                                }
+                                Ok(Some(false)) | Ok(None) => {
+                                    // wasm did not handle it, forward original event
+                                    let msg = ServerWsMessage::Event {
+                                        topic: ev.topic,
+                                        payload: ev.payload,
+                                    };
 
-                            if sender.send(Message::Text(serde_json::to_string(&msg).unwrap())).await.is_err() {
-                                break;
+                                    if sender.send(Message::Text(serde_json::to_string(&msg).unwrap())).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                Err(err) => {
+                                    log::warn!("wasm ws hook failed, forwarding original packet: {err:#}");
+
+                                    let msg = ServerWsMessage::Event {
+                                        topic: ev.topic,
+                                        payload: ev.payload,
+                                    };
+
+                                    if sender.send(Message::Text(serde_json::to_string(&msg).unwrap())).await.is_err() {
+                                        break;
+                                    }
+                                }
                             }
                         }
                     }
