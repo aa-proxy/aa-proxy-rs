@@ -176,6 +176,40 @@ impl host::Host for ScriptState {
             }
         }
     }
+
+    fn rest_call(&mut self, method: String, path: String, body: String) -> String {
+        rest_call_blocking(method, path, body)
+    }
+
+    fn rest_call_async(&mut self, method: String, path: String, body: String) -> String {
+        let request_id = uuid::Uuid::new_v4().to_string();
+
+        let tx = self.effects.script_parameters.ws_event_tx.clone();
+        let request_id_for_task = request_id.clone();
+
+        std::thread::spawn(move || {
+            let result_payload = rest_call_blocking(method.clone(), path.clone(), body);
+
+            let payload = serde_json::json!({
+                "requestId": request_id_for_task,
+                "method": method,
+                "path": path,
+                "result": result_payload,
+            })
+            .to_string();
+
+            let _ = tx.send(ServerEvent {
+                topic: SCRIPT_REST_RESULT_TOPIC.to_string(),
+                payload,
+            });
+        });
+
+        request_id
+    }
+
+    fn rest_result_topic(&mut self) -> String {
+        SCRIPT_REST_RESULT_TOPIC.to_string()
+    }
 }
 
 pub struct WasmScriptEngine {
@@ -359,6 +393,75 @@ impl ScriptRegistry {
 pub enum ScriptProxyType {
     HeadUnit,
     MobileDevice,
+}
+
+const SCRIPT_REST_RESULT_TOPIC: &str = "script.rest.result";
+
+fn rest_call_blocking(method: String, path: String, body: String) -> String {
+    let path = path.trim();
+
+    //Whitelist calls
+    match (method.as_str(), path) {
+        ("POST", "/battery")
+        | ("POST", "/odometer")
+        | ("POST", "/tire-pressure")
+        | ("POST", "/inject_event")
+        | ("POST", "/inject_rotary")
+        | ("GET", "/speed")
+        | ("GET", "/battery-status")
+        | ("GET", "/odometer-status")
+        | ("GET", "/tire-pressure-status") => {}
+
+        _ => {
+            return format!(
+                r#"{{"ok":false,"status":403,"error":"route not allowed from script: {} {}"}}"#,
+                method, path
+            );
+        }
+    }
+
+    let url = format!("http://127.0.0.1{}", path);
+
+    let result = match method.as_str() {
+        "GET" => ureq::get(&url).call(),
+
+        "POST" => ureq::post(&url)
+            .set("content-type", "application/json")
+            .send_string(&body),
+
+        _ => {
+            return r#"{"ok":false,"status":405,"error":"unsupported method"}"#.to_string();
+        }
+    };
+
+    match result {
+        Ok(response) => {
+            let status = response.status();
+
+            let text = response.into_string().unwrap_or_else(|err| {
+                format!(
+                    r#"{{"ok":false,"error":"failed to read response: {}"}}"#,
+                    err
+                )
+            });
+
+            format!(
+                r#"{{"ok":true,"status":{},"body":{}}}"#,
+                status,
+                serde_json::to_string(&text).unwrap_or_else(|_| "\"\"".to_string())
+            )
+        }
+
+        Err(err) => {
+            log::warn!("wasm rest_call failed: {err}");
+
+            format!(
+                r#"{{"ok":false,"status":500,"error":{}}}"#,
+                serde_json::to_string(&err.to_string())
+                    .unwrap_or_else(|_| "\"request failed\"".to_string())
+            )
+        }
+    }
 }
 
 pub fn to_wasm_modify_context(ctx: &ModifyContext) -> WasmModifyContext {
