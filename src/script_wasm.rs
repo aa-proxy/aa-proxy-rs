@@ -161,6 +161,21 @@ impl host::Host for ScriptState {
     fn error(&mut self, msg: String) {
         log::error!("[wasm] {}", msg);
     }
+
+    fn send_ws_event(&mut self, topic: String, payload: String) -> bool {
+        match self
+            .effects
+            .script_parameters
+            .ws_event_tx
+            .send(ServerEvent { topic, payload })
+        {
+            Ok(_) => true,
+            Err(err) => {
+                log::warn!("[wasm] failed to send websocket event from wasm host: {err}");
+                false
+            }
+        }
+    }
 }
 
 pub struct WasmScriptEngine {

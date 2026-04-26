@@ -43,6 +43,7 @@ interface host {
   send: func(pkt: packet);
   info: func(msg: string);
   error: func(msg: string);
+  send-ws-event: func(topic: string, payload: string) -> bool;
 }
 
 world packet-hook {
