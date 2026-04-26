@@ -15,6 +15,8 @@ use aa_proxy_rs::mitm::TirePressureData;
 use aa_proxy_rs::script_wasm::start_wasm_engine;
 #[cfg(feature = "wasm-scripting")]
 use aa_proxy_rs::script_wasm::{ScriptParameters, ScriptRegistry};
+#[cfg(not(feature = "wasm-scripting"))]
+type ScriptRegistry = ();
 use aa_proxy_rs::usb_gadget::uevent_listener;
 use aa_proxy_rs::usb_gadget::UsbGadgetState;
 use aa_proxy_rs::web;

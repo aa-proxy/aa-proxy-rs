@@ -15,6 +15,8 @@ use crate::mitm::{send_odometer_data, OdometerData};
 use crate::mitm::{send_tire_pressure_data, TirePressureData};
 #[cfg(feature = "wasm-scripting")]
 use crate::script_wasm::{LoadedScript, ScriptRegistry};
+#[cfg(not(feature = "wasm-scripting"))]
+type ScriptRegistry = ();
 use axum::{
     body::Body,
     extract::{
