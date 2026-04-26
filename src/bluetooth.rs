@@ -615,10 +615,49 @@ impl Bluetooth {
                     if let Ok(Some(action)) = action {
                         // check if we need to stop now
                         if action == Action::Stop {
-                            // disconnect and break
-                            if let Ok(device) = adapter_cloned.device(bluer::Address(*address)) {
-                                let _ = device.disconnect().await;
+                            // attempt graceful RFCOMM shutdown then drain pending data, then disconnect
+                            match stream.shutdown().await {
+                                Ok(_) => debug!("{} RFCOMM stream shutdown succeeded", NAME),
+                                Err(e) => warn!("{} RFCOMM stream shutdown error: {}", NAME, e),
                             }
+
+                            // Try to drain any pending incoming data with short timeouts
+                            let mut drain_buf = [0u8; 256];
+                            loop {
+                                match timeout(
+                                    Duration::from_millis(50),
+                                    stream.read(&mut drain_buf),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(0)) => {
+                                        debug!("{} RFCOMM drain: EOF", NAME);
+                                        break;
+                                    }
+                                    Ok(Ok(n)) => {
+                                        debug!("{} RFCOMM drained {} bytes", NAME, n);
+                                        continue;
+                                    }
+                                    Ok(Err(e)) => {
+                                        debug!("{} RFCOMM drain read error: {}", NAME, e);
+                                        break;
+                                    }
+                                    Err(_) => {
+                                        debug!("{} RFCOMM drain timeout, no more data", NAME);
+                                        break;
+                                    }
+                                }
+                            }
+
+                            // allow controller time to finish frames
+                            tokio::time::sleep(Duration::from_millis(500)).await;
+
+                            if let Ok(device) = adapter_cloned.device(bluer::Address(*address)) {
+                                if let Err(e) = device.disconnect().await {
+                                    warn!("{} device.disconnect error: {}", NAME, e);
+                                }
+                            }
+
                             break;
                         }
                     }
