@@ -34,6 +34,7 @@ dependencies = [
  "notify",
  "nusb",
  "openssl",
+ "openssl-sys",
  "protobuf",
  "protobuf-codegen",
  "protobuf-json-mapping",
