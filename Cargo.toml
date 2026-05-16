@@ -35,7 +35,7 @@ humantime = "2.1.0"
 log = "0.4.22"
 netif = "0.1.6"
 openssl = { version = "0.10", features = ["vendored"] }
-openssl-sys = "0.9.109"
+openssl-sys = "=0.9.109"
 nusb = { version = "0.2.3", features = ["tokio"] }
 thiserror = "2.0.12"
 byteorder = "1.5.0"
