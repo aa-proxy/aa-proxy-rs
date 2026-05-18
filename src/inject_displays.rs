@@ -1,4 +1,4 @@
-use crate::mitm::protos::{DisplayType, VideoCodecResolutionType, VideoFrameRateType};
+use crate::mitm::protos::{DisplayType, KeyCode, VideoCodecResolutionType, VideoFrameRateType};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashSet;
@@ -92,6 +92,66 @@ where
     VideoFrameRateType::from_str(&s).map_err(serde::de::Error::custom)
 }
 
+fn normalize_keycode_name(value: &str) -> String {
+    let normalized = value.trim().to_ascii_uppercase().replace('-', "_");
+    match normalized.as_str() {
+        "NAVIGATION" => "KEYCODE_NAVIGATION".to_string(),
+        "TURN_CARD" | "TURNCARD" => "KEYCODE_TURN_CARD".to_string(),
+        _ if normalized.starts_with("KEYCODE_") => normalized,
+        _ => format!("KEYCODE_{}", normalized),
+    }
+}
+
+fn parse_keycode(value: &str) -> Result<KeyCode> {
+    let normalized = normalize_keycode_name(value);
+    match normalized.as_str() {
+        "KEYCODE_NAVIGATION" => Ok(KeyCode::KEYCODE_NAVIGATION),
+        "KEYCODE_TURN_CARD" => Ok(KeyCode::KEYCODE_TURN_CARD),
+        "KEYCODE_UNKNOWN" => Ok(KeyCode::KEYCODE_UNKNOWN),
+        _ => Err(anyhow!(
+            "invalid initial_content_keycode '{}': supported values are KEYCODE_NAVIGATION and KEYCODE_TURN_CARD",
+            value
+        )),
+    }
+}
+
+fn keycode_name(value: KeyCode) -> &'static str {
+    match value {
+        KeyCode::KEYCODE_NAVIGATION => "KEYCODE_NAVIGATION",
+        KeyCode::KEYCODE_TURN_CARD => "KEYCODE_TURN_CARD",
+        KeyCode::KEYCODE_UNKNOWN => "KEYCODE_UNKNOWN",
+        _ => "KEYCODE_UNKNOWN",
+    }
+}
+
+fn serialize_initial_content_keycode<S>(
+    value: &Option<KeyCode>,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match value {
+        Some(value) => serializer.serialize_some(keycode_name(*value)),
+        None => serializer.serialize_none(),
+    }
+}
+
+fn deserialize_initial_content_keycode<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<KeyCode>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let Some(s) = Option::<String>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    if s.trim().is_empty() {
+        return Ok(None);
+    }
+    parse_keycode(&s).map(Some).map_err(serde::de::Error::custom)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct InjectDisplaysFile {
@@ -135,6 +195,13 @@ pub struct InjectDisplayProfile {
         deserialize_with = "deserialize_frame_rate"
     )]
     pub frame_rate: VideoFrameRateType,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_initial_content_keycode",
+        deserialize_with = "deserialize_initial_content_keycode"
+    )]
+    pub initial_content_keycode: Option<KeyCode>,
     pub width_margin: u32,
     pub height_margin: u32,
     #[serde(default = "default_density")]
@@ -157,6 +224,7 @@ impl Default for InjectDisplayProfile {
             display_type: default_display_type(),
             codec_resolution: default_codec_resolution(),
             frame_rate: default_frame_rate(),
+            initial_content_keycode: None,
             width_margin: 0,
             height_margin: 0,
             density: default_density(),
@@ -231,10 +299,24 @@ fn validate_profile(profile: &InjectDisplayProfile) -> Result<()> {
         return Err(anyhow!("display id must not be empty"));
     }
 
-    if profile.input_source && profile.display_type == DisplayType::DISPLAY_TYPE_MAIN {
-        return Err(anyhow!(
-            "input_source is not supported for DISPLAY_TYPE_MAIN yet"
-        ));
+    match profile.display_type {
+        DisplayType::DISPLAY_TYPE_MAIN => {
+            return Err(anyhow!("DISPLAY_TYPE_MAIN injection is not supported"));
+        }
+        DisplayType::DISPLAY_TYPE_CLUSTER => {
+            if profile.initial_content_keycode.is_some() {
+                return Err(anyhow!(
+                    "initial_content_keycode is only supported for DISPLAY_TYPE_AUXILIARY"
+                ));
+            }
+        }
+        DisplayType::DISPLAY_TYPE_AUXILIARY => {
+            if !profile.input_source {
+                return Err(anyhow!(
+                    "input_source=true is required for DISPLAY_TYPE_AUXILIARY"
+                ));
+            }
+        }
     }
 
     if profile.touch_width < 0 || profile.touch_height < 0 {
@@ -246,13 +328,25 @@ fn validate_profile(profile: &InjectDisplayProfile) -> Result<()> {
 
 fn validate_file(file: &InjectDisplaysFile) -> Result<()> {
     let mut ids = HashSet::new();
+    let mut enabled_cluster_count = 0usize;
+
     for profile in &file.displays {
         validate_profile(profile)
             .with_context(|| format!("invalid injected display profile '{}'", profile.id))?;
         if !ids.insert(profile.id.as_str()) {
             return Err(anyhow!("duplicate injected display id: {}", profile.id));
         }
+        if profile.enabled && profile.display_type == DisplayType::DISPLAY_TYPE_CLUSTER {
+            enabled_cluster_count += 1;
+        }
     }
+
+    if enabled_cluster_count > 1 {
+        return Err(anyhow!(
+            "only one enabled DISPLAY_TYPE_CLUSTER injected display is supported"
+        ));
+    }
+
     Ok(())
 }
 

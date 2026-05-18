@@ -56,6 +56,7 @@ struct DisplayProfile {
     display_id: u32,
     codec_resolution: VideoCodecResolutionType,
     frame_rate: VideoFrameRateType,
+    initial_content_keycode: Option<KeyCode>,
     width_margin: u32,
     height_margin: u32,
     density: u32,
@@ -92,6 +93,11 @@ fn profile_from_config(
         display_id,
         codec_resolution: profile.codec_resolution,
         frame_rate: profile.frame_rate,
+        initial_content_keycode: if profile.display_type == DisplayType::DISPLAY_TYPE_AUXILIARY {
+            Some(profile.initial_content_keycode.unwrap_or(KeyCode::KEYCODE_NAVIGATION))
+        } else {
+            None
+        },
         width_margin: profile.width_margin,
         height_margin: profile.height_margin,
         density: if cfg.dpi > 0 { cfg.dpi.into() } else { profile.density },
@@ -171,6 +177,11 @@ fn create_media_sink_service(id: i32, profile: DisplayProfile) -> Service {
     sink.video_configs.push(video_cfg);
     sink.set_display_id(profile.display_id);
     sink.set_display_type(profile.display_type);
+    if profile.display_type == DisplayType::DISPLAY_TYPE_AUXILIARY {
+        if let Some(keycode) = profile.initial_content_keycode {
+            sink.set_initial_content_keycode(keycode);
+        }
+    }
 
     let mut service = Service::new();
     service.set_id(id);
