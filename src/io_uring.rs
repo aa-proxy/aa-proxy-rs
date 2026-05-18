@@ -2,7 +2,7 @@
 use crate::script_wasm::ScriptRegistry;
 #[cfg(not(feature = "wasm-scripting"))]
 type ScriptRegistry = ();
-use crate::mitm::SharedServiceDiscoveryResponse;
+use crate::mitm::{SharedMediaChannels, SharedMediaSinks, SharedServiceDiscoveryResponse};
 use crate::web::ServerEvent;
 use bytesize::ByteSize;
 use core::net::SocketAddr;
@@ -58,9 +58,7 @@ use crate::ev::spawn_ev_client_task;
 use crate::ev::BatteryData;
 use crate::ev::EvTaskCommand;
 use crate::mitm::endpoint_reader;
-use crate::mitm::media_tcp_server;
 use crate::mitm::proxy;
-use crate::mitm::MediaSink;
 use crate::mitm::Packet;
 use crate::mitm::ProxyType;
 use crate::usb_stream;
@@ -507,40 +505,16 @@ pub async fn io_loop(
     let mut dhu_listener = Some(TcpListener::bind(bind_addr).unwrap());
     info!("{} 🛰️ DHU TCP server bound to: <u>{}</u>", NAME, bind_addr);
 
-    // create media tap sinks once — they persist across reconnects (requires mitm=true)
-    let persistent_media_sinks: HashMap<u8, MediaSink> = {
+    // Shared media tap sink registry. TCP listeners are created lazily when the
+    // rewritten ServiceDiscoveryResponse is known, so audio ports follow the actual SDR.
+    let persistent_media_sinks: SharedMediaSinks = {
         let config_snapshot = config.read().await.clone();
-        let mut map = HashMap::new();
-        if let Some(base_port) = config_snapshot.media_dump_base_port {
-            if !config_snapshot.mitm {
-                error!(
-                    "<red>media_dump_base_port is set but mitm = false — media tap disabled!</>"
-                );
-            } else {
-                let labels = [
-                    (0u8, "video-main"),
-                    (1u8, "video-cluster"),
-                    (2u8, "video-aux"),
-                    (3u8, "audio-guidance"),
-                    (4u8, "audio-system"),
-                    (5u8, "audio-media"),
-                    (6u8, "audio-telephony"),
-                ];
-                for (offset, label) in labels {
-                    let sink = MediaSink::new(128);
-                    let port = base_port + offset as u16;
-                    tokio::spawn(media_tcp_server(
-                        port,
-                        label.to_string(),
-                        sink.clone(),
-                        config_snapshot.media_wait_for_live_idr,
-                    ));
-                    map.insert(offset, sink);
-                }
-            }
+        if config_snapshot.media_dump_base_port.is_some() && !config_snapshot.mitm {
+            error!("<red>media_dump_base_port is set but mitm = false — media tap disabled!</>");
         }
-        map
+        Arc::new(Mutex::new(HashMap::new()))
     };
+    let persistent_media_channels: SharedMediaChannels = Arc::new(Mutex::new(HashMap::new()));
 
     loop {
         // reload new config
@@ -782,6 +756,7 @@ pub async fn io_loop(
             Some(tx_hu.clone()),
             script_registry.clone(),
             persistent_media_sinks.clone(),
+            persistent_media_channels.clone(),
             ws_event_tx.clone(),
         ));
         from_stream = tokio_uring::spawn(proxy(
@@ -801,6 +776,7 @@ pub async fn io_loop(
             Some(tx_md.clone()),
             script_registry.clone(),
             persistent_media_sinks.clone(),
+            persistent_media_channels.clone(),
             ws_event_tx.clone(),
         ));
 

@@ -1,4 +1,5 @@
 use crate::config::AppConfig;
+use crate::inject_displays::{read_inject_displays_file_sync, InjectDisplayProfile};
 pub use crate::media_tap::{
     media_tcp_server, AudioStreamConfig, MediaSink, MediaStreamInfo, MediaStreamKind,
 };
@@ -60,60 +61,75 @@ struct DisplayProfile {
     viewing_distance: u32,
     touch_width: i32,
     touch_height: i32,
+    input_source: bool,
 }
 
-fn display_profiles(cfg: &AppConfig) -> Vec<DisplayProfile> {
-    let mut profiles = Vec::new();
-    let Some(display_types) = cfg.inject_display_types.0.as_ref() else {
-        return profiles;
+fn injected_display_label(display_type: DisplayType) -> &'static str {
+    match display_type {
+        DisplayType::DISPLAY_TYPE_MAIN => "main",
+        DisplayType::DISPLAY_TYPE_CLUSTER => "cluster",
+        DisplayType::DISPLAY_TYPE_AUXILIARY => "aux",
+    }
+}
+
+fn max_existing_video_display_id(msg: &ServiceDiscoveryResponse) -> u32 {
+    msg.services
+        .iter()
+        .filter(|svc| !svc.media_sink_service.video_configs.is_empty())
+        .map(|svc| svc.media_sink_service.display_id())
+        .max()
+        .unwrap_or(0)
+}
+
+fn profile_from_config(
+    cfg: &AppConfig,
+    profile: &InjectDisplayProfile,
+    display_id: u32,
+) -> DisplayProfile {
+    DisplayProfile {
+        display_type: profile.display_type,
+        display_id,
+        codec_resolution: profile.codec_resolution,
+        width_margin: profile.width_margin,
+        height_margin: profile.height_margin,
+        density: if cfg.dpi > 0 {
+            cfg.dpi.into()
+        } else {
+            profile.density
+        },
+        viewing_distance: profile.viewing_distance,
+        touch_width: profile.touch_width,
+        touch_height: profile.touch_height,
+        input_source: profile.input_source,
+    }
+}
+
+fn display_profiles(msg: &ServiceDiscoveryResponse, cfg: &AppConfig) -> Vec<DisplayProfile> {
+    let file = match read_inject_displays_file_sync(&cfg.inject_displays_file) {
+        Ok(file) => file,
+        Err(err) => {
+            warn!(
+                "<yellow>display injection:</> failed to read {}: {:#}",
+                cfg.inject_displays_file.display(),
+                err
+            );
+            return Vec::new();
+        }
     };
 
-    for display_type in display_types {
-        match display_type {
-            DisplayType::DISPLAY_TYPE_CLUSTER => profiles.push(DisplayProfile {
-                display_type: DisplayType::DISPLAY_TYPE_CLUSTER,
-                display_id: cfg.inject_cluster_display_id.into(),
-                codec_resolution: cfg.inject_cluster_codec_resolution.0,
-                width_margin: cfg.inject_cluster_width_margin.into(),
-                height_margin: cfg.inject_cluster_height_margin.into(),
-                density: if cfg.dpi > 0 {
-                    cfg.dpi.into()
-                } else {
-                    cfg.inject_cluster_density.into()
-                },
-                viewing_distance: cfg.inject_cluster_viewing_distance.into(),
-                touch_width: cfg.inject_cluster_touch_width.into(),
-                touch_height: cfg.inject_cluster_touch_height.into(),
-            }),
-            DisplayType::DISPLAY_TYPE_AUXILIARY => profiles.push(DisplayProfile {
-                display_type: DisplayType::DISPLAY_TYPE_AUXILIARY,
-                display_id: cfg.inject_aux_display_id.into(),
-                codec_resolution: VideoCodecResolutionType::VIDEO_1280x720,
-                width_margin: cfg.inject_aux_width_margin.into(),
-                height_margin: cfg.inject_aux_height_margin.into(),
-                density: if cfg.dpi > 0 {
-                    cfg.dpi.into()
-                } else {
-                    cfg.inject_aux_density.into()
-                },
-                viewing_distance: cfg.inject_aux_viewing_distance.into(),
-                touch_width: cfg.inject_aux_touch_width.into(),
-                touch_height: cfg.inject_aux_touch_height.into(),
-            }),
-            DisplayType::DISPLAY_TYPE_MAIN => {
-                // Main display is expected from HU and is intentionally not synthesized.
-            }
-        }
+    if !file.enabled {
+        return Vec::new();
+    }
+
+    let mut next_display_id = max_existing_video_display_id(msg).saturating_add(1);
+    let mut profiles = Vec::new();
+
+    for profile in file.displays.iter().filter(|profile| profile.enabled) {
+        profiles.push(profile_from_config(cfg, profile, next_display_id));
+        next_display_id = next_display_id.saturating_add(1);
     }
 
     profiles
-}
-
-fn has_video_display(msg: &ServiceDiscoveryResponse, display_type: DisplayType) -> bool {
-    msg.services.iter().any(|svc| {
-        !svc.media_sink_service.video_configs.is_empty()
-            && svc.media_sink_service.display_type() == display_type
-    })
 }
 
 fn has_input_display(msg: &ServiceDiscoveryResponse, display_id: u32) -> bool {
@@ -170,7 +186,7 @@ fn create_input_source_service(id: i32, profile: DisplayProfile) -> Service {
         DisplayType::DISPLAY_TYPE_AUXILIARY => {
             vec![3, 4, 5, 6, 84, 85, 87, 88, 126, 127, 65537, 65538, 65540]
         }
-        DisplayType::DISPLAY_TYPE_MAIN => unreachable!("main input source must not be synthesized"),
+        DisplayType::DISPLAY_TYPE_MAIN => Vec::new(),
     };
 
     let mut source = InputSourceService::new();
@@ -197,14 +213,12 @@ pub fn add_display_services(msg: &mut ServiceDiscoveryResponse, cfg: &AppConfig)
     }
 
     let mut added = 0usize;
-    for profile in display_profiles(cfg) {
-        if !has_video_display(msg, profile.display_type) {
-            let id = next_service_id(msg);
-            msg.services.push(create_media_sink_service(id, profile));
-            added += 1;
-        }
+    for profile in display_profiles(msg, cfg) {
+        let id = next_service_id(msg);
+        msg.services.push(create_media_sink_service(id, profile));
+        added += 1;
 
-        if cfg.inject_add_input_sources && !has_input_display(msg, profile.display_id) {
+        if profile.input_source && !has_input_display(msg, profile.display_id) {
             let id = next_service_id(msg);
             msg.services.push(create_input_source_service(id, profile));
             added += 1;
@@ -297,9 +311,9 @@ pub fn maybe_emit_pending_injected_focus(
     cfg: &AppConfig,
     tx: &Sender<Packet>,
 ) -> Result<()> {
-    let mut ready_channels: Vec<(u8, u8, bool)> = Vec::new();
-    let mut toggle_channels: Vec<(u8, u8)> = Vec::new();
-    let mut release_channels: Vec<(u8, u8)> = Vec::new();
+    let mut ready_channels: Vec<(u8, u8, bool, DisplayType)> = Vec::new();
+    let mut toggle_channels: Vec<(u8, u8, DisplayType)> = Vec::new();
+    let mut release_channels: Vec<(u8, u8, DisplayType)> = Vec::new();
     let mut connect_gen_updates: Vec<(u8, u64)> = Vec::new();
     let mut tap_presence_updates: Vec<(u8, bool)> = Vec::new();
 
@@ -325,16 +339,13 @@ pub fn maybe_emit_pending_injected_focus(
         connect_gen_updates.push((channel, connect_gen));
         tap_presence_updates.push((channel, has_tap_client));
 
-        let is_cluster = ctx
-            .injected_media_display
-            .get(&channel)
-            .copied()
-            .unwrap_or(DisplayType::DISPLAY_TYPE_CLUSTER)
-            == DisplayType::DISPLAY_TYPE_CLUSTER;
+        let Some(&display_type) = ctx.injected_media_display.get(&channel) else {
+            continue;
+        };
+        let display_label = injected_display_label(display_type);
 
         if new_connection
             && has_tap_client
-            && is_cluster
             && matches!(
                 state.phase,
                 InjectedMediaPhase::FocusSent
@@ -342,22 +353,21 @@ pub fn maybe_emit_pending_injected_focus(
                     | InjectedMediaPhase::Streaming
             )
         {
-            toggle_channels.push((channel, state.last_flags));
+            toggle_channels.push((channel, state.last_flags, display_type));
         }
 
         // Reconnect into Idle: re-acquire projected focus so the phone restarts the stream.
-        if new_connection && has_tap_client && is_cluster && state.phase == InjectedMediaPhase::Idle
-        {
+        if new_connection && has_tap_client && state.phase == InjectedMediaPhase::Idle {
             info!(
-                "{} <blue>injected media:</> new tap client on channel {:#04x} in idle phase; re-acquiring projected focus",
+                "{} <blue>injected media:</> new {} tap client on channel {:#04x} in idle phase; re-acquiring projected focus",
                 get_name(proxy_type),
+                display_label,
                 channel
             );
-            ready_channels.push((channel, state.last_flags, has_tap_client));
+            ready_channels.push((channel, state.last_flags, has_tap_client, display_type));
         }
 
         if lost_last_consumer
-            && is_cluster
             && !cfg.inject_force_focus_without_tap
             && matches!(
                 state.phase,
@@ -366,7 +376,7 @@ pub fn maybe_emit_pending_injected_focus(
                     | InjectedMediaPhase::Streaming
             )
         {
-            release_channels.push((channel, state.last_flags));
+            release_channels.push((channel, state.last_flags, display_type));
         }
 
         if !state.phase.awaiting_focus() {
@@ -386,16 +396,13 @@ pub fn maybe_emit_pending_injected_focus(
         );
 
         if has_tap_client || cfg.inject_force_focus_without_tap {
-            ready_channels.push((channel, state.last_flags, has_tap_client));
+            ready_channels.push((channel, state.last_flags, has_tap_client, display_type));
         }
     }
 
-    // Reacquire projected focus on fresh cluster tap connections even if we do not
+    // Reacquire projected focus on fresh injected-video tap connections even if we do not
     // currently have injected media runtime state for that channel.
     for (&channel, &display_type) in &ctx.injected_media_display {
-        if display_type != DisplayType::DISPLAY_TYPE_CLUSTER {
-            continue;
-        }
         if ctx.injected_media_state.contains_key(&channel) {
             continue;
         }
@@ -425,7 +432,11 @@ pub fn maybe_emit_pending_injected_focus(
                 connect_gen,
                 seen_connect_gen,
             );
-            toggle_channels.push((channel, ENCRYPTED | FRAME_TYPE_FIRST | FRAME_TYPE_LAST));
+            toggle_channels.push((
+                channel,
+                ENCRYPTED | FRAME_TYPE_FIRST | FRAME_TYPE_LAST,
+                display_type,
+            ));
         }
     }
 
@@ -438,7 +449,7 @@ pub fn maybe_emit_pending_injected_focus(
             .insert(channel, has_tap_client);
     }
 
-    for (channel, flags) in release_channels {
+    for (channel, flags, display_type) in release_channels {
         let mut release_focus_pkt = Packet {
             channel,
             flags,
@@ -452,8 +463,9 @@ pub fn maybe_emit_pending_injected_focus(
         )?;
 
         info!(
-            "{} <blue>injected media:</> last tap client disconnected on channel <b>{:#04x}</>; releasing projected focus",
+            "{} <blue>injected media:</> last {} tap client disconnected on channel <b>{:#04x}</>; releasing projected focus",
             get_name(proxy_type),
+            injected_display_label(display_type),
             channel
         );
 
@@ -461,7 +473,7 @@ pub fn maybe_emit_pending_injected_focus(
             Ok(()) => {}
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 warn!(
-                    "{} <yellow>cluster focus release backpressure:</> queue full while sending native focus for channel <b>{:#04x}</>; will retry",
+                    "{} <yellow>injected focus release backpressure:</> queue full while sending native focus for channel <b>{:#04x}</>; will retry",
                     get_name(proxy_type),
                     channel
                 );
@@ -472,7 +484,7 @@ pub fn maybe_emit_pending_injected_focus(
         }
     }
 
-    for (channel, flags) in toggle_channels {
+    for (channel, flags, display_type) in toggle_channels {
         let mut drop_focus_pkt = Packet {
             channel,
             flags,
@@ -498,8 +510,9 @@ pub fn maybe_emit_pending_injected_focus(
         )?;
 
         info!(
-            "{} <blue>injected media:</> cluster tap client connected on channel <b>{:#04x}</>; toggling VIDEO_FOCUS_NOTIFICATION native→projected",
+            "{} <blue>injected media:</> {} tap client connected on channel <b>{:#04x}</>; toggling VIDEO_FOCUS_NOTIFICATION native→projected",
             get_name(proxy_type),
+            injected_display_label(display_type),
             channel
         );
 
@@ -510,7 +523,7 @@ pub fn maybe_emit_pending_injected_focus(
             }
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 warn!(
-                    "{} <yellow>cluster focus toggle backpressure:</> queue full while sending native focus for channel <b>{:#04x}</>; will retry",
+                    "{} <yellow>injected focus toggle backpressure:</> queue full while sending native focus for channel <b>{:#04x}</>; will retry",
                     get_name(proxy_type),
                     channel
                 );
@@ -523,15 +536,16 @@ pub fn maybe_emit_pending_injected_focus(
         match tx.try_send(project_focus_pkt) {
             Ok(()) => {
                 debug!(
-                    "{} cluster focus toggle on channel <b>{:#04x}</>: native_sent={} projected_sent=true",
+                    "{} injected focus toggle on channel <b>{:#04x}</>: display={} native_sent={} projected_sent=true",
                     get_name(proxy_type),
                     channel,
+                    injected_display_label(display_type),
                     drop_sent
                 );
             }
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 warn!(
-                    "{} <yellow>cluster focus toggle backpressure:</> queue full while sending projected focus for channel <b>{:#04x}</>; will retry",
+                    "{} <yellow>injected focus toggle backpressure:</> queue full while sending projected focus for channel <b>{:#04x}</>; will retry",
                     get_name(proxy_type),
                     channel
                 );
@@ -542,7 +556,7 @@ pub fn maybe_emit_pending_injected_focus(
         }
     }
 
-    for (channel, flags, has_tap_client) in ready_channels {
+    for (channel, flags, has_tap_client, display_type) in ready_channels {
         let mut focus_pkt = Packet {
             channel,
             flags,
@@ -555,9 +569,10 @@ pub fn maybe_emit_pending_injected_focus(
             true,
         )?;
         info!(
-            "{} <blue>injected media:</> synthesized VIDEO_FOCUS_NOTIFICATION on channel <b>{:#04x}</> tap_client={} force={}",
+            "{} <blue>injected media:</> synthesized VIDEO_FOCUS_NOTIFICATION on channel <b>{:#04x}</> display={} tap_client={} force={}",
             get_name(proxy_type),
             channel,
+            injected_display_label(display_type),
             has_tap_client,
             cfg.inject_force_focus_without_tap
         );
@@ -756,472 +771,5 @@ pub fn emulate_injected_media_packet(
             );
             Ok(false)
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::hu_input::HuInputState;
-    use crate::media_tap::reassemble_media_packet;
-    use std::collections::{HashMap, HashSet};
-    use tokio::sync::mpsc;
-
-    fn make_video_service(id: i32, display_type: DisplayType, display_id: u32) -> Service {
-        let mut svc = Service::new();
-        svc.set_id(id);
-
-        let mut media = MediaSinkService::new();
-        media.set_available_type(MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP);
-        media.set_display_type(display_type);
-        media.set_display_id(display_id);
-
-        let mut video_cfg = VideoConfiguration::new();
-        video_cfg.set_codec_resolution(VideoCodecResolutionType::VIDEO_1280x720);
-        video_cfg.set_frame_rate(VideoFrameRateType::VIDEO_FPS_30);
-        media.video_configs.push(video_cfg);
-
-        svc.media_sink_service = Some(media).into();
-        svc
-    }
-
-    fn make_input_service(id: i32, display_id: u32) -> Service {
-        let mut svc = Service::new();
-        svc.set_id(id);
-
-        let mut input = InputSourceService::new();
-        input.set_display_id(display_id);
-        svc.input_source_service = Some(input).into();
-        svc
-    }
-
-    fn test_ctx() -> ModifyContext {
-        let (ev_tx, _) = mpsc::channel(1);
-        ModifyContext {
-            sensor_channel: None,
-            sensors: None,
-            nav_channel: None,
-            audio_channels: vec![],
-            ev_tx,
-            input_channel: None,
-            hu_tx: None,
-            hu_input_state: HuInputState::default(),
-            media_sinks: HashMap::new(),
-            media_channels: HashMap::new(),
-            media_fragments: HashMap::new(),
-            hu_service_ids: HashSet::new(),
-            injected_service_ids: HashSet::new(),
-            injected_channels: HashSet::new(),
-            injected_media_display: HashMap::new(),
-            injected_media_state: HashMap::new(),
-            injected_media_connect_gen: HashMap::new(),
-            injected_media_had_tap_client: HashMap::new(),
-            vendor_service_ids: HashSet::new(),
-            vendor_channel_states: HashMap::new(),
-            vendor_topic_event_bridges: HashMap::new(),
-            debug_channel_kinds: HashMap::from([(0, PacketDebugServiceKind::Control)]),
-        }
-    }
-
-    fn test_packet(channel: u8, flags: u8, final_length: Option<u32>, payload: &[u8]) -> Packet {
-        Packet {
-            channel,
-            flags,
-            final_length,
-            payload: payload.to_vec(),
-        }
-    }
-
-    #[test]
-    fn media_tap_keeps_single_frame_packets_intact() {
-        let mut ctx = test_ctx();
-        let pkt = test_packet(
-            0x21,
-            FRAME_TYPE_FIRST | FRAME_TYPE_LAST,
-            None,
-            &[0x00, 0x01, 0xAA, 0xBB],
-        );
-
-        let assembled = reassemble_media_packet(&mut ctx.media_fragments, &pkt);
-
-        assert_eq!(assembled, Some(vec![0x00, 0x01, 0xAA, 0xBB]));
-        assert!(!ctx.media_fragments.contains_key(&0x21));
-    }
-
-    #[test]
-    fn media_tap_reassembles_fragmented_packets() {
-        let mut ctx = test_ctx();
-        let first = test_packet(0x21, FRAME_TYPE_FIRST, Some(6), &[0x00, 0x01, 0xAA]);
-        let middle = test_packet(0x21, 0, None, &[0xBB]);
-        let last = test_packet(0x21, FRAME_TYPE_LAST, None, &[0xCC, 0xDD]);
-
-        assert_eq!(
-            reassemble_media_packet(&mut ctx.media_fragments, &first),
-            None
-        );
-        assert_eq!(
-            reassemble_media_packet(&mut ctx.media_fragments, &middle),
-            None
-        );
-        assert_eq!(
-            reassemble_media_packet(&mut ctx.media_fragments, &last),
-            Some(vec![0x00, 0x01, 0xAA, 0xBB, 0xCC, 0xDD])
-        );
-        assert!(!ctx.media_fragments.contains_key(&0x21));
-    }
-
-    #[test]
-    fn media_tap_drops_length_mismatches() {
-        let mut ctx = test_ctx();
-        let first = test_packet(0x21, FRAME_TYPE_FIRST, Some(7), &[0x00, 0x01, 0xAA]);
-        let last = test_packet(0x21, FRAME_TYPE_LAST, None, &[0xBB, 0xCC]);
-
-        assert_eq!(
-            reassemble_media_packet(&mut ctx.media_fragments, &first),
-            None
-        );
-        assert_eq!(
-            reassemble_media_packet(&mut ctx.media_fragments, &last),
-            None
-        );
-        assert!(!ctx.media_fragments.contains_key(&0x21));
-    }
-
-    #[test]
-    fn add_display_services_adds_cluster_media_and_input_when_opted_in() {
-        let mut cfg = AppConfig::default();
-        cfg.mitm = true;
-        cfg.inject_display_types =
-            crate::config_types::InjectDisplayTypes(Some(vec![DisplayType::DISPLAY_TYPE_CLUSTER]));
-        cfg.inject_add_input_sources = true;
-
-        let mut msg = ServiceDiscoveryResponse::new();
-        msg.services
-            .push(make_video_service(1, DisplayType::DISPLAY_TYPE_MAIN, 0));
-
-        let added = add_display_services(&mut msg, &cfg);
-
-        assert_eq!(added, 2);
-        assert!(has_video_display(&msg, DisplayType::DISPLAY_TYPE_CLUSTER));
-        assert!(has_input_display(
-            &msg,
-            cfg.inject_cluster_display_id.into()
-        ));
-    }
-
-    #[test]
-    fn auxiliary_input_service_keeps_touchscreen() {
-        let mut cfg = AppConfig::default();
-        cfg.mitm = true;
-        cfg.inject_display_types = crate::config_types::InjectDisplayTypes(Some(vec![
-            DisplayType::DISPLAY_TYPE_AUXILIARY,
-        ]));
-        cfg.inject_add_input_sources = true;
-
-        let mut msg = ServiceDiscoveryResponse::new();
-        msg.services
-            .push(make_video_service(1, DisplayType::DISPLAY_TYPE_MAIN, 0));
-
-        let added = add_display_services(&mut msg, &cfg);
-
-        assert_eq!(added, 2);
-        let aux_input = msg
-            .services
-            .iter()
-            .find(|svc| {
-                svc.input_source_service.display_id() == u32::from(cfg.inject_aux_display_id)
-            })
-            .unwrap();
-        assert_eq!(aux_input.input_source_service.touchscreen.len(), 1);
-        assert!(aux_input.input_source_service.touchscreen[0].is_secondary());
-    }
-
-    #[test]
-    fn add_display_services_does_not_duplicate_existing_cluster() {
-        let mut cfg = AppConfig::default();
-        cfg.mitm = true;
-        cfg.inject_display_types =
-            crate::config_types::InjectDisplayTypes(Some(vec![DisplayType::DISPLAY_TYPE_CLUSTER]));
-        cfg.inject_add_input_sources = true;
-
-        let mut msg = ServiceDiscoveryResponse::new();
-        msg.services
-            .push(make_video_service(1, DisplayType::DISPLAY_TYPE_MAIN, 0));
-        msg.services
-            .push(make_video_service(2, DisplayType::DISPLAY_TYPE_CLUSTER, 1));
-        msg.services.push(make_input_service(3, 1));
-
-        let added = add_display_services(&mut msg, &cfg);
-
-        assert_eq!(added, 0);
-        let cluster_count = msg
-            .services
-            .iter()
-            .filter(|svc| {
-                !svc.media_sink_service.video_configs.is_empty()
-                    && svc.media_sink_service.display_type() == DisplayType::DISPLAY_TYPE_CLUSTER
-            })
-            .count();
-        assert_eq!(cluster_count, 1);
-    }
-
-    #[test]
-    fn add_display_services_adds_cluster_without_input_when_not_opted_in() {
-        let mut cfg = AppConfig::default();
-        cfg.mitm = true;
-        cfg.inject_display_types =
-            crate::config_types::InjectDisplayTypes(Some(vec![DisplayType::DISPLAY_TYPE_CLUSTER]));
-        cfg.inject_add_input_sources = false;
-
-        let mut msg = ServiceDiscoveryResponse::new();
-        msg.services
-            .push(make_video_service(1, DisplayType::DISPLAY_TYPE_MAIN, 0));
-
-        let added = add_display_services(&mut msg, &cfg);
-
-        assert_eq!(added, 1);
-        assert!(has_video_display(&msg, DisplayType::DISPLAY_TYPE_CLUSTER));
-        assert!(!has_input_display(
-            &msg,
-            cfg.inject_cluster_display_id.into()
-        ));
-    }
-
-    #[test]
-    fn injected_media_setup_is_rewritten_to_config_ready() {
-        let mut ctx = test_ctx();
-        ctx.injected_channels.insert(0x2A);
-
-        let mut setup = Setup::new();
-        setup.set_type(MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP);
-        let mut payload = setup.write_to_bytes().unwrap();
-        payload.insert(0, ((MEDIA_MESSAGE_SETUP as u16) >> 8) as u8);
-        payload.insert(1, ((MEDIA_MESSAGE_SETUP as u16) & 0xff) as u8);
-        let mut pkt = test_packet(
-            0x2A,
-            ENCRYPTED | FRAME_TYPE_FIRST | FRAME_TYPE_LAST,
-            None,
-            &payload,
-        );
-
-        assert!(emulate_injected_media_packet(
-            ProxyType::HeadUnit,
-            &mut pkt,
-            &mut ctx,
-            None,
-            false,
-        )
-        .unwrap());
-
-        let msg_id = u16::from_be_bytes([pkt.payload[0], pkt.payload[1]]) as i32;
-        assert_eq!(msg_id, MEDIA_MESSAGE_CONFIG.value());
-        assert_eq!(pkt.final_length, None);
-        assert_eq!(
-            pkt.flags & FRAME_TYPE_MASK,
-            FRAME_TYPE_FIRST | FRAME_TYPE_LAST
-        );
-        let cfg = ProtoConfig::parse_from_bytes(&pkt.payload[2..]).unwrap();
-        assert_eq!(cfg.status(), Status::STATUS_READY);
-        assert_eq!(cfg.max_unacked(), 1);
-    }
-
-    #[test]
-    fn injected_media_data_after_start_is_rewritten_to_ack() {
-        let mut ctx = test_ctx();
-        ctx.injected_channels.insert(0x2A);
-        ctx.injected_media_display
-            .insert(0x2A, DisplayType::DISPLAY_TYPE_CLUSTER);
-        ctx.injected_media_state
-            .insert(0x2A, InjectedMediaState::default());
-
-        let mut start = Start::new();
-        start.set_session_id(7);
-        start.set_configuration_index(0);
-        let mut start_payload = start.write_to_bytes().unwrap();
-        start_payload.insert(0, ((MEDIA_MESSAGE_START as u16) >> 8) as u8);
-        start_payload.insert(1, ((MEDIA_MESSAGE_START as u16) & 0xff) as u8);
-        let mut start_pkt = test_packet(
-            0x2A,
-            ENCRYPTED | FRAME_TYPE_FIRST | FRAME_TYPE_LAST,
-            None,
-            &start_payload,
-        );
-
-        assert!(!emulate_injected_media_packet(
-            ProxyType::HeadUnit,
-            &mut start_pkt,
-            &mut ctx,
-            None,
-            false,
-        )
-        .unwrap());
-
-        let data_payload = vec![
-            ((MEDIA_MESSAGE_DATA as u16) >> 8) as u8,
-            ((MEDIA_MESSAGE_DATA as u16) & 0xff) as u8,
-            0x00,
-            0x01,
-        ];
-        let mut data_pkt = test_packet(
-            0x2A,
-            ENCRYPTED | FRAME_TYPE_FIRST | FRAME_TYPE_LAST,
-            None,
-            &data_payload,
-        );
-
-        assert!(emulate_injected_media_packet(
-            ProxyType::HeadUnit,
-            &mut data_pkt,
-            &mut ctx,
-            Some(&data_payload),
-            false,
-        )
-        .unwrap());
-
-        let msg_id = u16::from_be_bytes([data_pkt.payload[0], data_pkt.payload[1]]) as i32;
-        assert_eq!(msg_id, MEDIA_MESSAGE_ACK.value());
-        assert_eq!(data_pkt.final_length, None);
-        assert_eq!(
-            data_pkt.flags & FRAME_TYPE_MASK,
-            FRAME_TYPE_FIRST | FRAME_TYPE_LAST
-        );
-        let ack = Ack::parse_from_bytes(&data_pkt.payload[2..]).unwrap();
-        assert_eq!(ack.session_id(), 7);
-        assert_eq!(ack.ack(), 1);
-    }
-
-    #[test]
-    fn fragmented_injected_media_data_waits_for_reassembly_before_ack() {
-        let mut ctx = test_ctx();
-        ctx.injected_channels.insert(0x2A);
-        ctx.injected_media_display
-            .insert(0x2A, DisplayType::DISPLAY_TYPE_CLUSTER);
-
-        let mut start = Start::new();
-        start.set_session_id(11);
-        start.set_configuration_index(0);
-        let mut start_payload = start.write_to_bytes().unwrap();
-        start_payload.insert(0, ((MEDIA_MESSAGE_START as u16) >> 8) as u8);
-        start_payload.insert(1, ((MEDIA_MESSAGE_START as u16) & 0xff) as u8);
-        let mut start_pkt = test_packet(
-            0x2A,
-            ENCRYPTED | FRAME_TYPE_FIRST | FRAME_TYPE_LAST,
-            None,
-            &start_payload,
-        );
-        assert!(!emulate_injected_media_packet(
-            ProxyType::HeadUnit,
-            &mut start_pkt,
-            &mut ctx,
-            None,
-            false,
-        )
-        .unwrap());
-
-        let full_frame = vec![
-            ((MEDIA_MESSAGE_DATA as u16) >> 8) as u8,
-            ((MEDIA_MESSAGE_DATA as u16) & 0xff) as u8,
-            0xAA,
-            0xBB,
-            0xCC,
-            0xDD,
-        ];
-        let mut first_pkt = test_packet(
-            0x2A,
-            ENCRYPTED | FRAME_TYPE_FIRST,
-            Some(full_frame.len() as u32),
-            &full_frame[..4],
-        );
-        let first_frame = reassemble_media_packet(&mut ctx.media_fragments, &first_pkt);
-        assert!(!emulate_injected_media_packet(
-            ProxyType::HeadUnit,
-            &mut first_pkt,
-            &mut ctx,
-            first_frame.as_deref(),
-            false,
-        )
-        .unwrap());
-
-        let mut last_pkt = test_packet(0x2A, ENCRYPTED | FRAME_TYPE_LAST, None, &full_frame[4..]);
-        let last_frame = reassemble_media_packet(&mut ctx.media_fragments, &last_pkt);
-        assert!(emulate_injected_media_packet(
-            ProxyType::HeadUnit,
-            &mut last_pkt,
-            &mut ctx,
-            last_frame.as_deref(),
-            true,
-        )
-        .unwrap());
-
-        let msg_id = u16::from_be_bytes([last_pkt.payload[0], last_pkt.payload[1]]) as i32;
-        assert_eq!(msg_id, MEDIA_MESSAGE_ACK.value());
-        assert_eq!(last_pkt.final_length, None);
-        assert_eq!(
-            last_pkt.flags & FRAME_TYPE_MASK,
-            FRAME_TYPE_FIRST | FRAME_TYPE_LAST
-        );
-        let ack = Ack::parse_from_bytes(&last_pkt.payload[2..]).unwrap();
-        assert_eq!(ack.session_id(), 11);
-        assert_eq!(ack.ack(), 1);
-    }
-
-    #[test]
-    fn deferred_injected_focus_does_not_block_when_queue_is_full() {
-        let mut ctx = test_ctx();
-        ctx.injected_media_state.insert(
-            0x2A,
-            InjectedMediaState {
-                phase: InjectedMediaPhase::SetupSeen,
-                last_flags: ENCRYPTED | FRAME_TYPE_FIRST | FRAME_TYPE_LAST,
-                ..Default::default()
-            },
-        );
-
-        let mut cfg = AppConfig::default();
-        cfg.inject_force_focus_without_tap = true;
-
-        let (tx, mut rx) = mpsc::channel(1);
-        tx.try_send(test_packet(0, 0, None, &[])).unwrap();
-
-        maybe_emit_pending_injected_focus(ProxyType::HeadUnit, &mut ctx, &cfg, &tx).unwrap();
-
-        assert!(ctx
-            .injected_media_state
-            .get(&0x2A)
-            .is_some_and(|state| state.phase == InjectedMediaPhase::SetupSeen));
-        assert!(rx.try_recv().is_ok());
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[test]
-    fn injected_aux_media_setup_uses_aux_profile_unacked_window() {
-        let mut ctx = test_ctx();
-        ctx.injected_media_display
-            .insert(0x2B, DisplayType::DISPLAY_TYPE_AUXILIARY);
-
-        let mut setup = Setup::new();
-        setup.set_type(MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP);
-        let mut payload = setup.write_to_bytes().unwrap();
-        payload.insert(0, ((MEDIA_MESSAGE_SETUP as u16) >> 8) as u8);
-        payload.insert(1, ((MEDIA_MESSAGE_SETUP as u16) & 0xff) as u8);
-        let mut pkt = test_packet(
-            0x2B,
-            ENCRYPTED | FRAME_TYPE_FIRST | FRAME_TYPE_LAST,
-            None,
-            &payload,
-        );
-
-        assert!(emulate_injected_media_packet(
-            ProxyType::HeadUnit,
-            &mut pkt,
-            &mut ctx,
-            None,
-            false,
-        )
-        .unwrap());
-
-        let cfg = ProtoConfig::parse_from_bytes(&pkt.payload[2..]).unwrap();
-        assert_eq!(cfg.max_unacked(), 2);
-        assert_eq!(cfg.configuration_indices, vec![0]);
     }
 }

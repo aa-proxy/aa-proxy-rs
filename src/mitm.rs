@@ -90,6 +90,8 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + S
 
 /// Last ServiceDiscoveryResponse observed by the MITM path, stored as protobuf JSON.
 pub type SharedServiceDiscoveryResponse = Arc<RwLock<Option<serde_json::Value>>>;
+pub type SharedMediaSinks = Arc<tokio::sync::Mutex<HashMap<u8, MediaSink>>>;
+pub type SharedMediaChannels = Arc<tokio::sync::Mutex<HashMap<u8, MediaSink>>>;
 
 // message related constants:
 pub const HEADER_LENGTH: usize = 4;
@@ -115,9 +117,17 @@ pub struct ModifyContext {
     pub(crate) input_channel: Option<u8>,
     pub(crate) hu_tx: Option<Sender<Packet>>,
     pub(crate) hu_input_state: HuInputState,
-    /// Offset→sink map (keys 0-6). Used only at SDR time to look up which sink
-    /// to assign to each real channel. Never used for tapping.
-    pub(crate) media_sinks: HashMap<u8, MediaSink>,
+    /// Shared offset→sink map. TCP listeners are created lazily from the rewritten SDR,
+    /// so audio/video port count follows the actual media sink services instead of a fixed pool.
+    pub(crate) media_sinks: SharedMediaSinks,
+    /// Shared channel_id→sink map populated from the final rewritten SDR.
+    /// Both proxy directions use this because the SDR is rewritten on the HU side,
+    /// while media DATA/codec frames are tapped on the MD side.
+    pub(crate) shared_media_channels: SharedMediaChannels,
+    /// Base TCP port for media tap listeners.
+    pub(crate) media_dump_base_port: Option<u16>,
+    /// Whether video tap clients wait for a live IDR before streaming.
+    pub(crate) media_wait_for_live_idr: bool,
     /// channel_id→sink map. Populated from SDR. Used for tapping data packets.
     pub(crate) media_channels: HashMap<u8, MediaSink>,
     /// Per-channel reassembly state for tapped media messages that span multiple
@@ -146,6 +156,229 @@ pub struct ModifyContext {
     pub(crate) vendor_topic_event_bridges: HashMap<u8, VecTopicEventBridge>,
     /// Channel id -> semantic service kind map used only by pkt_debug filtering.
     pub(crate) debug_channel_kinds: HashMap<u8, PacketDebugServiceKind>,
+}
+
+fn service_audio_config(svc: &Service) -> Option<AudioStreamConfig> {
+    svc.media_sink_service
+        .audio_configs
+        .first()
+        .map(|acfg| AudioStreamConfig {
+            sample_rate: acfg.sampling_rate(),
+            channels: acfg.number_of_channels(),
+            bits: acfg.number_of_bits(),
+        })
+}
+
+fn display_type_label(display_type: DisplayType) -> &'static str {
+    match display_type {
+        DisplayType::DISPLAY_TYPE_MAIN => "main",
+        DisplayType::DISPLAY_TYPE_CLUSTER => "cluster",
+        DisplayType::DISPLAY_TYPE_AUXILIARY => "aux",
+    }
+}
+
+fn audio_type_label(audio_type: AudioStreamType) -> &'static str {
+    match audio_type {
+        AUDIO_STREAM_GUIDANCE => "guidance",
+        AUDIO_STREAM_SYSTEM_AUDIO => "system",
+        AUDIO_STREAM_MEDIA => "media",
+        AUDIO_STREAM_TELEPHONY => "telephony",
+    }
+}
+
+fn is_video_media_sink(svc: &Service) -> bool {
+    !svc.media_sink_service.video_configs.is_empty()
+}
+
+fn is_audio_media_sink(svc: &Service) -> bool {
+    !svc.media_sink_service.audio_configs.is_empty() || svc.media_sink_service.audio_type.is_some()
+}
+
+fn media_sink_label(svc: &Service, offset: u8, is_video: bool) -> String {
+    let label = if is_video {
+        format!(
+            "video-{}",
+            display_type_label(svc.media_sink_service.display_type())
+        )
+    } else {
+        format!(
+            "audio-{}",
+            audio_type_label(svc.media_sink_service.audio_type())
+        )
+    };
+
+    if label.is_empty() {
+        format!("media-{offset:02}")
+    } else {
+        label.chars().take(48).collect()
+    }
+}
+
+async fn get_or_create_media_sink_for_offset(
+    ctx: &mut ModifyContext,
+    offset: u8,
+    label: String,
+) -> Option<MediaSink> {
+    let Some(base_port) = ctx.media_dump_base_port else {
+        return None;
+    };
+
+    let mut media_sinks = ctx.media_sinks.lock().await;
+    if let Some(sink) = media_sinks.get(&offset).cloned() {
+        return Some(sink);
+    }
+
+    let Some(port) = base_port.checked_add(offset as u16) else {
+        warn!(
+            "<yellow>media tap:</> cannot expose media offset <b>{}</>; base port <b>{}</> would overflow",
+            offset,
+            base_port
+        );
+        return None;
+    };
+
+    let sink = MediaSink::new(128);
+    tokio::spawn(media_tcp_server(
+        port,
+        label,
+        sink.clone(),
+        ctx.media_wait_for_live_idr,
+    ));
+    media_sinks.insert(offset, sink.clone());
+    Some(sink)
+}
+
+async fn register_media_channel_sink(ctx: &mut ModifyContext, channel: u8, sink: MediaSink) {
+    ctx.media_channels.insert(channel, sink.clone());
+    let mut shared_media_channels = ctx.shared_media_channels.lock().await;
+    shared_media_channels.insert(channel, sink);
+}
+
+async fn media_sink_for_channel(ctx: &mut ModifyContext, channel: u8) -> Option<MediaSink> {
+    if let Some(sink) = ctx.media_channels.get(&channel).cloned() {
+        return Some(sink);
+    }
+
+    let sink = {
+        let shared_media_channels = ctx.shared_media_channels.lock().await;
+        shared_media_channels.get(&channel).cloned()
+    };
+
+    if let Some(sink) = sink.clone() {
+        ctx.media_channels.insert(channel, sink.clone());
+    }
+
+    sink
+}
+
+async fn populate_media_tap_channels_by_order(
+    proxy_type: ProxyType,
+    ctx: &mut ModifyContext,
+    msg: &ServiceDiscoveryResponse,
+) {
+    if ctx.media_dump_base_port.is_none() {
+        return;
+    }
+
+    // Rebuild the channel map from the latest rewritten SDR. Port offsets are assigned
+    // in a stable two-pass order: all video sinks first, then audio sinks as actually
+    // advertised by the SDR. This allows multiple displays without colliding with audio.
+    ctx.media_channels.clear();
+    {
+        let mut shared_media_channels = ctx.shared_media_channels.lock().await;
+        shared_media_channels.clear();
+    }
+
+    let mut ordered_services: Vec<(&Service, bool)> = Vec::new();
+    for svc in msg.services.iter().filter(|svc| is_video_media_sink(svc)) {
+        ordered_services.push((svc, true));
+    }
+    for svc in msg
+        .services
+        .iter()
+        .filter(|svc| !is_video_media_sink(svc) && is_audio_media_sink(svc))
+    {
+        ordered_services.push((svc, false));
+    }
+
+    for (index, (svc, has_video)) in ordered_services.into_iter().enumerate() {
+        if index > u8::MAX as usize {
+            warn!(
+                "{} <yellow>media tap:</> too many media sinks in SDR; channel <b>{:#04x}</> is not exposed",
+                get_name(proxy_type),
+                svc.id() as u8
+            );
+            continue;
+        }
+
+        let offset = index as u8;
+        let ch = svc.id() as u8;
+        let label = media_sink_label(svc, offset, has_video);
+        let Some(sink) = get_or_create_media_sink_for_offset(ctx, offset, label).await else {
+            continue;
+        };
+
+        if has_video {
+            sink.set_video_stream_info(
+                svc.media_sink_service.available_type(),
+                svc.media_sink_service.display_type(),
+            )
+            .await;
+            register_media_channel_sink(ctx, ch, sink).await;
+            debug!(
+                "{} media_channels.insert: ch={:#04x} offset={} media_order=video_first",
+                get_name(proxy_type),
+                ch,
+                offset
+            );
+            info!(
+                "{} <blue>media tap:</> video channel <b>{:#04x}</> → port offset <b>{}</> ({:?}, {:?}, display_id={})",
+                get_name(proxy_type),
+                ch,
+                offset,
+                svc.media_sink_service.available_type(),
+                svc.media_sink_service.display_type(),
+                svc.media_sink_service.display_id()
+            );
+        } else {
+            let audio_config = service_audio_config(svc);
+            sink.set_audio_stream_info(
+                svc.media_sink_service.available_type(),
+                svc.media_sink_service.audio_type(),
+                audio_config,
+            )
+            .await;
+            register_media_channel_sink(ctx, ch, sink).await;
+            debug!(
+                "{} media_channels.insert: ch={:#04x} offset={} media_order=audio_after_video",
+                get_name(proxy_type),
+                ch,
+                offset
+            );
+            if let Some(acfg) = audio_config {
+                info!(
+                    "{} <blue>media tap:</> audio channel <b>{:#04x}</> → port offset <b>{}</> ({:?}, {:?}, {}Hz, {}ch, {}bit)",
+                    get_name(proxy_type),
+                    ch,
+                    offset,
+                    svc.media_sink_service.available_type(),
+                    svc.media_sink_service.audio_type(),
+                    acfg.sample_rate,
+                    acfg.channels,
+                    acfg.bits
+                );
+            } else {
+                info!(
+                    "{} <blue>media tap:</> audio channel <b>{:#04x}</> → port offset <b>{}</> ({:?}, {:?})",
+                    get_name(proxy_type),
+                    ch,
+                    offset,
+                    svc.media_sink_service.available_type(),
+                    svc.media_sink_service.audio_type()
+                );
+            }
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -989,8 +1222,14 @@ pub async fn pkt_modify_hook(
     if tap_media && proxy_type == ProxyType::MobileDevice {
         if let Some(frame_data) = reassemble_media_packet(&mut ctx.media_fragments, pkt) {
             if frame_data.len() >= 2 {
-                if let Some(sink) = ctx.media_channels.get(&pkt.channel).cloned() {
+                if let Some(sink) = media_sink_for_channel(ctx, pkt.channel).await {
                     tap_media_message(proxy_type, pkt, &sink, &frame_data).await;
+                } else {
+                    debug!(
+                        "{} media tap: no sink registered for channel {:#04x}",
+                        get_name(proxy_type),
+                        pkt.channel
+                    );
                 }
             }
         }
@@ -1227,95 +1466,6 @@ pub async fn pkt_modify_hook(
 
             if proxy_type == ProxyType::HeadUnit {
                 ctx.hu_service_ids = msg.services.iter().map(|s| s.id()).collect();
-            }
-
-            // Populate media_channels (channel_id→sink) from the offset→sink map.
-            // Both MD and HU need this; for HU, we'll populate again after add_display_services
-            // to include injected services (cluster, etc).
-            if !ctx.media_sinks.is_empty() {
-                for svc in msg.services.iter() {
-                    let ch = svc.id() as u8;
-                    if !svc.media_sink_service.video_configs.is_empty() {
-                        let offset = svc.media_sink_service.display_type().value() as u8;
-                        if let Some(sink) = ctx.media_sinks.get(&offset).cloned() {
-                            ctx.media_channels.insert(ch, sink);
-                            debug!(
-                                "{} media_channels.insert: ch={:#04x} offset={}",
-                                get_name(proxy_type),
-                                ch,
-                                offset
-                            );
-                            info!(
-                                "{} <blue>media tap:</> video channel <b>{:#04x}</> → port offset <b>{}</> ({:?}, {:?})",
-                                get_name(proxy_type),
-                                ch,
-                                offset,
-                                svc.media_sink_service.available_type(),
-                                svc.media_sink_service.display_type()
-                            );
-                        }
-                    } else if !svc.media_sink_service.audio_configs.is_empty()
-                        || svc.media_sink_service.audio_type.is_some()
-                    {
-                        // audio offset = audio_type value + 2 (offsets 0-2 reserved for video)
-                        let offset = svc.media_sink_service.audio_type().value() as u8 + 2;
-                        if let Some(sink) = ctx.media_sinks.get(&offset).cloned() {
-                            let audio_config =
-                                svc.media_sink_service.audio_configs.first().map(|acfg| {
-                                    AudioStreamConfig {
-                                        sample_rate: acfg.sampling_rate(),
-                                        channels: acfg.number_of_channels(),
-                                        bits: acfg.number_of_bits(),
-                                    }
-                                });
-                            sink.set_audio_stream_info(
-                                svc.media_sink_service.available_type(),
-                                svc.media_sink_service.audio_type(),
-                                audio_config,
-                            )
-                            .await;
-
-                            let audio_config =
-                                svc.media_sink_service.audio_configs.first().map(|acfg| {
-                                    AudioStreamConfig {
-                                        sample_rate: acfg.sampling_rate(),
-                                        channels: acfg.number_of_channels(),
-                                        bits: acfg.number_of_bits(),
-                                    }
-                                });
-
-                            ctx.media_channels.insert(ch, sink);
-                            debug!(
-                                "{} media_channels.insert: ch={:#04x} offset={}",
-                                get_name(proxy_type),
-                                ch,
-                                offset
-                            );
-                            if let Some(acfg) = audio_config {
-                                info!(
-                                    "{} <blue>media tap:</> audio channel <b>{:#04x}</> → port offset <b>{}</> ({:?}, {:?}, {}Hz, {}ch, {}bit)",
-                                    get_name(proxy_type),
-                                    ch,
-                                    offset,
-                                    svc.media_sink_service.available_type(),
-                                    svc.media_sink_service.audio_type(),
-                                    acfg.sample_rate,
-                                    acfg.channels,
-                                    acfg.bits
-                                );
-                            } else {
-                                info!(
-                                    "{} <blue>media tap:</> audio channel <b>{:#04x}</> → port offset <b>{}</> ({:?}, {:?})",
-                                    get_name(proxy_type),
-                                    ch,
-                                    offset,
-                                    svc.media_sink_service.available_type(),
-                                    svc.media_sink_service.audio_type()
-                                );
-                            }
-                        }
-                    }
-                }
             }
 
             if cfg.bt_sco && cfg.bt_sco_media_bridge && proxy_type == ProxyType::MobileDevice {
@@ -1753,97 +1903,6 @@ pub async fn pkt_modify_hook(
                 );
             }
 
-            // Populate media_channels (channel_id→sink) from the offset→sink map.
-            // Do this after add_display_services so HU includes injected channels (e.g., cluster 0x08).
-            // Both proxy contexts use this for injected suppression/deferred focus evaluation.
-            debug!(
-                "{} SDR handling: media_sinks.len()={} media_channels.len()={}",
-                get_name(proxy_type),
-                ctx.media_sinks.len(),
-                ctx.media_channels.len()
-            );
-
-            if !ctx.media_sinks.is_empty() {
-                for svc in msg.services.iter() {
-                    let ch = svc.id() as u8;
-                    if !svc.media_sink_service.video_configs.is_empty() {
-                        let offset = svc.media_sink_service.display_type().value() as u8;
-                        if let Some(sink) = ctx.media_sinks.get(&offset).cloned() {
-                            sink.set_video_stream_info(
-                                svc.media_sink_service.available_type(),
-                                svc.media_sink_service.display_type(),
-                            )
-                            .await;
-                            ctx.media_channels.insert(ch, sink);
-                            debug!(
-                                "{} media_channels.insert: ch={:#04x} offset={}",
-                                get_name(proxy_type),
-                                ch,
-                                offset
-                            );
-                            info!(
-                                "{} <blue>media tap:</> video channel <b>{:#04x}</> → port offset <b>{}</> ({:?}, {:?})",
-                                get_name(proxy_type),
-                                ch,
-                                offset,
-                                svc.media_sink_service.available_type(),
-                                svc.media_sink_service.display_type()
-                            );
-                        }
-                    } else if !svc.media_sink_service.audio_configs.is_empty()
-                        || svc.media_sink_service.audio_type.is_some()
-                    {
-                        // audio offset = audio_type value + 2 (offsets 0-2 reserved for video)
-                        let offset = svc.media_sink_service.audio_type().value() as u8 + 2;
-                        if let Some(sink) = ctx.media_sinks.get(&offset).cloned() {
-                            let audio_config =
-                                svc.media_sink_service.audio_configs.first().map(|acfg| {
-                                    AudioStreamConfig {
-                                        sample_rate: acfg.sampling_rate(),
-                                        channels: acfg.number_of_channels(),
-                                        bits: acfg.number_of_bits(),
-                                    }
-                                });
-                            sink.set_audio_stream_info(
-                                svc.media_sink_service.available_type(),
-                                svc.media_sink_service.audio_type(),
-                                audio_config,
-                            )
-                            .await;
-                            ctx.media_channels.insert(ch, sink);
-                            debug!(
-                                "{} media_channels.insert: ch={:#04x} offset={}",
-                                get_name(proxy_type),
-                                ch,
-                                offset
-                            );
-                            if let Some(acfg) = audio_config {
-                                info!(
-                                    "{} <blue>media tap:</> audio channel <b>{:#04x}</> → port offset <b>{}</> ({:?}, {:?}, {}Hz, {}ch, {}bit)",
-                                    get_name(proxy_type),
-                                    ch,
-                                    offset,
-                                    svc.media_sink_service.available_type(),
-                                    svc.media_sink_service.audio_type(),
-                                    acfg.sample_rate,
-                                    acfg.channels,
-                                    acfg.bits
-                                );
-                            } else {
-                                info!(
-                                    "{} <blue>media tap:</> audio channel <b>{:#04x}</> → port offset <b>{}</> ({:?}, {:?})",
-                                    get_name(proxy_type),
-                                    ch,
-                                    offset,
-                                    svc.media_sink_service.available_type(),
-                                    svc.media_sink_service.audio_type()
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-
             match sdr_ui::process_service_discovery_response(&mut msg, cfg).await {
                 Ok(summary) => {
                     info!(
@@ -1893,6 +1952,17 @@ pub async fn pkt_modify_hook(
             // Refresh channel kinds after all SDR mutations, especially after adding
             // injected vendor/display services.
             update_debug_channel_kinds(ctx, &msg);
+
+            // Populate media tap channels from the final rewritten SDR. Ports are opened
+            // lazily and only for the media sinks actually present in this SDR.
+            let media_sink_count = ctx.media_sinks.lock().await.len();
+            debug!(
+                "{} SDR handling: media_sinks.len()={} media_channels.len()={}",
+                get_name(proxy_type),
+                media_sink_count,
+                ctx.media_channels.len()
+            );
+            populate_media_tap_channels_by_order(proxy_type, ctx, &msg).await;
 
             info!(
                 "{} vendor_service_ids now = {:?}",
@@ -2494,7 +2564,8 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
     ev_tx: Sender<EvTaskCommand>,
     hu_tx: Option<Sender<Packet>>,
     script_registry: Option<Arc<ScriptRegistry>>,
-    media_sinks: HashMap<u8, MediaSink>,
+    media_sinks: SharedMediaSinks,
+    shared_media_channels: SharedMediaChannels,
     ws_event_tx: BroadcastSender<ServerEvent>,
 ) -> Result<()> {
     let cfg = config.read().await.clone();
@@ -2716,6 +2787,9 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
         hu_tx,
         hu_input_state: HuInputState::default(),
         media_sinks,
+        shared_media_channels,
+        media_dump_base_port: cfg.media_dump_base_port,
+        media_wait_for_live_idr: cfg.media_wait_for_live_idr,
         media_channels: HashMap::new(),
         media_fragments: HashMap::new(),
         hu_service_ids: HashSet::new(),
@@ -2746,28 +2820,30 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
                 && pkt.channel != 0
                 && ctx.injected_channels.contains(&pkt.channel)
             {
-                let had_fragment_state = ctx.media_fragments.contains_key(&pkt.channel);
-                // Injected media packets were already tapped on the MobileDevice ingress path.
-                // Reassemble here only so ACK synthesis can track whole media messages.
-                let reassembled_frame = reassemble_media_packet(&mut ctx.media_fragments, &pkt);
+                if ctx.injected_media_display.contains_key(&pkt.channel) {
+                    let had_fragment_state = ctx.media_fragments.contains_key(&pkt.channel);
+                    // Injected media packets were already tapped on the MobileDevice ingress path.
+                    // Reassemble here only so ACK synthesis can track whole media messages.
+                    let reassembled_frame = reassemble_media_packet(&mut ctx.media_fragments, &pkt);
 
-                if emulate_injected_media_packet(
-                    proxy_type,
-                    &mut pkt,
-                    &mut ctx,
-                    reassembled_frame.as_deref(),
-                    had_fragment_state,
-                )? {
-                    debug!(
-                        "{} synthesized injected media reply on channel <b>{:#04x}</>",
-                        get_name(proxy_type),
-                        pkt.channel
-                    );
-                    tx.send(pkt).await?;
+                    if emulate_injected_media_packet(
+                        proxy_type,
+                        &mut pkt,
+                        &mut ctx,
+                        reassembled_frame.as_deref(),
+                        had_fragment_state,
+                    )? {
+                        debug!(
+                            "{} synthesized injected media reply on channel <b>{:#04x}</>",
+                            get_name(proxy_type),
+                            pkt.channel
+                        );
+                        tx.send(pkt).await?;
 
-                    maybe_emit_pending_injected_focus(proxy_type, &mut ctx, &cfg, &tx)?;
+                        maybe_emit_pending_injected_focus(proxy_type, &mut ctx, &cfg, &tx)?;
 
-                    continue;
+                        continue;
+                    }
                 }
 
                 let msg_id = pkt.payload
@@ -2907,7 +2983,10 @@ mod tests {
             input_channel: None,
             hu_tx: None,
             hu_input_state: HuInputState::default(),
-            media_sinks: HashMap::new(),
+            media_sinks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            shared_media_channels: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            media_dump_base_port: None,
+            media_wait_for_live_idr: false,
             media_channels: HashMap::new(),
             media_fragments: HashMap::new(),
             hu_service_ids: HashSet::new(),

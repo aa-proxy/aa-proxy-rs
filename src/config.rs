@@ -29,6 +29,7 @@ pub const TCP_DHU_PORT: i32 = 5277;
 pub const DEFAULT_WASM_HOOKS_DIR: &str = "/data/wasm-hooks";
 pub const DEFAULT_CRASH_DIR: &str = "/data/aa-proxy-rs/crashes";
 pub const DEFAULT_SDR_UI_OVERRIDE_FILE: &str = "/data/aa-proxy-rs/sdr-ui-overrides.toml";
+pub const DEFAULT_INJECT_DISPLAYS_FILE: &str = "/data/aa-proxy-rs/inject-displays.toml";
 
 pub type SharedConfig = Arc<RwLock<AppConfig>>;
 pub type SharedConfigJson = Arc<RwLock<ConfigJson>>;
@@ -246,6 +247,8 @@ pub struct AppConfig {
     pub sdr_ui_override_autocreate_profiles: bool,
     /// TOML file that stores per-vehicle and optional per-phone SDR UI overrides.
     pub sdr_ui_override_file: PathBuf,
+    /// TOML file used to store injected display service profiles. Display IDs are assigned automatically from the current SDR.
+    pub inject_displays_file: PathBuf,
     pub stats_interval: u16,
     #[serde(default, deserialize_with = "empty_string_as_none")]
     pub udc: Option<String>,
@@ -318,9 +321,10 @@ pub struct AppConfig {
     pub startup_delay: u8,
     pub ble_password: String,
     pub external_antenna: bool,
-    /// Base TCP port for media stream tapping. One port is allocated per media service
-    /// using fixed offsets: +0 video main, +1 video cluster, +2 video aux, +3 TTS audio,
-    /// +4 system audio, +5 media audio, +6 telephony audio.
+    /// Base TCP port for media stream tapping. One port is allocated per media sink
+    /// by order in the rewritten ServiceDiscoveryResponse: first media sink uses +0,
+    /// second uses +1, and so on. This avoids collisions when multiple displays
+    /// with the same display type are injected.
     /// Requires mitm = true. Connect with e.g. `vlc tcp://127.0.0.1:12345`.
     #[serde(default)]
     pub media_dump_base_port: Option<u16>,
@@ -555,6 +559,7 @@ impl Default for AppConfig {
             sdr_ui_override_enabled: true,
             sdr_ui_override_autocreate_profiles: true,
             sdr_ui_override_file: DEFAULT_SDR_UI_OVERRIDE_FILE.into(),
+            inject_displays_file: DEFAULT_INJECT_DISPLAYS_FILE.into(),
             stats_interval: 0,
             udc: None,
             iface: "wlan0".to_string(),
@@ -810,6 +815,7 @@ impl AppConfig {
         doc["sdr_ui_override_autocreate_profiles"] =
             value(self.sdr_ui_override_autocreate_profiles);
         doc["sdr_ui_override_file"] = value(self.sdr_ui_override_file.display().to_string());
+        doc["inject_displays_file"] = value(self.inject_displays_file.display().to_string());
         doc["stats_interval"] = value(self.stats_interval as i64);
         if let Some(udc) = &self.udc {
             doc["udc"] = value(udc);

@@ -13,6 +13,7 @@ pub mod device_info;
 pub mod display;
 pub mod ev;
 pub mod hu_input;
+pub mod inject_displays;
 pub mod io_uring;
 pub mod led;
 pub mod media_tap;
