@@ -350,6 +350,11 @@
           "description": "TOML file used to store per-vehicle and optional per-phone SDR UI overrides. Default: `/data/aa-proxy-rs/sdr-ui-overrides.toml`.",
           "values": null
         },
+        "inject_displays_file": {
+          "typ": "string",
+          "description": "TOML file used to store injected display service profiles. Supports multiple main/cluster/auxiliary media sink entries. Display IDs are assigned automatically from the current SDR. Default: `/data/aa-proxy-rs/inject-displays.toml`.",
+          "values": null
+        },
         "audio_max_unacked": {
           "typ": "integer",
           "description": "Override the `max_unacked` setting for audio channels. This may improve audio performance on some head units, but may worsen it on others. Adjust this value experimentally only if you experience audio stuttering.\n0 = leave unchanged."
