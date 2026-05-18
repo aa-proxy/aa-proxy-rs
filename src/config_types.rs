@@ -2,6 +2,7 @@ use crate::mitm;
 use crate::mitm::protos::DisplayType;
 use crate::mitm::protos::EvConnectorType;
 use crate::mitm::protos::VideoCodecResolutionType;
+use crate::mitm::protos::VideoFrameRateType;
 use bluer::Address;
 use serde::{
     de::{self, Visitor},
@@ -144,6 +145,27 @@ impl std::str::FromStr for VideoCodecResolutionType {
     }
 }
 
+
+fn parse_video_frame_rate_token(token: &str) -> Option<VideoFrameRateType> {
+    match token.trim().to_ascii_lowercase().as_str() {
+        "60" | "60fps" | "fps60" | "video_fps_60" => Some(VideoFrameRateType::VIDEO_FPS_60),
+        "30" | "30fps" | "fps30" | "video_fps_30" => Some(VideoFrameRateType::VIDEO_FPS_30),
+        _ => None,
+    }
+}
+
+impl std::str::FromStr for VideoFrameRateType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        parse_video_frame_rate_token(s)
+            .or_else(|| {
+                <mitm::protos::VideoFrameRateType as protobuf::Enum>::from_str(s.trim())
+            })
+            .ok_or_else(|| format!("Unknown video frame rate type: {}", s))
+    }
+}
+
 impl fmt::Display for DisplayType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:?}", self)
@@ -157,6 +179,12 @@ impl fmt::Display for EvConnectorType {
 }
 
 impl fmt::Display for VideoCodecResolutionType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl fmt::Display for VideoFrameRateType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:?}", self)
     }
