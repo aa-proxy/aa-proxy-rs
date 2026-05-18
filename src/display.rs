@@ -55,6 +55,7 @@ struct DisplayProfile {
     display_type: DisplayType,
     display_id: u32,
     codec_resolution: VideoCodecResolutionType,
+    frame_rate: VideoFrameRateType,
     width_margin: u32,
     height_margin: u32,
     density: u32,
@@ -90,6 +91,7 @@ fn profile_from_config(
         display_type: profile.display_type,
         display_id,
         codec_resolution: profile.codec_resolution,
+        frame_rate: profile.frame_rate,
         width_margin: profile.width_margin,
         height_margin: profile.height_margin,
         density: if cfg.dpi > 0 {
@@ -157,7 +159,7 @@ fn create_media_sink_service(id: i32, profile: DisplayProfile) -> Service {
 
     let mut video_cfg = VideoConfiguration::new();
     video_cfg.set_codec_resolution(profile.codec_resolution);
-    video_cfg.set_frame_rate(VideoFrameRateType::VIDEO_FPS_30);
+    video_cfg.set_frame_rate(profile.frame_rate);
     video_cfg.set_width_margin(profile.width_margin);
     video_cfg.set_height_margin(profile.height_margin);
     video_cfg.set_density(profile.density);

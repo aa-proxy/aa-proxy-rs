@@ -1,4 +1,4 @@
-use crate::mitm::protos::{DisplayType, VideoCodecResolutionType};
+use crate::mitm::protos::{DisplayType, VideoCodecResolutionType, VideoFrameRateType};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashSet;
@@ -15,6 +15,10 @@ fn default_display_type() -> DisplayType {
 
 fn default_codec_resolution() -> VideoCodecResolutionType {
     VideoCodecResolutionType::VIDEO_1280x720
+}
+
+fn default_frame_rate() -> VideoFrameRateType {
+    VideoFrameRateType::VIDEO_FPS_30
 }
 
 fn default_density() -> u32 {
@@ -71,6 +75,26 @@ where
     VideoCodecResolutionType::from_str(&s).map_err(serde::de::Error::custom)
 }
 
+fn serialize_frame_rate<S>(
+    value: &VideoFrameRateType,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.serialize_str(&value.to_string())
+}
+
+fn deserialize_frame_rate<'de, D>(
+    deserializer: D,
+) -> std::result::Result<VideoFrameRateType, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    VideoFrameRateType::from_str(&s).map_err(serde::de::Error::custom)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct InjectDisplaysFile {
@@ -108,6 +132,12 @@ pub struct InjectDisplayProfile {
         deserialize_with = "deserialize_codec_resolution"
     )]
     pub codec_resolution: VideoCodecResolutionType,
+    #[serde(
+        default = "default_frame_rate",
+        serialize_with = "serialize_frame_rate",
+        deserialize_with = "deserialize_frame_rate"
+    )]
+    pub frame_rate: VideoFrameRateType,
     pub width_margin: u32,
     pub height_margin: u32,
     #[serde(default = "default_density")]
@@ -129,6 +159,7 @@ impl Default for InjectDisplayProfile {
             enabled: true,
             display_type: default_display_type(),
             codec_resolution: default_codec_resolution(),
+            frame_rate: default_frame_rate(),
             width_margin: 0,
             height_margin: 0,
             density: default_density(),
