@@ -310,7 +310,7 @@ pub fn maybe_emit_pending_injected_focus(
     tx: &Sender<Packet>,
 ) -> Result<()> {
     let mut ready_channels: Vec<(u8, u8, bool, DisplayType)> = Vec::new();
-    let mut toggle_channels: Vec<(u8, u8, DisplayType)> = Vec::new();
+    let mut projected_focus_channels: Vec<(u8, u8, DisplayType)> = Vec::new();
     let mut release_channels: Vec<(u8, u8, DisplayType)> = Vec::new();
     let mut connect_gen_updates: Vec<(u8, u64)> = Vec::new();
     let mut tap_presence_updates: Vec<(u8, bool)> = Vec::new();
@@ -351,7 +351,7 @@ pub fn maybe_emit_pending_injected_focus(
                     | InjectedMediaPhase::Streaming
             )
         {
-            toggle_channels.push((channel, state.last_flags, display_type));
+            projected_focus_channels.push((channel, state.last_flags, display_type));
         }
 
         // Reconnect into Idle: re-acquire projected focus so the phone restarts the stream.
@@ -430,7 +430,7 @@ pub fn maybe_emit_pending_injected_focus(
                 connect_gen,
                 seen_connect_gen,
             );
-            toggle_channels.push((channel, ENCRYPTED | FRAME_TYPE_FIRST | FRAME_TYPE_LAST, display_type));
+            projected_focus_channels.push((channel, ENCRYPTED | FRAME_TYPE_FIRST | FRAME_TYPE_LAST, display_type));
         }
     }
 
@@ -478,19 +478,7 @@ pub fn maybe_emit_pending_injected_focus(
         }
     }
 
-    for (channel, flags, display_type) in toggle_channels {
-        let mut drop_focus_pkt = Packet {
-            channel,
-            flags,
-            final_length: None,
-            payload: Vec::new(),
-        };
-        rewrite_video_focus_notification(
-            &mut drop_focus_pkt,
-            VideoFocusMode::VIDEO_FOCUS_NATIVE,
-            true,
-        )?;
-
+    for (channel, flags, display_type) in projected_focus_channels {
         let mut project_focus_pkt = Packet {
             channel,
             flags,
@@ -504,42 +492,24 @@ pub fn maybe_emit_pending_injected_focus(
         )?;
 
         info!(
-            "{} <blue>injected media:</> {} tap client connected on channel <b>{:#04x}</>; toggling VIDEO_FOCUS_NOTIFICATION native→projected",
+            "{} <blue>injected media:</> {} tap client connected on channel <b>{:#04x}</>; sending projected VIDEO_FOCUS_NOTIFICATION",
             get_name(proxy_type),
             injected_display_label(display_type),
             channel
         );
 
-        let mut drop_sent = false;
-        match tx.try_send(drop_focus_pkt) {
-            Ok(()) => {
-                drop_sent = true;
-            }
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                warn!(
-                    "{} <yellow>injected focus toggle backpressure:</> queue full while sending native focus for channel <b>{:#04x}</>; will retry",
-                    get_name(proxy_type),
-                    channel
-                );
-            }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                return Err("injected focus queue closed".into());
-            }
-        }
-
         match tx.try_send(project_focus_pkt) {
             Ok(()) => {
                 debug!(
-                    "{} injected focus toggle on channel <b>{:#04x}</>: display={} native_sent={} projected_sent=true",
+                    "{} injected projected focus on channel <b>{:#04x}</>: display={}",
                     get_name(proxy_type),
                     channel,
-                    injected_display_label(display_type),
-                    drop_sent
+                    injected_display_label(display_type)
                 );
             }
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 warn!(
-                    "{} <yellow>injected focus toggle backpressure:</> queue full while sending projected focus for channel <b>{:#04x}</>; will retry",
+                    "{} <yellow>injected projected focus backpressure:</> queue full while sending projected focus for channel <b>{:#04x}</>; will retry",
                     get_name(proxy_type),
                     channel
                 );
