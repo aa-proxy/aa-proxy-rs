@@ -13,6 +13,7 @@ use crate::device_info;
 use crate::ev::send_ev_data;
 use crate::ev::BatteryData;
 use crate::ev::EV_MODEL_FILE;
+use crate::inject_displays;
 use crate::mitm::protos::KeyCode;
 use crate::mitm::send_byebye;
 use crate::mitm::send_input_key;
@@ -188,6 +189,20 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route(
             "/service-discovery-response",
             get(service_discovery_response_handler),
+        )
+        .route(
+            "/display-injection",
+            get(display_injection_get_handler).put(display_injection_put_handler),
+        )
+        .route(
+            "/display-injection/displays",
+            post(display_injection_display_post_handler),
+        )
+        .route(
+            "/display-injection/displays/:id",
+            get(display_injection_display_get_handler)
+                .put(display_injection_display_put_handler)
+                .delete(display_injection_display_delete_handler),
         )
         .route("/version", get(version_handler))
         .route("/ws", get(ws_handler))
@@ -1412,6 +1427,118 @@ async fn sdr_ui_profile_delete_handler(
             })),
         )
             .into_response(),
+    }
+}
+
+fn display_injection_error_response(error: anyhow::Error) -> axum::response::Response {
+    let message = format!("{:#}", error);
+    let status = if message.contains("failed to read")
+        || message.contains("failed to write")
+        || message.contains("failed to create")
+        || message.contains("failed to serialize")
+    {
+        StatusCode::INTERNAL_SERVER_ERROR
+    } else {
+        StatusCode::BAD_REQUEST
+    };
+
+    (
+        status,
+        Json(json!({
+            "status": "error",
+            "message": message,
+        })),
+    )
+        .into_response()
+}
+
+async fn display_injection_get_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let path = state.config.read().await.inject_displays_file.clone();
+    match inject_displays::list_displays(path).await {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => display_injection_error_response(e),
+    }
+}
+
+async fn display_injection_put_handler(
+    State(state): State<Arc<AppState>>,
+    Json(update): Json<inject_displays::InjectDisplaysSettingsUpdate>,
+) -> impl IntoResponse {
+    let path = state.config.read().await.inject_displays_file.clone();
+    match inject_displays::update_settings(path, update).await {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => display_injection_error_response(e),
+    }
+}
+
+async fn display_injection_display_get_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    let path = state.config.read().await.inject_displays_file.clone();
+    match inject_displays::list_displays(path).await {
+        Ok(response) => {
+            if let Some(display) = response
+                .displays
+                .iter()
+                .find(|display| display.id == id)
+                .cloned()
+            {
+                Json(display).into_response()
+            } else {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({
+                        "status": "error",
+                        "message": format!("Injected display not found: {}", id),
+                    })),
+                )
+                    .into_response()
+            }
+        }
+        Err(e) => display_injection_error_response(e),
+    }
+}
+
+async fn display_injection_display_post_handler(
+    State(state): State<Arc<AppState>>,
+    Json(profile): Json<inject_displays::InjectDisplayProfile>,
+) -> impl IntoResponse {
+    let path = state.config.read().await.inject_displays_file.clone();
+    match inject_displays::add_display(path, profile).await {
+        Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
+        Err(e) => display_injection_error_response(e),
+    }
+}
+
+async fn display_injection_display_put_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(profile): Json<inject_displays::InjectDisplayProfile>,
+) -> impl IntoResponse {
+    let path = state.config.read().await.inject_displays_file.clone();
+    match inject_displays::upsert_display(path, &id, profile).await {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => display_injection_error_response(e),
+    }
+}
+
+async fn display_injection_display_delete_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    let path = state.config.read().await.inject_displays_file.clone();
+    match inject_displays::delete_display(path, &id).await {
+        Ok(Some(response)) => Json(response).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "status": "error",
+                "message": format!("Injected display not found: {}", id),
+            })),
+        )
+            .into_response(),
+        Err(e) => display_injection_error_response(e),
     }
 }
 
