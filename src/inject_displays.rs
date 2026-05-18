@@ -328,7 +328,7 @@ fn validate_profile(profile: &InjectDisplayProfile) -> Result<()> {
 
 fn validate_file(file: &InjectDisplaysFile) -> Result<()> {
     let mut ids = HashSet::new();
-    let mut enabled_cluster_count = 0usize;
+    let mut cluster_count = 0usize;
 
     for profile in &file.displays {
         validate_profile(profile)
@@ -336,14 +336,14 @@ fn validate_file(file: &InjectDisplaysFile) -> Result<()> {
         if !ids.insert(profile.id.as_str()) {
             return Err(anyhow!("duplicate injected display id: {}", profile.id));
         }
-        if profile.enabled && profile.display_type == DisplayType::DISPLAY_TYPE_CLUSTER {
-            enabled_cluster_count += 1;
+        if profile.display_type == DisplayType::DISPLAY_TYPE_CLUSTER {
+            cluster_count += 1;
         }
     }
 
-    if enabled_cluster_count > 1 {
+    if cluster_count > 1 {
         return Err(anyhow!(
-            "only one enabled DISPLAY_TYPE_CLUSTER injected display is supported"
+            "only one DISPLAY_TYPE_CLUSTER injected display is supported"
         ));
     }
 
