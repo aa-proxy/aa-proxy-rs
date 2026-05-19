@@ -33,6 +33,7 @@ use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::fmt;
 use std::io::{Read, Write};
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -93,6 +94,31 @@ pub type SharedServiceDiscoveryResponse = Arc<RwLock<Option<serde_json::Value>>>
 pub type SharedMediaSinks = Arc<tokio::sync::Mutex<HashMap<u8, MediaSink>>>;
 pub type SharedMediaChannels = Arc<tokio::sync::Mutex<HashMap<u8, MediaSink>>>;
 
+/// Companion-app reverse TCP base port for media tap streams.
+/// Endpoint offset N is exposed to the companion on this base + N.
+pub const COMP_APP_TCP_PORT_MEDIA_BASE: u16 = 13000;
+
+#[derive(Clone, Debug, Serialize)]
+pub struct MediaTapEndpointInfo {
+    pub endpoint_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inject_display_id: Option<String>,
+    pub label: String,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_stream_type: Option<String>,
+    pub port: u16,
+    #[serde(skip_serializing)]
+    pub local_port: u16,
+    #[serde(skip_serializing)]
+    pub offset: u8,
+}
+
+pub type SharedMediaTapEndpoints = Arc<RwLock<Vec<MediaTapEndpointInfo>>>;
+pub type SharedCompanionIp = Arc<RwLock<Option<IpAddr>>>;
+
 // message related constants:
 pub const HEADER_LENGTH: usize = 4;
 pub const FRAME_TYPE_FIRST: u8 = 1 << 0;
@@ -124,6 +150,8 @@ pub struct ModifyContext {
     /// Both proxy directions use this because the SDR is rewritten on the HU side,
     /// while media DATA/codec frames are tapped on the MD side.
     pub(crate) shared_media_channels: SharedMediaChannels,
+    /// Runtime injected media tap endpoints exposed through REST and optional companion reverse bridges.
+    pub(crate) media_tap_endpoints: SharedMediaTapEndpoints,
     /// Base TCP port for media tap listeners.
     pub(crate) media_dump_base_port: Option<u16>,
     /// Whether video tap clients wait for a live IDR before streaming.
@@ -141,6 +169,8 @@ pub struct ModifyContext {
     pub(crate) injected_channels: HashSet<u8>,
     /// Injected media service_id/channel -> display type.
     pub(crate) injected_media_display: HashMap<u8, DisplayType>,
+    /// Injected media service_id/channel -> inject-displays.toml profile id.
+    pub(crate) injected_media_profile_ids: HashMap<u8, String>,
     /// Per-channel media state for injected virtual sinks (hidden from HU).
     pub(crate) injected_media_state: HashMap<u8, InjectedMediaState>,
     /// Last observed tap client connection generation by media channel.
@@ -273,9 +303,10 @@ async fn populate_media_tap_channels_by_order(
     ctx: &mut ModifyContext,
     msg: &ServiceDiscoveryResponse,
 ) {
-    if ctx.media_dump_base_port.is_none() {
+    let Some(base_port) = ctx.media_dump_base_port else {
+        *ctx.media_tap_endpoints.write().await = Vec::new();
         return;
-    }
+    };
 
     // Rebuild the channel map from the latest rewritten SDR. Port offsets are assigned
     // in a stable two-pass order: all video sinks first, then audio sinks as actually
@@ -298,6 +329,8 @@ async fn populate_media_tap_channels_by_order(
         ordered_services.push((svc, false));
     }
 
+    let mut tap_endpoints = Vec::new();
+
     for (index, (svc, has_video)) in ordered_services.into_iter().enumerate() {
         if index > u8::MAX as usize {
             warn!(
@@ -311,7 +344,31 @@ async fn populate_media_tap_channels_by_order(
         let offset = index as u8;
         let ch = svc.id() as u8;
         let label = media_sink_label(svc, offset, has_video);
-        let Some(sink) = get_or_create_media_sink_for_offset(ctx, offset, label).await else {
+        let local_port = match base_port.checked_add(offset as u16) {
+            Some(port) => port,
+            None => {
+                warn!(
+                    "{} <yellow>media tap:</> local port overflow for offset <b>{}</>; skipping channel <b>{:#04x}</>",
+                    get_name(proxy_type),
+                    offset,
+                    ch
+                );
+                continue;
+            }
+        };
+        let reverse_port = match COMP_APP_TCP_PORT_MEDIA_BASE.checked_add(offset as u16) {
+            Some(port) => port,
+            None => {
+                warn!(
+                    "{} <yellow>media tap:</> reverse port overflow for offset <b>{}</>; skipping channel <b>{:#04x}</>",
+                    get_name(proxy_type),
+                    offset,
+                    ch
+                );
+                continue;
+            }
+        };
+        let Some(sink) = get_or_create_media_sink_for_offset(ctx, offset, label.clone()).await else {
             continue;
         };
 
@@ -337,6 +394,26 @@ async fn populate_media_tap_channels_by_order(
                 svc.media_sink_service.display_type(),
                 svc.media_sink_service.display_id()
             );
+
+            if let Some(inject_display_id) = ctx.injected_media_profile_ids.get(&ch).cloned() {
+                let display_type = svc.media_sink_service.display_type();
+                if matches!(
+                    display_type,
+                    DisplayType::DISPLAY_TYPE_CLUSTER | DisplayType::DISPLAY_TYPE_AUXILIARY
+                ) {
+                    tap_endpoints.push(MediaTapEndpointInfo {
+                        endpoint_id: format!("display:{}", inject_display_id),
+                        inject_display_id: Some(inject_display_id),
+                        label: label.clone(),
+                        kind: "video".to_string(),
+                        display_type: Some(format!("{:?}", display_type)),
+                        audio_stream_type: None,
+                        port: reverse_port,
+                        local_port,
+                        offset,
+                    });
+                }
+            }
         } else {
             let audio_config = service_audio_config(svc);
             sink.set_audio_stream_info(
@@ -352,6 +429,19 @@ async fn populate_media_tap_channels_by_order(
                 ch,
                 offset
             );
+            let audio_stream_type = format!("{:?}", svc.media_sink_service.audio_type());
+            tap_endpoints.push(MediaTapEndpointInfo {
+                endpoint_id: format!("audio:{}", label),
+                inject_display_id: None,
+                label: label.clone(),
+                kind: "audio".to_string(),
+                display_type: None,
+                audio_stream_type: Some(audio_stream_type),
+                port: reverse_port,
+                local_port,
+                offset,
+            });
+
             if let Some(acfg) = audio_config {
                 info!(
                     "{} <blue>media tap:</> audio channel <b>{:#04x}</> → port offset <b>{}</> ({:?}, {:?}, {}Hz, {}ch, {}bit)",
@@ -376,6 +466,8 @@ async fn populate_media_tap_channels_by_order(
             }
         }
     }
+
+    *ctx.media_tap_endpoints.write().await = tap_endpoints;
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -1874,24 +1966,31 @@ pub async fn pkt_modify_hook(
                 }
             }
 
-            let added_services = add_display_services(&mut msg, cfg);
-            if added_services > 0 {
-                let before_ids: HashSet<i32> = ctx.hu_service_ids.clone();
-                let after_ids: HashSet<i32> = msg.services.iter().map(|s| s.id()).collect();
-                for sid in after_ids.difference(&before_ids) {
-                    ctx.injected_service_ids.insert(*sid);
-                    if let Some(svc) = msg.services.iter().find(|s| s.id() == *sid) {
-                        if !svc.media_sink_service.video_configs.is_empty() {
-                            ctx.injected_media_display
-                                .insert(*sid as u8, svc.media_sink_service.display_type());
-                        }
+            let injected_displays = add_display_services(&mut msg, cfg);
+            if !injected_displays.is_empty() {
+                let mut added_service_count = 0usize;
+                for injected in injected_displays {
+                    ctx.injected_service_ids.insert(injected.media_service_id);
+                    ctx.injected_channels.insert(injected.media_service_id as u8);
+                    ctx.injected_media_display
+                        .insert(injected.media_service_id as u8, injected.display_type);
+                    ctx.injected_media_profile_ids.insert(
+                        injected.media_service_id as u8,
+                        injected.inject_display_id.clone(),
+                    );
+                    added_service_count += 1;
+
+                    if let Some(input_service_id) = injected.input_service_id {
+                        ctx.injected_service_ids.insert(input_service_id);
+                        ctx.injected_channels.insert(input_service_id as u8);
+                        added_service_count += 1;
                     }
                 }
                 info!(
                     "{} <yellow>{:?}</>: injected <b>{}</> display service(s)",
                     get_name(proxy_type),
                     control.unwrap(),
-                    added_services,
+                    added_service_count,
                 );
                 info!(
                     "{} <blue>injected service ids:</> <b>{:?}</>",
@@ -2563,6 +2662,7 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
     script_registry: Option<Arc<ScriptRegistry>>,
     media_sinks: SharedMediaSinks,
     shared_media_channels: SharedMediaChannels,
+    media_tap_endpoints: SharedMediaTapEndpoints,
     ws_event_tx: BroadcastSender<ServerEvent>,
 ) -> Result<()> {
     let cfg = config.read().await.clone();
@@ -2785,6 +2885,7 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
         hu_input_state: HuInputState::default(),
         media_sinks,
         shared_media_channels,
+        media_tap_endpoints,
         media_dump_base_port: cfg.media_dump_base_port,
         media_wait_for_live_idr: cfg.media_wait_for_live_idr,
         media_channels: HashMap::new(),
@@ -2793,6 +2894,7 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
         injected_service_ids: HashSet::new(),
         injected_channels: HashSet::new(),
         injected_media_display: HashMap::new(),
+        injected_media_profile_ids: HashMap::new(),
         injected_media_state: HashMap::new(),
         injected_media_connect_gen: HashMap::new(),
         injected_media_had_tap_client: HashMap::new(),
@@ -2817,6 +2919,45 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
                 && pkt.channel != 0
                 && ctx.injected_channels.contains(&pkt.channel)
             {
+                let raw_msg_id = pkt
+                    .payload
+                    .get(0..2)
+                    .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]));
+
+                // Service-channel CHANNEL_OPEN_REQUESTs for injected services are sent on
+                // the service channel itself (for example 0x08/0x0a), not always on channel 0.
+                // Keep the synthetic service hidden from the real HU, but answer the phone
+                // locally with CHANNEL_OPEN_RESPONSE. Otherwise the request falls through to
+                // injected media emulation and can be mistaken for a media/data message, which
+                // leaves Gearhead stuck during startup.
+                if raw_msg_id == Some(MESSAGE_CHANNEL_OPEN_REQUEST as u16) {
+                    let service_id = pkt
+                        .payload
+                        .get(2..)
+                        .and_then(|data| ChannelOpenRequest::parse_from_bytes(data).ok())
+                        .map(|req| req.service_id() as u8)
+                        .unwrap_or(pkt.channel);
+
+                    let mut response = ChannelOpenResponse::new();
+                    response.set_status(MessageStatus::STATUS_SUCCESS);
+                    let payload = response.write_to_bytes()?;
+                    pkt = build_control_reply_on_channel(
+                        pkt.channel,
+                        MESSAGE_CHANNEL_OPEN_RESPONSE,
+                        payload,
+                    );
+
+                    info!(
+                        "{} <yellow>transparency:</> synthesized CHANNEL_OPEN_RESPONSE for injected channel <b>{:#04x}</> service_id=<b>{}</>; HU path suppressed",
+                        get_name(proxy_type),
+                        pkt.channel,
+                        service_id
+                    );
+
+                    tx.send(pkt).await?;
+                    continue;
+                }
+
                 if ctx.injected_media_display.contains_key(&pkt.channel) {
                     let had_fragment_state = ctx.media_fragments.contains_key(&pkt.channel);
                     // Injected media packets were already tapped on the MobileDevice ingress path.
@@ -2843,14 +2984,8 @@ pub async fn proxy<A: Endpoint<A> + 'static>(
                     }
                 }
 
-                let msg_id = pkt.payload
-                    .get(0..2)
-                    .map(|bytes| {
-                        format!(
-                            "0x{:04X}",
-                            u16::from_be_bytes([bytes[0], bytes[1]])
-                        )
-                    })
+                let msg_id = raw_msg_id
+                    .map(|id| format!("0x{:04X}", id))
                     .unwrap_or_else(|| "none".to_string());
 
                 debug!(
@@ -2982,6 +3117,7 @@ mod tests {
             hu_input_state: HuInputState::default(),
             media_sinks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             shared_media_channels: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            media_tap_endpoints: Arc::new(RwLock::new(Vec::new())),
             media_dump_base_port: None,
             media_wait_for_live_idr: false,
             media_channels: HashMap::new(),
@@ -2990,6 +3126,7 @@ mod tests {
             injected_service_ids: HashSet::new(),
             injected_channels: HashSet::new(),
             injected_media_display: HashMap::new(),
+            injected_media_profile_ids: HashMap::new(),
             injected_media_state: HashMap::new(),
             injected_media_connect_gen: HashMap::new(),
             injected_media_had_tap_client: HashMap::new(),

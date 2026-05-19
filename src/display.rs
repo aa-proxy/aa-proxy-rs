@@ -50,8 +50,17 @@ pub struct InjectedMediaState {
     trace_after_start: u16,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Debug)]
+pub struct InjectedDisplayService {
+    pub media_service_id: i32,
+    pub input_service_id: Option<i32>,
+    pub display_type: DisplayType,
+    pub inject_display_id: String,
+}
+
+#[derive(Clone)]
 struct DisplayProfile {
+    inject_display_id: String,
     display_type: DisplayType,
     display_id: u32,
     codec_resolution: VideoCodecResolutionType,
@@ -89,6 +98,7 @@ fn profile_from_config(
     display_id: u32,
 ) -> DisplayProfile {
     DisplayProfile {
+        inject_display_id: profile.id.clone(),
         display_type: profile.display_type,
         display_id,
         codec_resolution: profile.codec_resolution,
@@ -216,25 +226,36 @@ fn create_input_source_service(id: i32, profile: DisplayProfile) -> Service {
     service
 }
 
-pub fn add_display_services(msg: &mut ServiceDiscoveryResponse, cfg: &AppConfig) -> usize {
+pub fn add_display_services(
+    msg: &mut ServiceDiscoveryResponse,
+    cfg: &AppConfig,
+) -> Vec<InjectedDisplayService> {
     if !cfg.mitm {
-        return 0;
+        return Vec::new();
     }
 
-    let mut added = 0usize;
+    let mut injected = Vec::new();
     for profile in display_profiles(msg, cfg) {
-        let id = next_service_id(msg);
-        msg.services.push(create_media_sink_service(id, profile));
-        added += 1;
+        let media_service_id = next_service_id(msg);
+        msg.services.push(create_media_sink_service(media_service_id, profile.clone()));
 
-        if profile.input_source && !has_input_display(msg, profile.display_id) {
-            let id = next_service_id(msg);
-            msg.services.push(create_input_source_service(id, profile));
-            added += 1;
-        }
+        let input_service_id = if profile.input_source && !has_input_display(msg, profile.display_id) {
+            let input_service_id = next_service_id(msg);
+            msg.services.push(create_input_source_service(input_service_id, profile.clone()));
+            Some(input_service_id)
+        } else {
+            None
+        };
+
+        injected.push(InjectedDisplayService {
+            media_service_id,
+            input_service_id,
+            display_type: profile.display_type,
+            inject_display_id: profile.inject_display_id.clone(),
+        });
     }
 
-    added
+    injected
 }
 
 fn injected_max_unacked(display_type: DisplayType) -> u32 {
