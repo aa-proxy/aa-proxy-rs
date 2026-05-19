@@ -109,8 +109,11 @@ pub struct MediaTapEndpointInfo {
     pub display_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audio_stream_type: Option<String>,
+    /// Companion reverse/on-demand bridge port.
     pub port: u16,
-    #[serde(skip_serializing)]
+    /// Direct media tap port on the aa-proxy-rs device.
+    /// Standalone viewers can connect to host:direct_port without using the companion reverse bridge.
+    #[serde(rename = "direct_port")]
     pub local_port: u16,
     #[serde(skip_serializing)]
     pub offset: u8,
