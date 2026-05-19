@@ -15,6 +15,8 @@ use aa_proxy_rs::led::{LedColor, LedManager, LedMode};
 use aa_proxy_rs::mitm::send_byebye;
 use aa_proxy_rs::mitm::OdometerData;
 use aa_proxy_rs::mitm::Packet;
+use aa_proxy_rs::mitm::SharedCompanionIp;
+use aa_proxy_rs::mitm::SharedMediaTapEndpoints;
 use aa_proxy_rs::mitm::SharedServiceDiscoveryResponse;
 use aa_proxy_rs::mitm::TirePressureData;
 #[cfg(feature = "wasm-scripting")]
@@ -252,6 +254,8 @@ async fn tokio_main(
     last_odometer_data: Arc<RwLock<Option<OdometerData>>>,
     last_speed: Arc<RwLock<Option<i32>>>,
     last_service_discovery_response: SharedServiceDiscoveryResponse,
+    media_tap_endpoints: SharedMediaTapEndpoints,
+    companion_ip: SharedCompanionIp,
     last_tire_pressure_data: Arc<RwLock<Option<TirePressureData>>>,
     led_support: bool,
     button_support: bool,
@@ -273,6 +277,8 @@ async fn tokio_main(
         last_odometer_data,
         last_speed,
         last_service_discovery_response,
+        media_tap_endpoints,
+        companion_ip: companion_ip.clone(),
         last_tire_pressure_data,
         ws_event_tx,
         script_registry,
@@ -785,6 +791,10 @@ fn main() -> Result<()> {
     let last_speed_cloned = last_speed.clone();
     let last_service_discovery_response = Arc::new(RwLock::new(None));
     let last_service_discovery_response_cloned = last_service_discovery_response.clone();
+    let media_tap_endpoints: SharedMediaTapEndpoints = Arc::new(RwLock::new(Vec::new()));
+    let media_tap_endpoints_cloned = media_tap_endpoints.clone();
+    let companion_ip: SharedCompanionIp = Arc::new(RwLock::new(None));
+    let companion_ip_cloned = companion_ip.clone();
     let last_tire_pressure_data = Arc::new(RwLock::new(None));
     let usb_connected = Arc::new(AtomicBool::new(false));
     let usb_connected_cloned = usb_connected.clone();
@@ -830,6 +840,8 @@ fn main() -> Result<()> {
             last_odometer_data,
             last_speed_cloned,
             last_service_discovery_response_cloned,
+            media_tap_endpoints_cloned,
+            companion_ip_cloned,
             last_tire_pressure_data,
             led_support,
             button_support,
@@ -852,6 +864,8 @@ fn main() -> Result<()> {
         last_battery_data,
         last_speed,
         last_service_discovery_response,
+        media_tap_endpoints,
+        companion_ip,
         usb_connected,
         script_registry.clone(),
         ws_event_tx.clone(),

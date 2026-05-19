@@ -14,6 +14,7 @@ use crate::ev::send_ev_data;
 use crate::ev::BatteryData;
 use crate::ev::EV_MODEL_FILE;
 use crate::inject_displays;
+use crate::io_uring::media_tap_reverse_bridge_once;
 use crate::mitm::protos::KeyCode;
 use crate::mitm::send_byebye;
 use crate::mitm::send_input_key;
@@ -25,6 +26,7 @@ use crate::mitm::Result;
 use crate::mitm::SharedServiceDiscoveryResponse;
 use crate::mitm::{send_odometer_data, OdometerData};
 use crate::mitm::{send_tire_pressure_data, TirePressureData};
+use crate::mitm::{SharedCompanionIp, SharedMediaTapEndpoints};
 #[cfg(feature = "wasm-scripting")]
 use crate::script_wasm::{LoadedScript, ScriptRegistry};
 use crate::sdr_ui;
@@ -137,6 +139,8 @@ pub struct AppState {
     pub last_odometer_data: Arc<RwLock<Option<OdometerData>>>,
     pub last_speed: Arc<RwLock<Option<i32>>>,
     pub last_service_discovery_response: SharedServiceDiscoveryResponse,
+    pub media_tap_endpoints: SharedMediaTapEndpoints,
+    pub companion_ip: SharedCompanionIp,
     pub last_tire_pressure_data: Arc<RwLock<Option<TirePressureData>>>,
     pub ws_event_tx: broadcast::Sender<ServerEvent>,
     pub script_registry: Option<Arc<ScriptRegistry>>,
@@ -189,6 +193,11 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route(
             "/service-discovery-response",
             get(service_discovery_response_handler),
+        )
+        .route("/media-taps", get(media_taps_handler))
+        .route(
+            "/media-taps/:endpoint_id/open",
+            post(media_tap_open_handler),
         )
         .route(
             "/display-injection",
@@ -1540,6 +1549,74 @@ async fn display_injection_display_delete_handler(
             .into_response(),
         Err(e) => display_injection_error_response(e),
     }
+}
+
+async fn media_taps_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let endpoints = state.media_tap_endpoints.read().await.clone();
+    if endpoints.is_empty() {
+        Json(json!({
+            "available": false,
+            "reason": "No injected media taps are available yet. Connect Android Auto first.",
+            "endpoints": []
+        }))
+        .into_response()
+    } else {
+        Json(json!({
+            "available": true,
+            "endpoints": endpoints
+        }))
+        .into_response()
+    }
+}
+
+async fn media_tap_open_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(endpoint_id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    let endpoint = {
+        let endpoints = state.media_tap_endpoints.read().await;
+        endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint_id == endpoint_id)
+            .cloned()
+    };
+
+    let Some(endpoint) = endpoint else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "status": "error",
+                "message": format!("Media tap endpoint not found: {}", endpoint_id),
+            })),
+        )
+            .into_response();
+    };
+
+    let android_ip = state.companion_ip.read().await.clone();
+    let Some(android_ip) = android_ip else {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "status": "error",
+                "message": "No companion Android IP is known yet. Connect Android Auto first.",
+            })),
+        )
+            .into_response();
+    };
+
+    let endpoint_for_task = endpoint.clone();
+    tokio::spawn(async move {
+        if let Err(e) = media_tap_reverse_bridge_once(android_ip, endpoint_for_task).await {
+            error!("{} media tap open bridge failed: {}", NAME, e);
+        }
+    });
+
+    Json(json!({
+        "status": "success",
+        "message": "Media tap reverse bridge is opening.",
+        "endpoint": endpoint,
+    }))
+    .into_response()
 }
 
 async fn service_discovery_response_handler(

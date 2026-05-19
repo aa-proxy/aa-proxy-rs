@@ -2,7 +2,10 @@
 use crate::script_wasm::ScriptRegistry;
 #[cfg(not(feature = "wasm-scripting"))]
 type ScriptRegistry = ();
-use crate::mitm::{SharedMediaChannels, SharedMediaSinks, SharedServiceDiscoveryResponse};
+use crate::mitm::{
+    MediaTapEndpointInfo, SharedCompanionIp, SharedMediaChannels, SharedMediaSinks,
+    SharedMediaTapEndpoints, SharedServiceDiscoveryResponse,
+};
 use crate::web::ServerEvent;
 use bytesize::ByteSize;
 use core::net::SocketAddr;
@@ -304,6 +307,85 @@ async fn tcp_bridge(remote_addr: &str, local_addr: &str, cancel: CancellationTok
     }
 }
 
+pub async fn media_tap_reverse_bridge_once(
+    android_ip: IpAddr,
+    endpoint: MediaTapEndpointInfo,
+) -> io::Result<()> {
+    let remote_addr = format!("{}:{}", android_ip, endpoint.port);
+    let local_addr = format!("127.0.0.1:{}", endpoint.local_port);
+
+    info!(
+        "{} starting on-demand media reverse bridge {} ({}) remote={} local={}",
+        NAME, endpoint.label, endpoint.endpoint_id, remote_addr, local_addr
+    );
+
+    let mut remote = match timeout(
+        Duration::from_secs(3),
+        TokioTcpStream::connect(&remote_addr),
+    )
+    .await
+    {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(e)) => {
+            error!(
+                "{} media reverse bridge failed to connect remote {}: {}",
+                NAME, remote_addr, e
+            );
+            return Err(e);
+        }
+        Err(e) => {
+            let err = io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("media reverse bridge timeout connecting remote {remote_addr}: {e}"),
+            );
+            error!("{} {}", NAME, err);
+            return Err(err);
+        }
+    };
+
+    let mut local =
+        match timeout(Duration::from_secs(3), TokioTcpStream::connect(&local_addr)).await {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(e)) => {
+                error!(
+                    "{} media reverse bridge failed to connect local {}: {}",
+                    NAME, local_addr, e
+                );
+                return Err(e);
+            }
+            Err(e) => {
+                let err = io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("media reverse bridge timeout connecting local {local_addr}: {e}"),
+                );
+                error!("{} {}", NAME, err);
+                return Err(err);
+            }
+        };
+
+    info!(
+        "{} on-demand media reverse bridge connected {} ({}), starting transfer",
+        NAME, endpoint.label, endpoint.endpoint_id
+    );
+
+    match copy_bidirectional(&mut remote, &mut local).await {
+        Ok((from_remote, from_local)) => {
+            info!(
+                "{} media reverse bridge closed {} ({}): remote->local={} local->remote={}",
+                NAME, endpoint.label, endpoint.endpoint_id, from_remote, from_local
+            );
+            Ok(())
+        }
+        Err(e) => {
+            error!(
+                "{} media reverse bridge transfer error {} ({}): {}",
+                NAME, endpoint.label, endpoint.endpoint_id, e
+            );
+            Err(e)
+        }
+    }
+}
+
 /// Async lookup MAC from IPv4 using /proc/net/arp
 pub async fn mac_from_ipv4(addr: SocketAddr) -> io::Result<Option<MacAddress>> {
     let ip = match addr.ip() {
@@ -335,6 +417,8 @@ pub async fn mac_from_ipv4(addr: SocketAddr) -> io::Result<Option<MacAddress>> {
 async fn tcp_wait_for_connection(
     listener: &mut TcpListener,
     start_companion_bridges: bool,
+    _media_tap_endpoints: SharedMediaTapEndpoints,
+    companion_ip: SharedCompanionIp,
 ) -> Result<(TcpStream, SocketAddr, CancellationToken)> {
     let retval = listener.accept();
     let (stream, addr) = match timeout(TCP_CLIENT_TIMEOUT, retval)
@@ -361,6 +445,7 @@ async fn tcp_wait_for_connection(
     // for MD/phone connections; DHU emulator clients must not start these bridges.
     if start_companion_bridges {
         if !addr.ip().is_loopback() {
+            *companion_ip.write().await = Some(addr.ip());
             let c = cancel.clone();
             tokio::spawn(async move {
                 info!(
@@ -417,6 +502,11 @@ async fn tcp_wait_for_connection(
             )
             .await;
         });
+
+        debug!(
+            "{} media reverse bridges are opened on demand through /media-taps/:endpoint_id/open",
+            NAME
+        );
     } else {
         debug!(
             "{} skipping companion reverse tcp_bridge for non-MD client ({})",
@@ -487,6 +577,8 @@ pub async fn io_loop(
     last_battery: Arc<RwLock<Option<BatteryData>>>,
     last_speed: Arc<RwLock<Option<i32>>>,
     last_service_discovery_response: SharedServiceDiscoveryResponse,
+    media_tap_endpoints: SharedMediaTapEndpoints,
+    companion_ip: SharedCompanionIp,
     usb_connected: Arc<AtomicBool>,
     script_registry: Option<Arc<ScriptRegistry>>,
     ws_event_tx: BroadcastSender<ServerEvent>,
@@ -575,7 +667,13 @@ pub async fn io_loop(
                 }
                 _ = tcp_start.notified() => {
                     info!("{} 🛰️ MD TCP server: listening for phone connection...", NAME);
-                    if let Ok((s, ip, cancel)) = tcp_wait_for_connection(&mut md_listener.as_mut().unwrap(), true).await {
+                    if let Ok((s, ip, cancel)) = tcp_wait_for_connection(
+                            &mut md_listener.as_mut().unwrap(),
+                            true,
+                            media_tap_endpoints.clone(),
+                            companion_ip.clone(),
+                        )
+                        .await {
                         md_tcp = Some(s);
                         client_mac = mac_from_ipv4(ip).await.unwrap_or(None);
                         bridge_cancel = Some(cancel);
@@ -593,8 +691,13 @@ pub async fn io_loop(
                 "{} 🛰️ MD TCP server: listening for phone connection...",
                 NAME
             );
-            if let Ok((s, ip, cancel)) =
-                tcp_wait_for_connection(&mut md_listener.as_mut().unwrap(), true).await
+            if let Ok((s, ip, cancel)) = tcp_wait_for_connection(
+                &mut md_listener.as_mut().unwrap(),
+                true,
+                media_tap_endpoints.clone(),
+                companion_ip.clone(),
+            )
+            .await
             {
                 md_tcp = Some(s);
                 // Get MAC address of the connected client for later disassociation
@@ -613,8 +716,13 @@ pub async fn io_loop(
                 "{} 🛰️ DHU TCP server: listening for `Desktop Head Unit` connection...",
                 NAME
             );
-            if let Ok((s, _, _)) =
-                tcp_wait_for_connection(&mut dhu_listener.as_mut().unwrap(), false).await
+            if let Ok((s, _, _)) = tcp_wait_for_connection(
+                &mut dhu_listener.as_mut().unwrap(),
+                false,
+                media_tap_endpoints.clone(),
+                companion_ip.clone(),
+            )
+            .await
             {
                 hu_tcp = Some(s);
             } else {
@@ -647,6 +755,9 @@ pub async fn io_loop(
         if aa_server_tcp_enabled {
             match tcp_connect_to_aa_server(&aa_server_tcp_addr).await {
                 Ok(s) => {
+                    if let Ok(socket_addr) = aa_server_tcp_addr.parse::<SocketAddr>() {
+                        *companion_ip.write().await = Some(socket_addr.ip());
+                    }
                     md_tcp = Some(s);
                 }
                 Err(e) => {
@@ -757,6 +868,7 @@ pub async fn io_loop(
             script_registry.clone(),
             persistent_media_sinks.clone(),
             persistent_media_channels.clone(),
+            media_tap_endpoints.clone(),
             ws_event_tx.clone(),
         ));
         from_stream = tokio_uring::spawn(proxy(
@@ -777,6 +889,7 @@ pub async fn io_loop(
             script_registry.clone(),
             persistent_media_sinks.clone(),
             persistent_media_channels.clone(),
+            media_tap_endpoints.clone(),
             ws_event_tx.clone(),
         ));
 
@@ -827,6 +940,7 @@ pub async fn io_loop(
         if let Some(cancel) = bridge_cancel.take() {
             cancel.cancel();
         }
+        media_tap_endpoints.write().await.clear();
 
         // Make sure the reference count drops to zero and the socket is
         // freed by aborting both tasks (which both hold a `Rc<TcpStream>`
