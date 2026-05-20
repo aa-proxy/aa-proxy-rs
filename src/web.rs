@@ -502,13 +502,6 @@ pub async fn tire_pressure_handler(
         )
             .into_response();
     }
-    if data.pressures_kpa.iter().any(|&p| p < 0.0) {
-        return (
-            StatusCode::BAD_REQUEST,
-            "pressures_kpa values must be >= 0.0",
-        )
-            .into_response();
-    }
 
     info!("{} Received tire pressure data: {:?}", NAME, data);
 
