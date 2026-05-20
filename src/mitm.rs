@@ -15,6 +15,7 @@ use crate::display::add_display_services;
 use crate::display::emulate_injected_media_packet;
 use crate::display::maybe_emit_pending_injected_focus;
 use crate::display::InjectedMediaState;
+use crate::inject_displays::read_inject_displays_file_sync;
 use crate::mitm_prettyprint::{pkt_debug, update_debug_channel_kinds, PacketDebugServiceKind};
 use crate::sdr_ui;
 use crate::vendor_ext::{
@@ -202,20 +203,155 @@ fn service_audio_config(svc: &Service) -> Option<AudioStreamConfig> {
         })
 }
 
-fn display_type_label(display_type: DisplayType) -> &'static str {
-    match display_type {
-        DisplayType::DISPLAY_TYPE_MAIN => "main",
-        DisplayType::DISPLAY_TYPE_CLUSTER => "cluster",
-        DisplayType::DISPLAY_TYPE_AUXILIARY => "aux",
+const MEDIA_TAP_OFFSET_VIDEO_MAIN: u8 = 0;
+const MEDIA_TAP_OFFSET_VIDEO_CLUSTER: u8 = 1;
+const MEDIA_TAP_OFFSET_AUDIO_GUIDANCE: u8 = 2;
+const MEDIA_TAP_OFFSET_AUDIO_SYSTEM: u8 = 3;
+const MEDIA_TAP_OFFSET_AUDIO_MEDIA: u8 = 4;
+const MEDIA_TAP_OFFSET_AUDIO_TELEPHONY: u8 = 5;
+const MEDIA_TAP_OFFSET_AUX_BASE: u8 = 15;
+
+/// How many enabled AUX displays can fit in the static u8 offset range.
+const MEDIA_TAP_MAX_AUX_SLOTS: u8 = u8::MAX - MEDIA_TAP_OFFSET_AUX_BASE;
+
+/// Count enabled AUX profiles from inject-displays.toml.
+///
+/// Fixed core media tap slots are always opened at startup, but AUX slots are
+/// opened only for the enabled AUX displays configured at startup. This keeps
+/// `aux-1` on base+15, `aux-2` on base+16, ... without pre-opening a noisy
+/// placeholder pool when only one AUX is configured.
+pub fn static_media_tap_aux_slot_count(config: &AppConfig) -> u8 {
+    let file = match read_inject_displays_file_sync(&config.inject_displays_file) {
+        Ok(file) => file,
+        Err(err) => {
+            warn!(
+                "<yellow>media tap:</> failed to read inject display config <b>{}</>: {}; no AUX tap ports will be pre-opened",
+                config.inject_displays_file.display(),
+                err
+            );
+            return 0;
+        }
+    };
+
+    if !file.enabled {
+        return 0;
+    }
+
+    let count = file
+        .displays
+        .iter()
+        .filter(|profile| {
+            profile.enabled && profile.display_type == DisplayType::DISPLAY_TYPE_AUXILIARY
+        })
+        .count();
+
+    if count > MEDIA_TAP_MAX_AUX_SLOTS as usize {
+        warn!(
+            "<yellow>media tap:</> enabled AUX display count <b>{}</> exceeds static offset capacity <b>{}</>; extra AUX ports will be opened lazily after SDR",
+            count,
+            MEDIA_TAP_MAX_AUX_SLOTS
+        );
+    }
+
+    count.min(MEDIA_TAP_MAX_AUX_SLOTS as usize) as u8
+}
+
+fn media_tap_static_label_for_offset(offset: u8) -> String {
+    match offset {
+        MEDIA_TAP_OFFSET_VIDEO_MAIN => "video-main".to_string(),
+        MEDIA_TAP_OFFSET_VIDEO_CLUSTER => "video-cluster".to_string(),
+        MEDIA_TAP_OFFSET_AUDIO_GUIDANCE => "audio-guidance".to_string(),
+        MEDIA_TAP_OFFSET_AUDIO_SYSTEM => "audio-system".to_string(),
+        MEDIA_TAP_OFFSET_AUDIO_MEDIA => "audio-media".to_string(),
+        MEDIA_TAP_OFFSET_AUDIO_TELEPHONY => "audio-telephony".to_string(),
+        offset if offset >= MEDIA_TAP_OFFSET_AUX_BASE => {
+            format!("video-aux-{}", offset - MEDIA_TAP_OFFSET_AUX_BASE + 1)
+        }
+        _ => format!("media-{offset:02}"),
     }
 }
 
-fn audio_type_label(audio_type: AudioStreamType) -> &'static str {
+fn media_tap_offset_for_audio_type(audio_type: AudioStreamType) -> u8 {
     match audio_type {
-        AUDIO_STREAM_GUIDANCE => "guidance",
-        AUDIO_STREAM_SYSTEM_AUDIO => "system",
-        AUDIO_STREAM_MEDIA => "media",
-        AUDIO_STREAM_TELEPHONY => "telephony",
+        AUDIO_STREAM_GUIDANCE => MEDIA_TAP_OFFSET_AUDIO_GUIDANCE,
+        AUDIO_STREAM_SYSTEM_AUDIO => MEDIA_TAP_OFFSET_AUDIO_SYSTEM,
+        AUDIO_STREAM_MEDIA => MEDIA_TAP_OFFSET_AUDIO_MEDIA,
+        AUDIO_STREAM_TELEPHONY => MEDIA_TAP_OFFSET_AUDIO_TELEPHONY,
+    }
+}
+
+fn media_tap_offset_for_service(svc: &Service, aux_index: &mut u8) -> Option<u8> {
+    if is_video_media_sink(svc) {
+        return match svc.media_sink_service.display_type() {
+            DisplayType::DISPLAY_TYPE_MAIN => Some(MEDIA_TAP_OFFSET_VIDEO_MAIN),
+            DisplayType::DISPLAY_TYPE_CLUSTER => Some(MEDIA_TAP_OFFSET_VIDEO_CLUSTER),
+            DisplayType::DISPLAY_TYPE_AUXILIARY => {
+                let offset = MEDIA_TAP_OFFSET_AUX_BASE.checked_add(*aux_index)?;
+                *aux_index = aux_index.saturating_add(1);
+                Some(offset)
+            }
+        };
+    }
+
+    if is_audio_media_sink(svc) {
+        return Some(media_tap_offset_for_audio_type(
+            svc.media_sink_service.audio_type(),
+        ));
+    }
+
+    None
+}
+
+/// Open the fixed media tap TCP listener set as soon as aa-proxy-rs starts.
+/// The ports stay stable even if the corresponding SDR sink is missing; those
+/// listeners simply have no output until a matching sink/channel is registered.
+pub async fn ensure_static_media_tap_listeners(
+    media_sinks: SharedMediaSinks,
+    base_port: Option<u16>,
+    wait_for_live_idr: bool,
+    aux_slots: u8,
+) {
+    let Some(base_port) = base_port else {
+        return;
+    };
+
+    let mut offsets = vec![
+        MEDIA_TAP_OFFSET_VIDEO_MAIN,
+        MEDIA_TAP_OFFSET_VIDEO_CLUSTER,
+        MEDIA_TAP_OFFSET_AUDIO_GUIDANCE,
+        MEDIA_TAP_OFFSET_AUDIO_SYSTEM,
+        MEDIA_TAP_OFFSET_AUDIO_MEDIA,
+        MEDIA_TAP_OFFSET_AUDIO_TELEPHONY,
+    ];
+
+    for aux_index in 0..aux_slots {
+        offsets.push(MEDIA_TAP_OFFSET_AUX_BASE + aux_index);
+    }
+
+    let mut sinks = media_sinks.lock().await;
+    for offset in offsets {
+        if sinks.contains_key(&offset) {
+            continue;
+        }
+
+        let Some(port) = base_port.checked_add(offset as u16) else {
+            warn!(
+                "<yellow>media tap:</> cannot pre-open static media offset <b>{}</>; base port <b>{}</> would overflow",
+                offset,
+                base_port
+            );
+            continue;
+        };
+
+        let label = media_tap_static_label_for_offset(offset);
+        let sink = MediaSink::new(128);
+        tokio::spawn(media_tcp_server(
+            port,
+            label,
+            sink.clone(),
+            wait_for_live_idr,
+        ));
+        sinks.insert(offset, sink);
     }
 }
 
@@ -225,26 +361,6 @@ fn is_video_media_sink(svc: &Service) -> bool {
 
 fn is_audio_media_sink(svc: &Service) -> bool {
     !svc.media_sink_service.audio_configs.is_empty() || svc.media_sink_service.audio_type.is_some()
-}
-
-fn media_sink_label(svc: &Service, offset: u8, is_video: bool) -> String {
-    let label = if is_video {
-        format!(
-            "video-{}",
-            display_type_label(svc.media_sink_service.display_type())
-        )
-    } else {
-        format!(
-            "audio-{}",
-            audio_type_label(svc.media_sink_service.audio_type())
-        )
-    };
-
-    if label.is_empty() {
-        format!("media-{offset:02}")
-    } else {
-        label.chars().take(48).collect()
-    }
 }
 
 async fn get_or_create_media_sink_for_offset(
@@ -314,42 +430,54 @@ async fn populate_media_tap_channels_by_order(
         return;
     };
 
-    // Rebuild the channel map from the latest rewritten SDR. Port offsets are assigned
-    // in a stable two-pass order: all video sinks first, then audio sinks as actually
-    // advertised by the SDR. This allows multiple displays without colliding with audio.
+    // Rebuild the channel map from the latest rewritten SDR, but keep TCP tap ports
+    // statically allocated. This preserves the long-standing expectation that a
+    // given sink type always lives at the same base-port offset:
+    //   +0  video-main
+    //   +1  video-cluster
+    //   +2  audio-guidance
+    //   +3  audio-system
+    //   +4  audio-media
+    //   +5  audio-telephony
+    //   +15 video-aux-1, +16 video-aux-2, ...
+    // Missing sinks simply have no registered channel/output; their listeners stay open.
     ctx.media_channels.clear();
     {
         let mut shared_media_channels = ctx.shared_media_channels.lock().await;
         shared_media_channels.clear();
     }
 
-    let mut ordered_services: Vec<(&Service, bool)> = Vec::new();
-    for svc in msg.services.iter().filter(|svc| is_video_media_sink(svc)) {
-        ordered_services.push((svc, true));
-    }
+    let mut tap_endpoints = Vec::new();
+    let mut aux_index: u8 = 0;
+    let mut used_offsets: HashSet<u8> = HashSet::new();
+
     for svc in msg
         .services
         .iter()
-        .filter(|svc| !is_video_media_sink(svc) && is_audio_media_sink(svc))
+        .filter(|svc| is_video_media_sink(svc) || is_audio_media_sink(svc))
     {
-        ordered_services.push((svc, false));
-    }
-
-    let mut tap_endpoints = Vec::new();
-
-    for (index, (svc, has_video)) in ordered_services.into_iter().enumerate() {
-        if index > u8::MAX as usize {
+        let Some(offset) = media_tap_offset_for_service(svc, &mut aux_index) else {
             warn!(
-                "{} <yellow>media tap:</> too many media sinks in SDR; channel <b>{:#04x}</> is not exposed",
+                "{} <yellow>media tap:</> unsupported media sink channel <b>{:#04x}</>; not exposed",
                 get_name(proxy_type),
+                svc.id() as u8
+            );
+            continue;
+        };
+
+        if !used_offsets.insert(offset) {
+            warn!(
+                "{} <yellow>media tap:</> duplicate media sink for static offset <b>{}</>; channel <b>{:#04x}</> is not exposed",
+                get_name(proxy_type),
+                offset,
                 svc.id() as u8
             );
             continue;
         }
 
-        let offset = index as u8;
         let ch = svc.id() as u8;
-        let label = media_sink_label(svc, offset, has_video);
+        let has_video = is_video_media_sink(svc);
+        let label = media_tap_static_label_for_offset(offset);
         let local_port = match base_port.checked_add(offset as u16) {
             Some(port) => port,
             None => {
@@ -387,13 +515,13 @@ async fn populate_media_tap_channels_by_order(
             .await;
             register_media_channel_sink(ctx, ch, sink).await;
             debug!(
-                "{} media_channels.insert: ch={:#04x} offset={} media_order=video_first",
+                "{} media_channels.insert: ch={:#04x} offset={} media_order=static_slot",
                 get_name(proxy_type),
                 ch,
                 offset
             );
             info!(
-                "{} <blue>media tap:</> video channel <b>{:#04x}</> → port offset <b>{}</> ({:?}, {:?}, display_id={})",
+                "{} <blue>media tap:</> video channel <b>{:#04x}</> → static port offset <b>{}</> ({:?}, {:?}, display_id={})",
                 get_name(proxy_type),
                 ch,
                 offset,
@@ -431,7 +559,7 @@ async fn populate_media_tap_channels_by_order(
             .await;
             register_media_channel_sink(ctx, ch, sink).await;
             debug!(
-                "{} media_channels.insert: ch={:#04x} offset={} media_order=audio_after_video",
+                "{} media_channels.insert: ch={:#04x} offset={} media_order=static_slot",
                 get_name(proxy_type),
                 ch,
                 offset
@@ -451,7 +579,7 @@ async fn populate_media_tap_channels_by_order(
 
             if let Some(acfg) = audio_config {
                 info!(
-                    "{} <blue>media tap:</> audio channel <b>{:#04x}</> → port offset <b>{}</> ({:?}, {:?}, {}Hz, {}ch, {}bit)",
+                    "{} <blue>media tap:</> audio channel <b>{:#04x}</> → static port offset <b>{}</> ({:?}, {:?}, {}Hz, {}ch, {}bit)",
                     get_name(proxy_type),
                     ch,
                     offset,
@@ -463,7 +591,7 @@ async fn populate_media_tap_channels_by_order(
                 );
             } else {
                 info!(
-                    "{} <blue>media tap:</> audio channel <b>{:#04x}</> → port offset <b>{}</> ({:?}, {:?})",
+                    "{} <blue>media tap:</> audio channel <b>{:#04x}</> → static port offset <b>{}</> ({:?}, {:?})",
                     get_name(proxy_type),
                     ch,
                     offset,
