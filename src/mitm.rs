@@ -39,13 +39,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::io::AsyncReadExt;
-use tokio::io::AsyncWriteExt;
 use tokio::sync::broadcast::Sender as BroadcastSender;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::RwLock;
-use tokio::time::timeout;
-use tokio_uring::buf::BoundedBuf;
 
 // protobuf stuff:
 include!(concat!(env!("OUT_DIR"), "/protos/mod.rs"));
@@ -69,13 +65,14 @@ use crate::config::{Action::Stop, AppConfig, BtScoMediaBridgeAudioType, SharedCo
 use crate::config_types::HexdumpLevel;
 use crate::ev::EvTaskCommand;
 use crate::hu_input::{handle_hu_input, HuInputState};
+use crate::io_device::IoDevice as IoDeviceTrait;
+use crate::io_uring::read_input_data;
 use crate::io_uring::Endpoint;
 use crate::io_uring::IoDevice;
 pub use crate::media_tap::{
     media_tcp_server, AudioStreamConfig, MediaSink, MediaStreamInfo, MediaStreamKind,
 };
 use crate::media_tap::{reassemble_media_packet, tap_media_message, MediaFrameBuffer};
-use crate::proxy::BUFFER_LEN;
 
 // module name for logging engine
 pub fn get_name(proxy_type: ProxyType) -> String {
@@ -734,9 +731,9 @@ impl Packet {
     }
 
     /// composes a final frame and transmits it to endpoint device (HU/MD)
-    async fn transmit<A: Endpoint<A>>(
+    async fn transmit<D: IoDeviceTrait>(
         &self,
-        device: &mut IoDevice<A>,
+        device: &mut D,
     ) -> std::result::Result<usize, std::io::Error> {
         let len = self.payload.len() as u16;
         let mut frame: Vec<u8> = vec![];
@@ -751,22 +748,8 @@ impl Packet {
             frame.push((final_len >> 8) as u8);
             frame.push((final_len & 0xff) as u8);
         }
-        match device {
-            IoDevice::UsbWriter(device, _) => {
-                frame.append(&mut self.payload.clone());
-                let mut dev = device.borrow_mut();
-                dev.write(&frame).await
-            }
-            IoDevice::EndpointIo(device) => {
-                frame.append(&mut self.payload.clone());
-                device.write(frame).submit().await.0
-            }
-            IoDevice::TcpStreamIo(device) => {
-                frame.append(&mut self.payload.clone());
-                device.write(frame).submit().await.0
-            }
-            _ => todo!(),
-        }
+        frame.append(&mut self.payload.clone());
+        device.write_data(&frame).await
     }
 
     /// decapsulates SSL payload and writes to SslStream
@@ -2600,136 +2583,78 @@ async fn ssl_builder(proxy_type: ProxyType) -> Result<Ssl> {
     Ok(ssl)
 }
 
-/// reads all available data to VecDeque
-async fn read_input_data<A: Endpoint<A>>(
-    rbuf: &mut VecDeque<u8>,
-    obj: &mut IoDevice<A>,
-    incremental_read: bool,
-) -> Result<usize> {
-    let mut newdata = vec![0u8; BUFFER_LEN];
-    let mut n;
-    let mut len;
-
-    match obj {
-        IoDevice::UsbReader(device, _) => {
-            let mut dev = device.borrow_mut();
-            let retval = dev.read(&mut newdata);
-            len = retval
-                .await
-                .context("read_input_data: UsbReader read error")?;
-        }
-        IoDevice::EndpointIo(device) => {
-            if incremental_read {
-                // read header
-                newdata = vec![0u8; HEADER_LENGTH];
-                let retval = device.read(newdata);
-                (n, newdata) = timeout(Duration::from_millis(15000), retval)
-                    .await
-                    .context("read_input_data/header: EndpointIo timeout")?;
-                len = n.context("read_input_data/header: EndpointIo read error")?;
-
-                // fill the output/read buffer with the obtained header data
-                rbuf.write(&newdata.clone().slice(..len))?;
-
-                // compute payload size
-                let mut payload_size = (newdata[3] as u16 + ((newdata[2] as u16) << 8)) as usize;
-                if (newdata[1] & FRAME_TYPE_MASK) == FRAME_TYPE_FIRST {
-                    // header is 8 bytes; need to read 4 more bytes
-                    payload_size += 4;
-                }
-                // prepare buffer for the payload and continue normally
-                newdata = vec![0u8; payload_size];
-            }
-            let retval = device.read(newdata);
-            (n, newdata) = timeout(Duration::from_millis(15000), retval)
-                .await
-                .context("read_input_data: EndpointIo timeout")?;
-            len = n.context("read_input_data: EndpointIo read error")?;
-        }
-        IoDevice::TcpStreamIo(device) => {
-            let retval = device.read(newdata);
-            (n, newdata) = timeout(Duration::from_millis(15000), retval)
-                .await
-                .context("read_input_data: TcpStreamIo timeout")?;
-            len = n.context("read_input_data: TcpStreamIo read error")?;
-            if len == 0 {
-                // TCP EOF means the peer closed the connection; propagate as disconnect.
-                return Err("read_input_data: TcpStreamIo EOF".into());
-            }
-        }
-        _ => todo!(),
-    }
-    if len > 0 {
-        rbuf.write(&newdata.slice(..len))?;
-    }
-    Ok(len)
-}
-
 /// runtime musl detection
 fn is_musl() -> bool {
     std::path::Path::new("/lib/ld-musl-riscv64.so.1").exists()
 }
 
-/// main reader thread for a device
-pub async fn endpoint_reader<A: Endpoint<A>>(
-    mut device: IoDevice<A>,
-    tx: Sender<Packet>,
-    hu: bool,
-) -> Result<()> {
-    let mut rbuf: VecDeque<u8> = VecDeque::new();
-    let incremental_read = !hu && is_musl();
-    loop {
-        read_input_data(&mut rbuf, &mut device, incremental_read).await?;
-        // check if we have complete packet available
-        loop {
-            // Accept packets as soon as we have the complete fixed header.
-            // Using >= is required for valid zero-payload frames (frame_size == HEADER_LENGTH).
-            if rbuf.len() >= HEADER_LENGTH {
-                let channel = rbuf[0];
-                let flags = rbuf[1];
+/// reads all available data to VecDeque
+macro_rules! impl_endpoint_reader {
+    ([$($gen:tt)*], $dev_type:ty) => {
+        pub async fn endpoint_reader<$($gen)*>(
+            mut device: $dev_type,
+            tx: Sender<Packet>,
+            hu: bool,
+        ) -> Result<()> {
+            let mut rbuf: VecDeque<u8> = VecDeque::new();
+            let incremental_read = !hu && is_musl();
+            loop {
+                read_input_data(&mut rbuf, &mut device, incremental_read).await?;
+                // check if we have complete packet available
+                loop {
+                    // Accept packets as soon as we have the complete fixed header.
+                    // Using >= is required for valid zero-payload frames (frame_size == HEADER_LENGTH).
+                    if rbuf.len() >= HEADER_LENGTH {
+                        let channel = rbuf[0];
+                        let flags = rbuf[1];
 
-                // FIRST frames carry an extended 8-byte header. If only 4 bytes
-                // are buffered, wait for the remaining header bytes before parsing.
-                if (flags & FRAME_TYPE_MASK) == FRAME_TYPE_FIRST && rbuf.len() < 8 {
+                        // FIRST frames carry an extended 8-byte header. If only 4 bytes
+                        // are buffered, wait for the remaining header bytes before parsing.
+                        if (flags & FRAME_TYPE_MASK) == FRAME_TYPE_FIRST && rbuf.len() < 8 {
+                            break;
+                        }
+
+                        let mut header_size = HEADER_LENGTH;
+                        let mut final_length = None;
+                        let payload_size = (rbuf[3] as u16 + ((rbuf[2] as u16) << 8)) as usize;
+                        if rbuf.len() >= 8 && (flags & FRAME_TYPE_MASK) == FRAME_TYPE_FIRST {
+                            header_size += 4;
+                            final_length = Some(
+                                ((rbuf[4] as u32) << 24)
+                                    + ((rbuf[5] as u32) << 16)
+                                    + ((rbuf[6] as u32) << 8)
+                                    + (rbuf[7] as u32),
+                            );
+                        }
+                        let frame_size = header_size + payload_size;
+                        if rbuf.len() >= frame_size {
+                            let mut frame = vec![0u8; frame_size];
+                            rbuf.read_exact(&mut frame)?;
+                            // we now have all header data analyzed/read, so remove
+                            // the header from frame to have payload only left
+                            frame.drain(..header_size);
+                            let pkt = Packet {
+                                channel,
+                                flags,
+                                final_length,
+                                payload: frame,
+                            };
+                            // send packet to main thread for further process
+                            tx.send(pkt).await?;
+                            // check if we have another packet
+                            continue;
+                        }
+                    }
+                    // no more complete packets available
                     break;
                 }
-
-                let mut header_size = HEADER_LENGTH;
-                let mut final_length = None;
-                let payload_size = (rbuf[3] as u16 + ((rbuf[2] as u16) << 8)) as usize;
-                if rbuf.len() >= 8 && (flags & FRAME_TYPE_MASK) == FRAME_TYPE_FIRST {
-                    header_size += 4;
-                    final_length = Some(
-                        ((rbuf[4] as u32) << 24)
-                            + ((rbuf[5] as u32) << 16)
-                            + ((rbuf[6] as u32) << 8)
-                            + (rbuf[7] as u32),
-                    );
-                }
-                let frame_size = header_size + payload_size;
-                if rbuf.len() >= frame_size {
-                    let mut frame = vec![0u8; frame_size];
-                    rbuf.read_exact(&mut frame)?;
-                    // we now have all header data analyzed/read, so remove
-                    // the header from frame to have payload only left
-                    frame.drain(..header_size);
-                    let pkt = Packet {
-                        channel,
-                        flags,
-                        final_length,
-                        payload: frame,
-                    };
-                    // send packet to main thread for further process
-                    tx.send(pkt).await?;
-                    // check if we have another packet
-                    continue;
-                }
             }
-            // no more complete packets available
-            break;
         }
-    }
+    };
 }
+
+// main reader thread for a device — io_uring backend
+impl_endpoint_reader!([A: Endpoint<A>], IoDevice<A>);
 
 /// checking if there was a true fatal SSL error
 /// Note that the error may not be fatal. For example if the underlying
@@ -2780,9 +2705,9 @@ fn build_control_reply_on_channel(
 }
 
 /// main thread doing all packet processing of an endpoint/device
-pub async fn proxy<A: Endpoint<A> + 'static>(
+pub async fn proxy<D: IoDeviceTrait>(
     proxy_type: ProxyType,
-    mut device: IoDevice<A>,
+    mut device: D,
     bytes_written: Arc<AtomicUsize>,
     tx: Sender<Packet>,
     mut rx: Receiver<Packet>,
