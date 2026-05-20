@@ -745,7 +745,7 @@ impl Packet {
         frame.push((len >> 8) as u8);
         frame.push((len & 0xff) as u8);
         if let Some(final_len) = self.final_length {
-            // adding addional 4-bytes of final_len header
+            // adding additional 4-bytes of final_len header
             frame.push((final_len >> 24) as u8);
             frame.push((final_len >> 16) as u8);
             frame.push((final_len >> 8) as u8);
@@ -2677,7 +2677,7 @@ pub async fn endpoint_reader<A: Endpoint<A>>(
     hu: bool,
 ) -> Result<()> {
     let mut rbuf: VecDeque<u8> = VecDeque::new();
-    let incremental_read = if !hu && is_musl() { true } else { false };
+    let incremental_read = !hu && is_musl();
     loop {
         read_input_data(&mut rbuf, &mut device, incremental_read).await?;
         // check if we have complete packet available
