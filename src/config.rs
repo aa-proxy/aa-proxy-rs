@@ -178,12 +178,48 @@ fn webserver_default_bind() -> Option<String> {
     Some("0.0.0.0:80".into())
 }
 
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum Requires {
+    /// No dependency. The field/section is always visible and enabled.
+    #[default]
+    None,
+    /// Single field that must be truthy: boolean=true, integer non-zero,
+    /// string non-empty, select non-empty, multiselect non-empty.
+    Single(String),
+    /// Multiple fields that must ALL be truthy.
+    All(Vec<String>),
+    /// A structured predicate. Currently supported:
+    /// - `{ "field": "...", "equals": "..." }` — string/select equality.
+    /// - `{ "field": "...", "contains": "..." }` — multiselect contains value.
+    Predicate(RequiresPredicate),
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RequiresPredicate {
+    pub field: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub equals: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contains: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ConfigValue {
     pub typ: String,
     pub description: String,
     pub values: Option<Vec<String>>,
+    /// Hide behind the "show advanced" UI toggle when true.
+    pub advanced: bool,
+    /// Visibility / enabled dependency on another field's truthiness or
+    /// specific value. Skipped from serialization when None.
+    #[serde(skip_serializing_if = "is_requires_none")]
+    pub requires: Requires,
+}
+
+fn is_requires_none(r: &Requires) -> bool {
+    matches!(r, Requires::None)
 }
 
 #[serde_as]
@@ -192,6 +228,17 @@ pub struct ConfigValue {
 pub struct ConfigValues {
     pub title: String,
     pub values: IndexMap<String, ConfigValue>,
+    /// Open the section's <details> closed when true.
+    pub collapsed_by_default: bool,
+    /// Nested groups within this section. Rendered as sub-cards.
+    pub subsections: Vec<ConfigValues>,
+    /// Hide the whole section behind the "show advanced" UI toggle.
+    #[serde(default)]
+    pub advanced: bool,
+    /// Visibility / enabled dependency on another field's truthiness or
+    /// specific value, scoped to the entire section.
+    #[serde(default, skip_serializing_if = "is_requires_none")]
+    pub requires: Requires,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -456,6 +503,8 @@ impl Default for ConfigValue {
             typ: String::new(),
             description: String::new(),
             values: None,
+            advanced: false,
+            requires: Requires::None,
         }
     }
 }
@@ -465,6 +514,10 @@ impl Default for ConfigValues {
         Self {
             title: String::new(),
             values: IndexMap::new(),
+            collapsed_by_default: false,
+            subsections: Vec::new(),
+            advanced: false,
+            requires: Requires::None,
         }
     }
 }
@@ -686,7 +739,7 @@ pub fn wasm_script_limits_config_section() -> ConfigValues {
         ConfigValue {
             typ: "string".to_string(),
             description: "Directory where WASM hook files are loaded from. Each script gets read-only access only to a private subfolder named after the .wasm file stem. Default: /data/wasm-hooks.".to_string(),
-            values: None,
+            ..Default::default()
         },
     );
 
@@ -695,7 +748,8 @@ pub fn wasm_script_limits_config_section() -> ConfigValues {
         ConfigValue {
             typ: "integer".to_string(),
             description: "Maximum linear memory size, in MiB, allowed for each live WASM script instance. Default: 5.".to_string(),
-            values: None,
+            advanced: true,
+            ..Default::default()
         },
     );
     values.insert(
@@ -703,7 +757,8 @@ pub fn wasm_script_limits_config_section() -> ConfigValues {
         ConfigValue {
             typ: "integer".to_string(),
             description: "Maximum number of component/core instances allowed inside each WASM script store. Default: 16.".to_string(),
-            values: None,
+            advanced: true,
+            ..Default::default()
         },
     );
     values.insert(
@@ -713,7 +768,8 @@ pub fn wasm_script_limits_config_section() -> ConfigValues {
             description:
                 "Maximum number of memories allowed inside each WASM script store. Default: 4."
                     .to_string(),
-            values: None,
+            advanced: true,
+            ..Default::default()
         },
     );
     values.insert(
@@ -723,7 +779,8 @@ pub fn wasm_script_limits_config_section() -> ConfigValues {
             description:
                 "Maximum number of tables allowed inside each WASM script store. Default: 8."
                     .to_string(),
-            values: None,
+            advanced: true,
+            ..Default::default()
         },
     );
     values.insert(
@@ -731,7 +788,8 @@ pub fn wasm_script_limits_config_section() -> ConfigValues {
         ConfigValue {
             typ: "integer".to_string(),
             description: "Maximum number of table elements allowed inside each WASM script store. Default: 512.".to_string(),
-            values: None,
+            advanced: true,
+            ..Default::default()
         },
     );
     values.insert(
@@ -739,7 +797,8 @@ pub fn wasm_script_limits_config_section() -> ConfigValues {
         ConfigValue {
             typ: "integer".to_string(),
             description: "Epoch deadline for modify-packet calls. The host increments epochs every 10 ms, so 100 is roughly 1 second. Default: 100.".to_string(),
-            values: None,
+            advanced: true,
+            ..Default::default()
         },
     );
     values.insert(
@@ -747,13 +806,15 @@ pub fn wasm_script_limits_config_section() -> ConfigValues {
         ConfigValue {
             typ: "integer".to_string(),
             description: "Epoch deadline for on-create, on-destroy, custom-configs, on-config-changed, and websocket calls. The host increments epochs every 10 ms, so 1000 is roughly 10 seconds. Default: 1000.".to_string(),
-            values: None,
+            advanced: true,
+            ..Default::default()
         },
     );
 
     ConfigValues {
-        title: "WASM script limits".to_string(),
+        title: "🦾 WASM HOOKS".to_string(),
         values,
+        ..Default::default()
     }
 }
 

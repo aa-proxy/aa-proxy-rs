@@ -755,6 +755,7 @@ impl ScriptRegistry {
                             typ: entry.typ,
                             description: entry.description,
                             values: entry.values,
+                            ..Default::default()
                         },
                     );
                 }
@@ -763,6 +764,7 @@ impl ScriptRegistry {
                     config_json.titles.push(ConfigValues {
                         title: format!("WASM: {}", section.title),
                         values,
+                        ..Default::default()
                     });
                 }
             }
