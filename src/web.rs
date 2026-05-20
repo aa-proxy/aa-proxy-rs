@@ -5,6 +5,8 @@ use crate::config::wasm_script_limits_config_section;
 use crate::config::Action;
 use crate::config::AppConfig;
 use crate::config::ConfigJson;
+use crate::config::ConfigValue;
+use crate::config::ConfigValues;
 use crate::config::SharedConfig;
 use crate::config::SharedConfigJson;
 use crate::config::BASE_CONFIG_DIR;
@@ -76,6 +78,8 @@ use toml_edit::{value, DocumentMut};
 
 const TEMPLATE: &str = include_str!("../static/index.html");
 const PICO_CSS: &str = include_str!("../static/pico.min.css");
+const STYLES_CSS: &str = include_str!("../static/styles.css");
+const LOGO_WEBP: &[u8] = include_bytes!("../static/aa-proxy-rs.webp");
 const AA_PROXY_RS_URL: &str = "https://github.com/aa-proxy/aa-proxy-rs";
 const BUILDROOT_URL: &str = "https://github.com/aa-proxy/buildroot";
 const CERT_SHA_FILENAME: &str = "cert-bundle.sha";
@@ -230,6 +234,7 @@ pub fn app(state: Arc<AppState>) -> Router {
             get(bt_known_devices_handler).delete(bt_forget_known_devices_handler),
         )
         .route("/disconnect", post(disconnect_handler))
+        .route("/aa-proxy-rs.webp", get(logo_handler))
         .with_state(state)
 }
 
@@ -278,96 +283,177 @@ fn replace_backticks(s: String) -> String {
 
 pub fn render_config_values(config: &ConfigJson) -> String {
     let mut html = String::new();
-
     for section in &config.titles {
-        // Section header row
-        html.push_str(&format!(
-            r#"
-            <fieldset>
-                <legend class="section-title">{}</legend>
-                <div class="grid grid-cols-1 section-body">
-            "#,
-            section.title,
-        ));
+        render_section(section, 0, &mut html);
+    }
+    html
+}
 
-        let len = section.values.len();
-        for (i, (key, val)) in section.values.iter().enumerate() {
-            let input_html = match val.typ.as_str() {
-                "string" => format!(r#"<input type="text" id="{key}" />"#),
-                "integer" => format!(r#"<input type="number" id="{key}" />"#),
-                "float" => format!(r#"<input type="number" step="any" id="{key}" />"#),
-                "boolean" => format!(r#"<input type="checkbox" role="switch" id="{key}" />"#),
-                "select" => {
-                    // Render a <select> with options if they exist
-                    if let Some(options) = &val.values {
-                        let options_html = options
-                            .iter()
-                            .map(|opt| format!(r#"<option value="{opt}">{opt}</option>"#))
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        format!(r#"<select id="{key}">{options_html}</select>"#)
-                    } else {
-                        // fallback to text input if no options provided
-                        format!(r#"<input type="text" id="{key}" />"#)
-                    }
-                }
-                "multi-select" => {
-                    // Render a multi-select with options if they exist. The saved
-                    // value stays a comma-separated string in config.toml.
-                    if let Some(options) = &val.values {
-                        let options_html = options
-                            .iter()
-                            .map(|opt| format!(r#"<option value="{opt}">{opt}</option>"#))
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        format!(
-                            r#"<select id="{key}" multiple size="{}">{options_html}</select>"#,
-                            options.len().clamp(2, 8)
-                        )
-                    } else {
-                        // fallback to text input if no options provided
-                        format!(r#"<input type="text" id="{key}" />"#)
-                    }
-                }
-                _ => format!(r#"<input type="text" id="{key}" />"#),
-            };
+/// Render one section, recursing into subsections. `depth` 0 selects the
+/// top-level `.config-card` class; deeper sections use `.config-card.sub-card`.
+fn render_section(section: &ConfigValues, depth: usize, html: &mut String) {
+    // Split off a leading emoji so it renders in its own span. Convention in
+    // config.json is "<emoji> TITLE".
+    let (emoji, title_text) = match section.title.split_once(' ') {
+        Some((head, rest)) if !head.chars().all(|c| c.is_ascii()) => (head, rest),
+        _ => ("", section.title.as_str()),
+    };
 
-            let desc = replace_backticks(val.description.replace("\n", "<br>"));
-            html.push_str(&format!(
-                r#"
-                <div class="grid grid-cols-2">
-                    <label for="{key}">{key}</label>
-                    <div>
-                        {input_html}
-                        <div><small>{desc}</small></div>
-                    </div>
-                </div>
-                "#
-            ));
+    let card_class = if depth == 0 { "config-card" } else { "config-card sub-card" };
+    let advanced_attr = if section.advanced { r#" data-advanced="true""# } else { "" };
+    let requires_attrs = requires_data_attrs(&section.requires);
+    // `requires`-gated sections render closed by default; client-side
+    // `evaluateRequires` opens them on met predicates and closes them again
+    // when the dependency turns off.
+    let has_requires = !matches!(section.requires, crate::config::Requires::None);
+    let open_attr = if section.collapsed_by_default || has_requires {
+        ""
+    } else {
+        " open"
+    };
 
-            // nice line break
-            if i + 1 != len {
-                html.push_str("<hr>")
-            }
-        }
+    html.push_str(&format!(
+        r#"<div class="config-card-wrapper"{advanced_attr}{requires_attrs}>
+  <div class="card-glass-bg"></div>
+  <details class="{card_class}"{open_attr}>
+  <summary class="card-header">
+    <span class="card-header-title"><span>{emoji}</span> <span>{title_text}</span></span>
+  </summary>
+  <div class="card-content">
+"#
+    ));
 
-        // Close section
-        html.push_str("</div></fieldset>");
+    for (key, val) in &section.values {
+        render_field(key, val, html);
     }
 
-    html
+    for sub in &section.subsections {
+        html.push_str(r#"<div class="sub-section-host">"#);
+        render_section(sub, depth + 1, html);
+        html.push_str("</div>\n");
+    }
+
+    html.push_str("  </div>\n</details>\n</div>\n");
+}
+
+fn render_field(key: &str, val: &ConfigValue, html: &mut String) {
+    let desc = replace_backticks(val.description.replace('\n', "<br>"));
+
+    // Any non-multiselect field with a `values` list renders as a
+    // single-select dropdown, regardless of typ. `data-typ` is recorded so
+    // the client can coerce the chosen string back to the right type on save.
+    let has_options = val.values.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
+
+    let control_html = match val.typ.as_str() {
+        // Accept both `multi-select` and `multiselect` typ spellings.
+        "multi-select" | "multiselect" => render_multi_select(key, val.values.as_deref()),
+        "select" => render_single_select(key, val.typ.as_str(), val.values.as_deref()),
+        "boolean" => format!(r#"<input type="checkbox" role="switch" id="{key}" />"#),
+        t if has_options => render_single_select(key, t, val.values.as_deref()),
+        "integer" => format!(r#"<input type="number" id="{key}" />"#),
+        "float" => format!(r#"<input type="number" step="any" id="{key}" />"#),
+        "string" => format!(r#"<input type="text" id="{key}" />"#),
+        _ => format!(r#"<input type="text" id="{key}" />"#),
+    };
+
+    let advanced_attr = if val.advanced { r#" data-advanced="true""# } else { "" };
+    let requires_attrs = requires_data_attrs(&val.requires);
+
+    html.push_str(&format!(
+        r#"    <div class="config-field" data-field="{key}"{advanced_attr}{requires_attrs}>
+      <div class="field-info">
+        <div class="field-label">{key}</div>
+        <div class="field-desc">{desc}</div>
+      </div>
+      <div class="control-wrap">{control_html}</div>
+    </div>
+"#
+    ));
+}
+
+/// Build a leading-space-prefixed attribute string from a Requires.
+/// JS reads `data-requires` (comma-separated truthy fields),
+/// `data-requires-equals` (field=value), and `data-requires-contains`
+/// (field=value for multiselect). All three combine with AND.
+fn requires_data_attrs(req: &crate::config::Requires) -> String {
+    use crate::config::Requires;
+    match req {
+        Requires::None => String::new(),
+        Requires::Single(field) => format!(r#" data-requires="{field}""#),
+        Requires::All(fields) => format!(r#" data-requires="{}""#, fields.join(",")),
+        Requires::Predicate(p) => {
+            let mut out = String::new();
+            if let Some(v) = &p.equals {
+                out.push_str(&format!(r#" data-requires-equals="{}={}""#, p.field, v));
+            }
+            if let Some(v) = &p.contains {
+                out.push_str(&format!(r#" data-requires-contains="{}={}""#, p.field, v));
+            }
+            out
+        }
+    }
+}
+
+fn render_single_select(key: &str, typ: &str, options: Option<&[String]>) -> String {
+    let opts = options.unwrap_or(&[]);
+    let options_html = opts
+        .iter()
+        .map(|opt| {
+            format!(
+                r#"<div class="single-select-option" data-value="{opt}">{opt}</div>"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n        ");
+
+    format!(
+        r#"<details class="single-select" id="{key}_details">
+      <summary><span class="select-text"></span></summary>
+      <div class="single-select-dropdown">
+        {options_html}
+      </div>
+    </details>
+    <input type="hidden" id="{key}" data-typ="{typ}" />"#
+    )
+}
+
+fn render_multi_select(key: &str, options: Option<&[String]>) -> String {
+    let opts = options.unwrap_or(&[]);
+    let options_html = opts
+        .iter()
+        .map(|opt| format!(r#"<option value="{opt}">{opt}</option>"#))
+        .collect::<Vec<_>>()
+        .join("\n        ");
+
+    // Native `<select multiple>` markup; the chip widget in
+    // static/index.html progressively enhances it into a tag/chip UI.
+    // `size` is clamped to 2..=8 so long lists don't overwhelm the row.
+    format!(
+        r#"<select id="{key}" multiple size="{}">
+        {options_html}
+    </select>"#,
+        opts.len().clamp(2, 8)
+    )
 }
 
 pub fn render_config_ids(config: &ConfigJson) -> String {
     let mut all_keys = Vec::new();
-
     for section in &config.titles {
-        for key in section.values.keys() {
-            all_keys.push(format!(r#""{key}""#));
-        }
+        collect_keys(section, &mut all_keys);
     }
+    all_keys.join(", ")
+}
 
-    format!("{}", all_keys.join(", "))
+/// Recursively collect every field key in a section and its subsections
+/// into the JS `CONFIG_IDS` array so `loadConfig` / `saveConfig` cover
+/// nested fields too.
+fn collect_keys(section: &ConfigValues, out: &mut Vec<String>) {
+    for key in section.values.keys() {
+        out.push(format!(r#""{key}""#));
+    }
+    for sub in &section.subsections {
+        collect_keys(sub, out);
+    }
 }
 
 async fn merged_config_json(state: &Arc<AppState>) -> ConfigJson {
@@ -395,8 +481,10 @@ async fn index(State(state): State<Arc<AppState>>) -> impl IntoResponse {
             &linkify_git_info(env!("GIT_DATE"), env!("GIT_HASH")),
         )
         .replace("{PICO_CSS}", PICO_CSS)
+        .replace("{STYLES_CSS}", STYLES_CSS)
         .replace("{CONFIG_VALUES}", &render_config_values(&config_json))
-        .replace("{CONFIG_IDS}", &render_config_ids(&config_json));
+        .replace("{CONFIG_IDS}", &render_config_ids(&config_json))
+        .replace("{LOGO_URL}", "/aa-proxy-rs.webp");
     Html(html)
 }
 
@@ -1636,6 +1724,15 @@ pub async fn version_handler() -> impl IntoResponse {
         "board": device_info::board_prefix(),
         "model": device_info::get_sbc_model().ok()
     }))
+}
+
+async fn logo_handler() -> impl IntoResponse {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "image/webp")
+        .header(header::CACHE_CONTROL, "public, max-age=604800, immutable")
+        .body(Body::from(LOGO_WEBP))
+        .unwrap()
 }
 
 async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {

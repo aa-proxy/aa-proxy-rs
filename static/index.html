@@ -1,1063 +1,735 @@
 <!doctype html>
 <html lang="en">
-  <head>
+
+<head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>aa-proxy-rs</title>
-    <style>
-      {PICO_CSS}
+    <title>aa-proxy-rs // Dashboard</title>
 
-      :root {
-        --pico-grid-column-gap: 0.5rem;
-        --pico-grid-row-gap: 0rem;
-      }
+    <style>{PICO_CSS}</style>
+    <style>{STYLES_CSS}</style>
+</head>
 
-      .section-title {
-        color: #fff;
-        font-weight: bold;
-        background-color: #202632;
-        width: 100%;
-        border-radius: 0.375rem;
-        padding: calc(0.25rem * 2);
-      }
-
-      .section-body {
-        padding: 0.375rem;
-      }
-
-      hr {
-        border: none;
-        background-color: #202632;
-        overflow: visible;
-        text-align: center;
-        height: 0.125rem;
-      }
-
-      .grid {
-        display: grid;
-        align-items: center;
-      }
-
-      .grid-cols-1 {
-        grid-template-columns: repeat(1, minmax(0, 1fr)) !important;
-      }
-
-      .grid-cols-2 {
-        grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
-      }
-
-      :root {
-        --floating-actions-right: 1.25rem;
-        --floating-actions-top: 6.25rem;
-        --floating-actions-closed-width: 3.6rem;
-        --floating-actions-open-width: 17rem;
-        --floating-actions-height: 3.6rem;
-        --floating-actions-gap: 0.5rem;
-        --floating-actions-safe-area: calc(
-          var(--floating-actions-right) +
-          var(--floating-actions-closed-width) +
-          1.25rem
-        );
-      }
-
-      /* Desktop mode: hide normal ACTIONS blocks, use floating dock */
-      .actions-panel {
-        display: none;
-      }
-
-      .floating-actions {
-        position: fixed;
-        top: var(--floating-actions-top);
-        right: var(--floating-actions-right);
-        z-index: 9999;
-
-        display: flex;
-        flex-direction: column;
-        align-items: flex-end;
-        gap: var(--floating-actions-gap);
-      }
-
-      .floating-action {
-        width: var(--floating-actions-closed-width);
-        height: var(--floating-actions-height);
-        min-width: var(--floating-actions-closed-width);
-        padding: 0 0.85rem;
-        margin: 0;
-
-        display: flex;
-        flex-direction: row;
-        align-items: center;
-        justify-content: flex-end;
-        gap: 0.75rem;
-
-        overflow: hidden;
-        white-space: nowrap;
-
-        border-radius: 0.95rem;
-        box-shadow: 0 0.35rem 0.9rem rgba(0, 0, 0, 0.35);
-
-        transition:
-          width 160ms ease,
-          box-shadow 160ms ease,
-          transform 160ms ease;
-      }
-
-      .floating-action:hover,
-      .floating-action:focus-visible {
-        width: var(--floating-actions-open-width);
-        transform: translateX(-0.125rem);
-        box-shadow: 0 0.5rem 1.15rem rgba(0, 0, 0, 0.45);
-      }
-
-      .floating-action-label {
-        flex: 1;
-        min-width: 0;
-        opacity: 0;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        text-align: center;
-
-        transition:
-          opacity 120ms ease,
-          transform 160ms ease;
-
-        transform: translateX(0.5rem);
-      }
-
-      .floating-action:hover .floating-action-label,
-      .floating-action:focus-visible .floating-action-label {
-        opacity: 1;
-        transform: translateX(0);
-      }
-
-      .floating-action-icon {
-        flex: 0 0 1.5rem;
-        width: 1.5rem;
-        text-align: center;
-        font-size: 1.15rem;
-        line-height: 1;
-      }
-
-      /*
-        Keep equal left/right safe areas. The right side reserves enough room
-        for the closed floating icon rail, so icons never sit on top of config text.
-      */
-      /*main.container {
-        padding-left: var(--floating-actions-safe-area);
-        padding-right: var(--floating-actions-safe-area);
-      }*/
-
-      /*
-        Fallback:
-        - narrow screens
-        - short screens
-        - touch devices where hover is not reliable
-
-        In these cases, hide the floating menu and show the old ACTIONS blocks.
-      */
-      @media (max-width: 900px), (max-height: 560px), (hover: none), (pointer: coarse) {
-        .floating-actions {
-          display: none;
-        }
-
-        .actions-panel {
-          display: block;
-        }
-
-        main.container {
-          padding-left: var(--pico-spacing);
-          padding-right: var(--pico-spacing);
-        }
-      }
-
-      .controller-layout {
-        display: grid;
-        gap: 1rem;
-        grid-template-columns: repeat(1, minmax(0, 1fr));
-      }
-
-      .controller-columns {
-        display: grid;
-        gap: 1rem;
-        grid-template-columns: repeat(1, minmax(0, 1fr));
-      }
-
-      .keypad-grid {
-        display: grid;
-        gap: 0.375rem;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-      }
-
-      .dpad-grid {
-        display: grid;
-        gap: 0.375rem;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-        align-items: center;
-        justify-items: center;
-      }
-
-      .dpad-center {
-        min-width: 4rem;
-      }
-
-      .wide-grid {
-        display: grid;
-        gap: 0.375rem;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-      }
-
-      .multi-select-native {
-        display: none !important;
-      }
-
-      .multi-select-widget {
-        position: relative;
-        width: 100%;
-      }
-
-      .multi-select-control {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 0.5rem;
-        min-height: 2.7rem;
-        width: 100%;
-        padding: 0.35rem 0.45rem;
-        border: var(--pico-border-width) solid var(--pico-form-element-border-color);
-        border-radius: var(--pico-border-radius);
-        background: var(--pico-form-element-background-color);
-        color: var(--pico-form-element-color);
-        cursor: pointer;
-      }
-
-      .multi-select-control:focus,
-      .multi-select-control:focus-within {
-        border-color: var(--pico-form-element-active-border-color);
-        box-shadow: 0 0 0 var(--pico-outline-width) var(--pico-form-element-focus-color);
-        outline: none;
-      }
-
-      .multi-select-chips {
-        display: flex;
-        flex: 1;
-        flex-wrap: wrap;
-        align-items: center;
-        gap: 0.35rem;
-        min-width: 0;
-      }
-
-      .multi-select-placeholder {
-        color: var(--pico-muted-color);
-        padding-inline: 0.25rem;
-      }
-
-      .multi-select-chip {
-        display: inline-flex;
-        align-items: center;
-        max-width: 100%;
-        gap: 0.35rem;
-        padding: 0.15rem 0.45rem;
-        border-radius: 999px;
-        background: #202632;
-        color: #fff;
-        font-size: 0.85rem;
-        line-height: 1.45;
-      }
-
-      .multi-select-chip-label {
-        max-width: 18rem;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-
-      .multi-select-chip-remove {
-        width: 1.15rem;
-        height: 1.15rem;
-        min-width: 1.15rem;
-        padding: 0;
-        margin: 0;
-        border: 0;
-        border-radius: 999px;
-        background: rgba(255, 255, 255, 0.16);
-        color: #fff;
-        font-size: 0.85rem;
-        line-height: 1;
-      }
-
-      .multi-select-chip-remove:hover,
-      .multi-select-chip-remove:focus-visible {
-        background: rgba(255, 255, 255, 0.28);
-      }
-
-      .multi-select-toggle {
-        width: 2rem;
-        min-width: 2rem;
-        padding: 0.25rem;
-        margin: 0;
-        border: 0;
-        background: transparent;
-        color: var(--pico-muted-color);
-        box-shadow: none;
-      }
-
-      .multi-select-menu {
-        position: absolute;
-        z-index: 10000;
-        top: calc(100% + 0.25rem);
-        left: 0;
-        right: 0;
-        max-height: 18rem;
-        overflow: auto;
-        padding: 0.35rem;
-        border: var(--pico-border-width) solid var(--pico-form-element-border-color);
-        border-radius: var(--pico-border-radius);
-        background: var(--pico-card-background-color);
-        box-shadow: 0 0.45rem 1.1rem rgba(0, 0, 0, 0.4);
-      }
-
-      .multi-select-option {
-        display: flex;
-        align-items: center;
-        gap: 0.55rem;
-        width: 100%;
-        padding: 0.35rem 0.45rem;
-        margin: 0;
-        border-radius: 0.35rem;
-        cursor: pointer;
-      }
-
-      .multi-select-option:hover {
-        background: rgba(255, 255, 255, 0.06);
-      }
-
-      .multi-select-option input {
-        margin: 0;
-      }
-
-      .multi-select-option-label {
-        overflow-wrap: anywhere;
-      }
-
-      .multi-select-actions {
-        display: flex;
-        gap: 0.4rem;
-        justify-content: flex-end;
-        padding: 0.35rem 0.15rem 0.1rem;
-      }
-
-      .multi-select-actions button {
-        width: auto;
-        padding: 0.25rem 0.5rem;
-        margin: 0;
-        font-size: 0.85rem;
-      }
-
-      @media (min-width: 900px) {
-        .controller-columns {
-          grid-template-columns: repeat(2, minmax(0, 1fr));
-        }
-      }
-    </style>
-  </head>
-  <body>
-    <header style="text-align: center; padding-bottom: 0">
-      <h3 style="text-align: center; margin-bottom: 0.125rem">
-        🛸 aa-proxy-rs
-      </h3>
-      <small>build: {BUILD_DATE}, git: {GIT_INFO}</small>
-    </header>
-
-    <nav class="floating-actions" aria-label="Quick actions">
-      <button
-        type="button"
-        class="floating-action"
-        onclick="saveConfig()"
-        title="Save"
-        aria-label="Save"
-      >
-        <span class="floating-action-label">Save</span>
-        <span class="floating-action-icon">💾</span>
-      </button>
-
-      <button
-        type="button"
-        class="floating-action download-btn"
-        title="Download log package"
-        aria-label="Download log package"
-      >
-        <span class="floating-action-label"
-          >Download log package (.tar.gz)</span
-        >
-        <span class="floating-action-icon">📜</span>
-      </button>
-
-      <button
-        type="button"
-        class="floating-action"
-        onclick="handleAction('/restart')"
-        title="Apply / restart"
-        aria-label="Apply / restart"
-      >
-        <span class="floating-action-label">Apply / restart</span>
-        <span class="floating-action-icon">🧬</span>
-      </button>
-
-      <button
-        type="button"
-        class="floating-action"
-        onclick="handleAction('/reboot')"
-        title="Reboot device"
-        aria-label="Reboot device"
-      >
-        <span class="floating-action-label">Reboot device</span>
-        <span class="floating-action-icon">🔁</span>
-      </button>
-
-      <button
-        type="button"
-        class="floating-action"
-        data-endpoint="/upload-certs"
-        title="Upload MITM certs"
-        aria-label="Upload MITM certs"
-      >
-        <span class="floating-action-label">Upload MITM certs (.tar.gz)</span>
-        <span class="floating-action-icon">📤</span>
-      </button>
-
-      <button
-        type="button"
-        class="floating-action backup-btn"
-        title="Backup configuration"
-        aria-label="Backup configuration"
-      >
-        <span class="floating-action-label"
-          >Backup configuration (.tar.gz)</span
-        >
-        <span class="floating-action-icon">📦</span>
-      </button>
-
-      <button
-        type="button"
-        class="floating-action"
-        onclick="handleAction('/factory-reset', 'Are you sure you want to factory reset?')"
-        title="Factory reset"
-        aria-label="Factory reset"
-      >
-        <span class="floating-action-label">Factory reset</span>
-        <span class="floating-action-icon">♻️</span>
-      </button>
-
-      <button
-        type="button"
-        class="floating-action"
-        data-endpoint="/userdata-restore"
-        title="Restore configuration"
-        aria-label="Restore configuration"
-      >
-        <span class="floating-action-label"
-          >Restore configuration (.tar.gz)</span
-        >
-        <span class="floating-action-icon">📤</span>
-      </button>
+<body>
+    <nav class="action-rail">
+        <button type="button" class="rail-btn drawer-toggle" id="controller-drawer-toggle"
+            data-label="Controller Panel">📱</button>
+        <button type="button" class="rail-btn download-btn" data-label="Download Log Package (.tar.gz)">📜</button>
+        <button type="button" class="rail-btn backup-btn" data-label="Backup Configuration (.tar.gz)">📦</button>
+        <button type="button" class="rail-btn restore-btn" data-label="Restore Configuration (.tar.gz)">📤</button>
+        <button type="button" class="rail-btn certs-btn" data-label="Upload MITM Certs (.tar.gz)">🎫</button>
+        <div style="flex: 1"></div>
+        <button type="button" class="rail-btn" onclick="saveConfig()" data-label="Save Configuration">💾</button>
+        <button type="button" class="rail-btn" onclick="handleAction('/restart')"
+            data-label="Apply / Restart Service">🧬</button>
+        <button type="button" class="rail-btn" onclick="handleAction('/reboot')" data-label="Reboot Device">🔁</button>
+        <button type="button" class="rail-btn"
+            onclick="handleAction('/bt/known-devices', 'Are you sure you want to forget known Bluetooth devices?', 'DELETE')"
+            data-label="Forget Known Bluetooth Devices">🗑</button>
+        <button type="button" class="rail-btn"
+            onclick="handleAction('/disconnect', 'Force a clean reconnect?')"
+            data-label="Disconnect (force reconnect)">🔌</button>
+        <button type="button" class="rail-btn" style="color: #ef4444;"
+            onclick="handleAction('/factory-reset', 'This will WIPE all user data and reboot. Are you absolutely sure?')"
+            data-label="Factory Reset">♻️</button>
+        <div class="rail-advanced" title="Show advanced options">
+            <input type="checkbox" class="rail-switch" id="advanced-toggle" />
+            <span class="rail-advanced-label">Advanced</span>
+        </div>
     </nav>
 
-    <template id="actions-template">
-      <fieldset class="actions-panel">
-        <legend class="section-title"><strong>🚀 ACTIONS</strong></legend>
-        <div class="grid grid-cols-2 section-body">
-          <button type="button" onclick="saveConfig()">💾 Save</button>
-          <button type="button" class="download-btn">
-            📜 Download log package (.tar.gz)
-          </button>
-          <button type="button" onclick="handleAction('/restart')">
-            🧬 Apply / restart
-          </button>
-          <button type="button" onclick="handleAction('/reboot')">
-            🔁 Reboot device
-          </button>
-          <button type="button" onclick="handleAction('/toll-card/add')">
-            🃏 Add toll card
-          </button>
-          <button type="button" onclick="handleAction('/toll-card/remove')">
-            🗑️ Remove toll card
-          </button>
-          <button type="button" data-endpoint="/upload-certs">
-            📤 Upload MITM certs (.tar.gz)
-          </button>
-          <button type="button" class="backup-btn">
-            📦 Backup configuration (.tar.gz)
-          </button>
-          <button
-            type="button"
-            onclick="handleAction('/factory-reset', 'Are you sure you want to factory reset?')"
-          >
-            ♻️ Factory reset
-          </button>
-          <button type="button" data-endpoint="/userdata-restore">
-            📤 Restore configuration (.tar.gz)
-          </button>
-          <button
-            type="button"
-            onclick="handleAction('/bt/known-devices', 'Are you sure you want to forget known Bluetooth devices?', 'DELETE')"
-          >
-            🗑️ Forget known BT devices
-          </button>
+    <div class="drawer-scrim" id="drawer-scrim"></div>
+
+    <aside class="controller-drawer" id="controller-drawer" aria-hidden="true">
+        <div class="controller-drawer-header">
+            <div class="controller-drawer-title"><span>📱</span><span>Controller Panel</span></div>
+            <button type="button" class="controller-drawer-close" id="controller-drawer-close"
+                aria-label="Close controller panel">×</button>
         </div>
-      </fieldset>
+        <div class="controller-drawer-body">
+            <div class="controller-layout">
+                <div class="controller-columns">
+                    <div>
+                        <p><strong>Phone Keypad</strong></p>
+                        <div class="keypad-grid">
+                            <button type="button" onclick="sendKeyTap(8, '1')">1</button>
+                            <button type="button" onclick="sendKeyTap(9, '2')">2</button>
+                            <button type="button" onclick="sendKeyTap(10, '3')">3</button>
+                            <button type="button" onclick="sendKeyTap(11, '4')">4</button>
+                            <button type="button" onclick="sendKeyTap(12, '5')">5</button>
+                            <button type="button" onclick="sendKeyTap(13, '6')">6</button>
+                            <button type="button" onclick="sendKeyTap(14, '7')">7</button>
+                            <button type="button" onclick="sendKeyTap(15, '8')">8</button>
+                            <button type="button" onclick="sendKeyTap(16, '9')">9</button>
+                            <button type="button" onclick="sendKeyTap(17, '*')">*</button>
+                            <button type="button" onclick="sendKeyTap(7, '0')">0</button>
+                            <button type="button" onclick="sendKeyTap(18, '#')">#</button>
+                        </div>
+                    </div>
 
-      <details class="controller-panel">
-        <summary class="section-title">
-          <strong>🎮 CONTROLLER INPUT</strong>
-        </summary>
-
-        <fieldset>
-          <div class="section-body controller-layout">
-            <div class="controller-columns">
-              <div>
-                <p><strong>Phone Keypad</strong></p>
-                <div class="keypad-grid">
-                  <button type="button" onclick="sendKeyTap(8, '1')">1</button>
-                  <button type="button" onclick="sendKeyTap(9, '2')">2</button>
-                  <button type="button" onclick="sendKeyTap(10, '3')">3</button>
-                  <button type="button" onclick="sendKeyTap(11, '4')">4</button>
-                  <button type="button" onclick="sendKeyTap(12, '5')">5</button>
-                  <button type="button" onclick="sendKeyTap(13, '6')">6</button>
-                  <button type="button" onclick="sendKeyTap(14, '7')">7</button>
-                  <button type="button" onclick="sendKeyTap(15, '8')">8</button>
-                  <button type="button" onclick="sendKeyTap(16, '9')">9</button>
-                  <button type="button" onclick="sendKeyTap(17, '*')">*</button>
-                  <button type="button" onclick="sendKeyTap(7, '0')">0</button>
-                  <button type="button" onclick="sendKeyTap(18, '#')">#</button>
+                    <div>
+                        <p><strong>D-Pad</strong></p>
+                        <div class="dpad-grid">
+                            <span></span>
+                            <button type="button" onclick="sendKeyTap(19, 'DPAD_UP')">▲</button>
+                            <span></span>
+                            <button type="button" onclick="sendKeyTap(21, 'DPAD_LEFT')">◀</button>
+                            <button type="button" class="dpad-center"
+                                onclick="sendKeyTap(23, 'DPAD_CENTER')">●</button>
+                            <button type="button" onclick="sendKeyTap(22, 'DPAD_RIGHT')">▶</button>
+                            <span></span>
+                            <button type="button" onclick="sendKeyTap(20, 'DPAD_DOWN')">▼</button>
+                            <span></span>
+                        </div>
+                    </div>
                 </div>
-              </div>
 
-              <div>
-                <p><strong>D-Pad</strong></p>
-                <div class="dpad-grid">
-                  <span></span>
-                  <button type="button" onclick="sendKeyTap(19, 'DPAD_UP')">
-                    ▲
-                  </button>
-                  <span></span>
-                  <button type="button" onclick="sendKeyTap(21, 'DPAD_LEFT')">
-                    ◀
-                  </button>
-                  <button
-                    type="button"
-                    class="dpad-center"
-                    onclick="sendKeyTap(23, 'DPAD_CENTER')"
-                  >
-                    ●
-                  </button>
-                  <button type="button" onclick="sendKeyTap(22, 'DPAD_RIGHT')">
-                    ▶
-                  </button>
-                  <span></span>
-                  <button type="button" onclick="sendKeyTap(20, 'DPAD_DOWN')">
-                    ▼
-                  </button>
-                  <span></span>
+                <div class="wide-grid">
+                    <button type="button" onclick="sendKeyTap(5, 'CALL')">📞 Call</button>
+                    <button type="button" onclick="sendKeyTap(6, 'ENDCALL')">📴 End Call</button>
+                    <button type="button" onclick="sendKeyTap(85, 'MEDIA_PLAY_PAUSE')">⏯ Play/Pause</button>
+                    <button type="button" onclick="sendKeyTap(127, 'MEDIA_PAUSE')">⏸ Pause</button>
+                    <button type="button" onclick="sendKeyTap(126, 'MEDIA_PLAY')">▶ Play</button>
+                    <button type="button" onclick="sendKeyTap(86, 'MEDIA_STOP')">⏹ Stop</button>
+                    <button type="button" onclick="sendKeyTap(88, 'MEDIA_PREVIOUS')">⏮ Previous</button>
+                    <button type="button" onclick="sendKeyTap(87, 'MEDIA_NEXT')">⏭ Next</button>
+                    <button type="button" onclick="sendKeyTap(24, 'VOLUME_UP')">🔊 Volume +</button>
+                    <button type="button" onclick="sendKeyTap(25, 'VOLUME_DOWN')">🔉 Volume -</button>
+                    <button type="button" onclick="sendKeyTap(164, 'MUTE')">🔇 Mute</button>
+                    <button type="button" onclick="sendKeyTap(4, 'BACK')">↩ Back</button>
+                    <button type="button" onclick="sendKeyTap(3, 'HOME')">🏠 Home</button>
+                    <button type="button" onclick="sendKeyTap(84, 'SEARCH')">🔎 Search</button>
                 </div>
-              </div>
-            </div>
 
-            <div class="wide-grid">
-              <button type="button" onclick="sendKeyTap(5, 'CALL')">
-                📞 Call
-              </button>
-              <button type="button" onclick="sendKeyTap(6, 'ENDCALL')">
-                📴 End Call
-              </button>
-              <button
-                type="button"
-                onclick="sendKeyTap(85, 'MEDIA_PLAY_PAUSE')"
-              >
-                ⏯ Play/Pause
-              </button>
-              <button type="button" onclick="sendKeyTap(127, 'MEDIA_PAUSE')">
-                ⏸ Pause
-              </button>
-              <button type="button" onclick="sendKeyTap(126, 'MEDIA_PLAY')">
-                ▶ Play
-              </button>
-              <button type="button" onclick="sendKeyTap(86, 'MEDIA_STOP')">
-                ⏹ Stop
-              </button>
-              <button type="button" onclick="sendKeyTap(88, 'MEDIA_PREVIOUS')">
-                ⏮ Previous
-              </button>
-              <button type="button" onclick="sendKeyTap(87, 'MEDIA_NEXT')">
-                ⏭ Next
-              </button>
-              <button type="button" onclick="sendKeyTap(24, 'VOLUME_UP')">
-                🔊 Volume +
-              </button>
-              <button type="button" onclick="sendKeyTap(25, 'VOLUME_DOWN')">
-                🔉 Volume -
-              </button>
-              <button type="button" onclick="sendKeyTap(164, 'MUTE')">
-                🔇 Mute
-              </button>
-              <button type="button" onclick="sendKeyTap(4, 'BACK')">
-                ↩ Back
-              </button>
-              <button type="button" onclick="sendKeyTap(3, 'HOME')">
-                🏠 Home
-              </button>
-              <button type="button" onclick="sendKeyTap(84, 'SEARCH')">
-                🔎 Search
-              </button>
+                <div class="wide-grid">
+                    <button type="button" onclick="handleAction('/toll-card/add')">🃏 Add toll card</button>
+                    <button type="button" onclick="handleAction('/toll-card/remove')">🗑️ Remove toll card</button>
+                </div>
             </div>
-          </div>
-        </fieldset>
-      </details>
-    </template>
+        </div>
+    </aside>
 
-    <main class="container">
-      <form id="config-form">
-        <!-- hidden file input for all upload buttons -->
-        <input
-          type="file"
-          id="file-input"
-          accept=".tar.gz"
-          style="display: none"
-        />
-        <!-- buttons and CONFIG_VALUES will be inserted via JS -->
-      </form>
+    <main class="main-content">
+        <header class="dashboard-header">
+            <h1 class="title"><img src="{LOGO_URL}" alt="logo" class="logo-img"> <span style="color: var(--accent);">aa-proxy-rs</span> <span
+                    style="color: #4b5563;">//</span>
+                <span style="color: #ffffff;">Dashboard</span>
+            </h1>
+            <div class="build-tags">
+                <span class="tag-base tag-build">
+                    Build: <span class="val">{BUILD_DATE}</span>
+                </span>
+                <span class="tag-base tag-git">
+                    Git: <span class="val">{GIT_INFO}</span>
+                </span>
+            </div>
+        </header>
+
+        <form id="config-form">
+            <input type="file" id="file-input" accept=".tar.gz" style="display: none" />
+            <div class="config-grid">
+                {CONFIG_VALUES}
+            </div>
+        </form>
     </main>
-
     <script>
-      document.addEventListener("DOMContentLoaded", () => {
-        const form = document.getElementById("config-form");
-        const template = document.getElementById("actions-template");
+        document.addEventListener("DOMContentLoaded", () => {
+            const fileInput = document.getElementById("file-input");
 
-        // Insert top set of buttons
-        form.appendChild(template.content.cloneNode(true));
+            // Download buttons
+            document.querySelectorAll(".download-btn").forEach((btn) => {
+                btn.addEventListener("click", () => triggerDownload("/download", "logs"));
+            });
 
-        // Insert CONFIG_VALUES once in the middle
-        const configValuesHtml = `{CONFIG_VALUES}`;
-        const div = document.createElement("div");
-        div.innerHTML = configValuesHtml;
-        form.appendChild(div);
+            // Backup buttons
+            document.querySelectorAll(".backup-btn").forEach((btn) => {
+                btn.addEventListener("click", () => triggerDownload("/userdata-backup", "backup"));
+            });
 
-        enhanceMultiSelects();
+            // Restore buttons
+            document.querySelectorAll(".restore-btn").forEach((btn) => {
+                btn.addEventListener("click", () => {
+                    const handler = () => {
+                        uploadTarGzFile(fileInput, "/userdata-restore");
+                        fileInput.removeEventListener("change", handler);
+                    };
+                    fileInput.value = "";
+                    fileInput.addEventListener("change", handler, { once: true });
+                    fileInput.click();
+                });
+            });
 
-        // Insert bottom set of buttons
-        form.appendChild(template.content.cloneNode(true));
+            // Certs buttons
+            document.querySelectorAll(".certs-btn").forEach((btn) => {
+                btn.addEventListener("click", () => {
+                    const handler = () => {
+                        uploadTarGzFile(fileInput, "/upload-certs");
+                        fileInput.removeEventListener("change", handler);
+                    };
+                    fileInput.value = "";
+                    fileInput.addEventListener("change", handler, { once: true });
+                    fileInput.click();
+                });
+            });
 
-        // button event listeners
-        // download buttons
-        document.querySelectorAll(".download-btn").forEach((btn) => {
-          btn.addEventListener("click", () => {
-            triggerDownload("/download", "logs");
-          });
-        });
+            // Single-select dropdowns: click an option, write its value to the hidden input,
+            // update the summary text, close the <details>.
+            document.querySelectorAll("details.single-select").forEach(details => {
+                const hiddenInput = document.getElementById(details.id.replace(/_details$/, ""));
+                const summaryText = details.querySelector(".select-text");
+                details.querySelectorAll(".single-select-option").forEach(option => {
+                    option.addEventListener("click", () => {
+                        details.querySelectorAll(".single-select-option.selected").forEach(o => o.classList.remove("selected"));
+                        option.classList.add("selected");
+                        const v = option.getAttribute("data-value");
+                        if (hiddenInput) hiddenInput.value = v;
+                        if (summaryText) summaryText.textContent = v;
+                        details.open = false;
+                    });
+                });
+            });
 
-        // backup buttons
-        document.querySelectorAll(".backup-btn").forEach((btn) => {
-          btn.addEventListener("click", () => {
-            triggerDownload("/userdata-backup", "backup");
-          });
-        });
+            // Enhance native `<select multiple>` into chip dropdowns.
+            // Idempotent via `dataset.enhanced`.
+            enhanceMultiSelects();
 
-        // single hidden file input in the form
-        const fileInput = document.getElementById("file-input");
+            // Click outside any single-select <details> closes it. The chip
+            // widget installs its own outside-click handler.
+            document.addEventListener("click", e => {
+                document.querySelectorAll("details.single-select[open]")
+                    .forEach(d => { if (!d.contains(e.target)) d.open = false; });
+            });
 
-        // upload buttons event listeners
-        document.querySelectorAll("button[data-endpoint]").forEach((button) => {
-          button.addEventListener("click", () => {
-            const endpoint = button.dataset.endpoint;
-
-            const handler = () => {
-              uploadTarGzFile(fileInput, endpoint); // pass the element, not the ID
-              fileInput.removeEventListener("change", handler); // detach to avoid double upload
+            // Advanced toggle: persist in localStorage; flip body class to
+            // reveal/hide [data-advanced="true"] fields and sections.
+            const advancedToggle = document.getElementById("advanced-toggle");
+            const ADVANCED_STORAGE_KEY = "aa-proxy-rs:show-advanced";
+            const applyAdvanced = (on) => {
+                document.body.classList.toggle("show-advanced", on);
+                advancedToggle.checked = on;
+                try { localStorage.setItem(ADVANCED_STORAGE_KEY, on ? "1" : "0"); } catch (_) {}
             };
+            const initialAdvanced = (() => {
+                try { return localStorage.getItem(ADVANCED_STORAGE_KEY) === "1"; }
+                catch (_) { return false; }
+            })();
+            applyAdvanced(initialAdvanced);
+            advancedToggle.addEventListener("change", () => applyAdvanced(advancedToggle.checked));
 
-            fileInput.value = "";
-            fileInput.addEventListener("change", handler, { once: true });
-            fileInput.click();
-          });
+            // Re-evaluate requires after every form-affecting event.
+            // `evaluateRequires` is module-scoped so loadConfig can call it too.
+            document.addEventListener("input", evaluateRequires);
+            document.addEventListener("change", evaluateRequires);
+
+            // Controller-panel drawer: toggle via rail button, close via X
+            // button, scrim click, or Esc.
+            const drawer = document.getElementById("controller-drawer");
+            const drawerToggle = document.getElementById("controller-drawer-toggle");
+            const drawerClose = document.getElementById("controller-drawer-close");
+            const drawerScrim = document.getElementById("drawer-scrim");
+            const setDrawerOpen = (open) => {
+                drawer.classList.toggle("open", open);
+                drawerScrim.classList.toggle("open", open);
+                drawerToggle.classList.toggle("open", open);
+                drawer.setAttribute("aria-hidden", open ? "false" : "true");
+            };
+            drawerToggle.addEventListener("click", () => {
+                setDrawerOpen(!drawer.classList.contains("open"));
+            });
+            drawerClose.addEventListener("click", () => setDrawerOpen(false));
+            drawerScrim.addEventListener("click", () => setDrawerOpen(false));
+            document.addEventListener("keydown", e => {
+                if (e.key === "Escape" && drawer.classList.contains("open")) {
+                    setDrawerOpen(false);
+                }
+            });
+
+            loadConfig();
         });
 
-        loadConfig();
-      });
+        async function uploadTarGzFile(fileInputEl, endpoint) {
+            const file = fileInputEl.files[0];
+            if (!file) return;
 
-      function splitCommaValue(value) {
-        if (Array.isArray(value)) {
-          return value
-            .map(String)
-            .map((part) => part.trim())
-            .filter(Boolean);
-        }
+            try {
+                const res = await fetch(endpoint, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/gzip" },
+                    body: file,
+                });
 
-        return String(value ?? "")
-          .split(",")
-          .map((part) => part.trim())
-          .filter(Boolean);
-      }
-
-      function getMultiSelectValues(select) {
-        return Array.from(select.selectedOptions).map((option) => option.value);
-      }
-
-      function setMultiSelectValues(select, values) {
-        const selectedValues = splitCommaValue(values);
-        for (const option of select.options) {
-          option.selected = selectedValues.includes(option.value);
-        }
-        syncMultiSelectWidget(select);
-      }
-
-      function closeAllMultiSelectMenus(exceptWidget = null) {
-        document.querySelectorAll(".multi-select-widget").forEach((widget) => {
-          if (widget === exceptWidget) return;
-          const menu = widget.querySelector(".multi-select-menu");
-          const control = widget.querySelector(".multi-select-control");
-          if (menu) menu.hidden = true;
-          if (control) control.setAttribute("aria-expanded", "false");
-        });
-      }
-
-      function setMultiSelectOpen(widget, open) {
-        const menu = widget.querySelector(".multi-select-menu");
-        const control = widget.querySelector(".multi-select-control");
-        if (!menu || !control) return;
-
-        if (open) {
-          closeAllMultiSelectMenus(widget);
-        }
-
-        menu.hidden = !open;
-        control.setAttribute("aria-expanded", String(open));
-      }
-
-      function toggleMultiSelect(widget) {
-        const menu = widget.querySelector(".multi-select-menu");
-        setMultiSelectOpen(widget, menu?.hidden !== false);
-      }
-
-      function syncMultiSelectWidget(select) {
-        const widget = select.nextElementSibling;
-        if (!widget || !widget.classList.contains("multi-select-widget"))
-          return;
-
-        const selectedValues = getMultiSelectValues(select);
-        const chips = widget.querySelector(".multi-select-chips");
-        if (!chips) return;
-
-        chips.innerHTML = "";
-
-        if (selectedValues.length === 0) {
-          const placeholder = document.createElement("span");
-          placeholder.className = "multi-select-placeholder";
-          placeholder.textContent = "None selected";
-          chips.appendChild(placeholder);
-        } else {
-          selectedValues.forEach((value) => {
-            const chip = document.createElement("span");
-            chip.className = "multi-select-chip";
-
-            const label = document.createElement("span");
-            label.className = "multi-select-chip-label";
-            label.textContent = value;
-            chip.appendChild(label);
-
-            const remove = document.createElement("button");
-            remove.type = "button";
-            remove.className = "multi-select-chip-remove";
-            remove.setAttribute("aria-label", `Remove ${value}`);
-            remove.textContent = "×";
-            remove.addEventListener("click", (event) => {
-              event.preventDefault();
-              event.stopPropagation();
-
-              const option = Array.from(select.options).find(
-                (opt) => opt.value === value,
-              );
-              if (option) option.selected = false;
-              select.dispatchEvent(new Event("change", { bubbles: true }));
-            });
-            chip.appendChild(remove);
-
-            chips.appendChild(chip);
-          });
-        }
-
-        widget
-          .querySelectorAll('input[type="checkbox"][data-multi-select-option]')
-          .forEach((checkbox) => {
-            checkbox.checked = selectedValues.includes(checkbox.value);
-          });
-      }
-
-      function enhanceMultiSelects() {
-        document.querySelectorAll("select[multiple]").forEach((select) => {
-          if (select.dataset.enhanced === "true") return;
-
-          select.dataset.enhanced = "true";
-          select.classList.add("multi-select-native");
-
-          const widget = document.createElement("div");
-          widget.className = "multi-select-widget";
-          widget.dataset.for = select.id;
-
-          const control = document.createElement("div");
-          control.className = "multi-select-control";
-          control.tabIndex = 0;
-          control.setAttribute("role", "combobox");
-          control.setAttribute("aria-haspopup", "listbox");
-          control.setAttribute("aria-expanded", "false");
-
-          const chips = document.createElement("div");
-          chips.className = "multi-select-chips";
-          control.appendChild(chips);
-
-          const toggle = document.createElement("button");
-          toggle.type = "button";
-          toggle.className = "multi-select-toggle";
-          toggle.setAttribute("aria-label", "Toggle options");
-          toggle.textContent = "▾";
-          control.appendChild(toggle);
-
-          const menu = document.createElement("div");
-          menu.className = "multi-select-menu";
-          menu.hidden = true;
-          menu.setAttribute("role", "listbox");
-          menu.setAttribute("aria-multiselectable", "true");
-
-          Array.from(select.options).forEach((option) => {
-            const row = document.createElement("label");
-            row.className = "multi-select-option";
-
-            const checkbox = document.createElement("input");
-            checkbox.type = "checkbox";
-            checkbox.value = option.value;
-            checkbox.dataset.multiSelectOption = "true";
-            checkbox.checked = option.selected;
-            checkbox.addEventListener("change", () => {
-              option.selected = checkbox.checked;
-              select.dispatchEvent(new Event("change", { bubbles: true }));
-            });
-            row.appendChild(checkbox);
-
-            const optionLabel = document.createElement("span");
-            optionLabel.className = "multi-select-option-label";
-            optionLabel.textContent = option.textContent || option.value;
-            row.appendChild(optionLabel);
-
-            menu.appendChild(row);
-          });
-
-          const actions = document.createElement("div");
-          actions.className = "multi-select-actions";
-
-          const clearButton = document.createElement("button");
-          clearButton.type = "button";
-          clearButton.textContent = "Clear";
-          clearButton.addEventListener("click", (event) => {
-            event.preventDefault();
-            for (const option of select.options) option.selected = false;
-            select.dispatchEvent(new Event("change", { bubbles: true }));
-          });
-          actions.appendChild(clearButton);
-
-          const allButton = document.createElement("button");
-          allButton.type = "button";
-          allButton.textContent = "All";
-          allButton.addEventListener("click", (event) => {
-            event.preventDefault();
-            for (const option of select.options) option.selected = true;
-            select.dispatchEvent(new Event("change", { bubbles: true }));
-          });
-          actions.appendChild(allButton);
-
-          menu.appendChild(actions);
-
-          control.addEventListener("click", () => toggleMultiSelect(widget));
-          control.addEventListener("keydown", (event) => {
-            if (event.key === "Enter" || event.key === " ") {
-              event.preventDefault();
-              toggleMultiSelect(widget);
-            } else if (event.key === "Escape") {
-              setMultiSelectOpen(widget, false);
+                const text = await res.text();
+                if (res.ok) {
+                    alert(`✅ ${text}`);
+                } else {
+                    alert(`❌ ${text}`);
+                }
+            } catch (err) {
+                alert(`❌ Upload failed: ${err}`);
+            } finally {
+                fileInputEl.value = "";
             }
-          });
-
-          select.addEventListener("change", () =>
-            syncMultiSelectWidget(select),
-          );
-
-          widget.appendChild(control);
-          widget.appendChild(menu);
-          select.insertAdjacentElement("afterend", widget);
-          syncMultiSelectWidget(select);
-        });
-
-        document.addEventListener("click", (event) => {
-          if (!event.target.closest(".multi-select-widget")) {
-            closeAllMultiSelectMenus();
-          }
-        });
-      }
-
-      // upload function now accepts the actual input element
-      async function uploadTarGzFile(fileInputEl, endpoint) {
-        const file = fileInputEl.files[0];
-        if (!file) return; // user cancelled
-
-        try {
-          const res = await fetch(endpoint, {
-            method: "POST",
-            headers: { "Content-Type": "application/gzip" },
-            body: file,
-          });
-
-          const text = await res.text();
-          if (res.ok) {
-            alert(`✅ ${text}`);
-          } else {
-            alert(`❌ ${text}`);
-          }
-        } catch (err) {
-          alert(`❌ Upload failed: ${err}`);
-        } finally {
-          fileInputEl.value = ""; // Reset input so the same file can be reselected
         }
-      }
 
-      function generateFilename(kind) {
-        const now = new Date();
-        const timestamp =
-          `${now.getFullYear()}` +
-          `${String(now.getMonth() + 1).padStart(2, "0")}` +
-          `${String(now.getDate()).padStart(2, "0")}` +
-          `${String(now.getHours()).padStart(2, "0")}` +
-          `${String(now.getMinutes()).padStart(2, "0")}` +
-          `${String(now.getSeconds()).padStart(2, "0")}`;
-        return `${timestamp}_aa-proxy-rs_${kind}.tar.gz`;
-      }
-
-      function triggerDownload(endpoint, kind) {
-        const filename = generateFilename(kind);
-        const url = `${endpoint}?filename=${encodeURIComponent(filename)}`;
-        window.location.href = url;
-      }
-
-      function setValue(id, value) {
-        const el = document.getElementById(id);
-        if (!el) return;
-        if (el.tagName === "SELECT" && el.multiple) {
-          setMultiSelectValues(el, value);
-        } else if (el.type === "checkbox") {
-          el.checked = value;
-        } else {
-          if (
-            typeof value === "object" &&
-            value !== null &&
-            "vid" in value &&
-            "pid" in value
-          ) {
-            el.value = `${value.vid.toString(16).toUpperCase()}:${value.pid.toString(16).toUpperCase()}`;
-          } else {
-            el.value = value ?? "";
-          }
+        function generateFilename(kind) {
+            const now = new Date();
+            const timestamp =
+                `${now.getFullYear()}` +
+                `${String(now.getMonth() + 1).padStart(2, "0")}` +
+                `${String(now.getDate()).padStart(2, "0")}` +
+                `${String(now.getHours()).padStart(2, "0")}` +
+                `${String(now.getMinutes()).padStart(2, "0")}` +
+                `${String(now.getSeconds()).padStart(2, "0")}`;
+            return `${timestamp}_aa-proxy-rs_${kind}.tar.gz`;
         }
-      }
 
-      function getValue(id) {
-        const el = document.getElementById(id);
-        if (el.tagName === "SELECT" && el.multiple) {
-          return Array.from(el.selectedOptions)
-            .map((option) => option.value)
-            .join(",");
-        } else if (el.type === "checkbox") {
-          return el.checked;
-        } else if (el.type === "number") {
-          return el.value ? parseFloat(el.value) : null;
-        } else {
-          return el.value;
+        function triggerDownload(endpoint, kind) {
+            const filename = generateFilename(kind);
+            const url = `${endpoint}?filename=${encodeURIComponent(filename)}`;
+            window.location.href = url;
         }
-      }
 
-      async function handleAction(
-        endpoint,
-        confirmMessage = null,
-        method = "POST",
-      ) {
-        try {
-          if (confirmMessage && !confirm(confirmMessage)) {
-            return; // User canceled
-          }
+        function setValue(id, value) {
+            const el = document.getElementById(id);
+            if (!el) return;
 
-          const response = await fetch(endpoint, { method: method });
+            // Multi-select: delegate to setMultiSelectValues so the chip UI
+            // stays in sync with the underlying <select multiple>.
+            if (el.tagName === "SELECT" && el.multiple) {
+                setMultiSelectValues(el, value);
+                return;
+            }
 
-          if (!response.ok) {
-            throw new Error(`Status: ${response.status}`);
-          }
+            // Single-select <details> dropdown: backing hidden input.
+            if (el.type === "hidden") {
+                const details = document.getElementById(id + "_details");
+                if (!details) {
+                    el.value = value ?? "";
+                    return;
+                }
+                const summaryText = details.querySelector(".select-text");
+                const options = details.querySelectorAll(".single-select-option");
+                const v = value == null ? "" : String(value);
+                options.forEach(opt => {
+                    opt.classList.toggle("selected", opt.getAttribute("data-value") === v);
+                });
+                el.value = v;
+                if (summaryText) summaryText.textContent = v || "(none)";
+                return;
+            }
 
-          alert("✅ Request completed successfully!");
-        } catch (error) {
-          console.error("Request failed:", error);
-          alert("❌ Request failed.");
+            if (el.type === "checkbox") {
+                el.checked = !!value;
+                return;
+            }
+
+            el.value = value == null ? "" : value;
         }
-      }
 
-      async function loadConfig() {
-        const res = await fetch("/config");
-        const data = await res.json();
-        for (const key in data) {
-          if (document.getElementById(key)) {
-            setValue(key, data[key]);
-          }
+        function getValue(id) {
+            const el = document.getElementById(id);
+            if (!el) return null;
+
+            // Multi-select: collect selected options as a comma-joined
+            // string, matching the format `EvConnectorTypes` /
+            // `InjectDisplayTypes` / `BluetoothAddressList` deserialize.
+            if (el.tagName === "SELECT" && el.multiple) {
+                return getMultiSelectValues(el).join(",");
+            }
+
+            if (el.type === "hidden") {
+                // Single-select dropdown: coerce numeric `data-typ` values back
+                // to numbers so the server's strongly-typed fields deserialize.
+                const typ = el.getAttribute("data-typ");
+                const raw = el.value;
+                if ((typ === "integer" || typ === "float") && raw !== "") {
+                    const n = Number(raw);
+                    return Number.isNaN(n) ? raw : n;
+                }
+                return raw;
+            }
+
+            if (el.type === "checkbox") return el.checked;
+
+            if (el.type === "number") {
+                if (el.value === "") return null;
+                const n = Number(el.value);
+                return Number.isNaN(n) ? el.value : n;
+            }
+
+            return el.value;
         }
-      }
 
-      async function sendKeyTap(keycode, label) {
-        try {
-          const response = await fetch("/input/key", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ keycode }),
-          });
-
-          if (!response.ok) {
-            const body = await response.text();
-            throw new Error(`${response.status}: ${body}`);
-          }
-        } catch (error) {
-          console.error(`Failed to send key '${label}' (${keycode}):`, error);
-          alert(`❌ Failed to send key '${label}' (${keycode}).`);
+        async function handleAction(endpoint, confirmMessage = null, method = "POST") {
+            try {
+                if (confirmMessage && !confirm(confirmMessage)) {
+                    return;
+                }
+                const response = await fetch(endpoint, { method: method });
+                if (!response.ok) {
+                    throw new Error(`Status: ${response.status}`);
+                }
+                alert("✅ Request completed successfully!");
+            } catch (error) {
+                console.error("Request failed:", error);
+                alert("❌ Request failed.");
+            }
         }
-      }
 
-      async function saveConfig() {
-        const config = {};
-        const ids = [{CONFIG_IDS}];
+        async function sendKeyTap(keycode, label) {
+            try {
+                const response = await fetch("/input/key", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ keycode }),
+                });
 
-        ids.forEach((id) => {
-          config[id] = getValue(id);
-        });
-
-        try {
-          const response = await fetch("/config", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(config),
-          });
-
-          if (!response.ok) {
-            // Try to get error message from the response
-            const errorText = await response.text();
-            throw new Error(`Error ${response.status}: ${errorText}`);
-          }
-
-          alert("✅ Configuration saved successfully!");
-        } catch (error) {
-          console.error("❌ Failed to save configuration:", error);
-          alert(`❌ Failed to save configuration:\n${error.message}`);
+                if (!response.ok) {
+                    const body = await response.text();
+                    throw new Error(`${response.status}: ${body}`);
+                }
+            } catch (error) {
+                console.error(`Failed to send key '${label}' (${keycode}):`, error);
+                alert(`❌ Failed to send key '${label}' (${keycode}).`);
+            }
         }
-      }
+
+        const CONFIG_IDS = [{CONFIG_IDS}];
+
+        // ----- Requires gating (module-scope so loadConfig can call it) -----
+
+        const splitEq = (s) => {
+            const idx = s.indexOf("=");
+            return idx < 0 ? [s, ""] : [s.slice(0, idx), s.slice(idx + 1)];
+        };
+
+        const isFieldTruthy = (id) => {
+            const el = document.getElementById(id);
+            if (!el) return false;
+            if (el.type === "checkbox") return el.checked;
+            // Multi-select (native <select multiple>): truthy if anything
+            // is selected.
+            if (el.tagName === "SELECT" && el.multiple) {
+                return el.selectedOptions.length > 0;
+            }
+            if (el.type === "hidden") {
+                const v = (el.value || "").trim();
+                if (!v) return false;
+                const typ = el.getAttribute("data-typ");
+                if (typ === "integer" || typ === "float") {
+                    const n = Number(v);
+                    return !Number.isNaN(n) && n !== 0;
+                }
+                return true;
+            }
+            if (el.type === "number") {
+                const v = el.value;
+                if (v === "") return false;
+                const n = Number(v);
+                return !Number.isNaN(n) && n !== 0;
+            }
+            return (el.value || "").trim().length > 0;
+        };
+
+        const fieldValueString = (id) => {
+            const el = document.getElementById(id);
+            if (!el) return "";
+            if (el.type === "checkbox") return el.checked ? "true" : "false";
+            return el.value || "";
+        };
+
+        const fieldMultiselectContains = (id, value) => {
+            const el = document.getElementById(id);
+            if (!el) return false;
+            // Multi-select (native <select multiple>): check selected options.
+            if (el.tagName === "SELECT" && el.multiple) {
+                return Array.from(el.selectedOptions).some(opt => opt.value === value);
+            }
+            // Comma-joined fallback (e.g. plain hidden input).
+            return (el.value || "").split(",").map(s => s.trim()).includes(value);
+        };
+
+        function evaluateRequires() {
+            document
+                .querySelectorAll("[data-requires],[data-requires-equals],[data-requires-contains]")
+                .forEach(el => {
+                    let met = true;
+
+                    const truthy = el.getAttribute("data-requires");
+                    if (truthy) {
+                        for (const field of truthy.split(",").map(s => s.trim()).filter(Boolean)) {
+                            if (!isFieldTruthy(field)) { met = false; break; }
+                        }
+                    }
+                    if (met) {
+                        const eq = el.getAttribute("data-requires-equals");
+                        if (eq) {
+                            const [field, value] = splitEq(eq);
+                            if (fieldValueString(field) !== value) met = false;
+                        }
+                    }
+                    if (met) {
+                        const c = el.getAttribute("data-requires-contains");
+                        if (c) {
+                            const [field, value] = splitEq(c);
+                            if (!fieldMultiselectContains(field, value)) met = false;
+                        }
+                    }
+
+                    if (met) el.removeAttribute("data-requires-met");
+                    else el.setAttribute("data-requires-met", "false");
+
+                    // If this requiring element wraps a sub-section <details>,
+                    // sync its open state to the met state: unmet → collapsed,
+                    // met → expanded. Top-level cards (not requires-gated)
+                    // are unaffected; only the wrapper carrying the
+                    // data-requires* attribute drives its child details.
+                    const card = el.querySelector(":scope > details.config-card");
+                    if (card) card.open = met;
+                });
+        }
+
+        // ----- Multi-select chip widget: progressively enhances any
+        // `<select multiple>` into a chip-based dropdown. Activated once at
+        // DOMContentLoaded by `enhanceMultiSelects()`. -----
+
+        function splitCommaValue(value) {
+            if (Array.isArray(value)) {
+                return value
+                    .map(String)
+                    .map((part) => part.trim())
+                    .filter(Boolean);
+            }
+            return String(value ?? "")
+                .split(",")
+                .map((part) => part.trim())
+                .filter(Boolean);
+        }
+
+        function getMultiSelectValues(select) {
+            return Array.from(select.selectedOptions).map((option) => option.value);
+        }
+
+        function setMultiSelectValues(select, values) {
+            const selectedValues = splitCommaValue(values);
+            for (const option of select.options) {
+                option.selected = selectedValues.includes(option.value);
+            }
+            syncMultiSelectWidget(select);
+        }
+
+        function closeAllMultiSelectMenus(exceptWidget = null) {
+            document.querySelectorAll(".multi-select-widget").forEach((widget) => {
+                if (widget === exceptWidget) return;
+                const menu = widget.querySelector(".multi-select-menu");
+                const control = widget.querySelector(".multi-select-control");
+                if (menu) menu.hidden = true;
+                if (control) control.setAttribute("aria-expanded", "false");
+            });
+        }
+
+        function setMultiSelectOpen(widget, open) {
+            const menu = widget.querySelector(".multi-select-menu");
+            const control = widget.querySelector(".multi-select-control");
+            if (!menu || !control) return;
+            if (open) closeAllMultiSelectMenus(widget);
+            menu.hidden = !open;
+            control.setAttribute("aria-expanded", String(open));
+        }
+
+        function toggleMultiSelect(widget) {
+            const menu = widget.querySelector(".multi-select-menu");
+            setMultiSelectOpen(widget, menu?.hidden !== false);
+        }
+
+        function syncMultiSelectWidget(select) {
+            const widget = select.nextElementSibling;
+            if (!widget || !widget.classList.contains("multi-select-widget")) return;
+
+            const selectedValues = getMultiSelectValues(select);
+            const chips = widget.querySelector(".multi-select-chips");
+            if (!chips) return;
+
+            chips.innerHTML = "";
+
+            if (selectedValues.length === 0) {
+                const placeholder = document.createElement("span");
+                placeholder.className = "multi-select-placeholder";
+                placeholder.textContent = "None selected";
+                chips.appendChild(placeholder);
+            } else {
+                selectedValues.forEach((value) => {
+                    const chip = document.createElement("span");
+                    chip.className = "multi-select-chip";
+
+                    const label = document.createElement("span");
+                    label.className = "multi-select-chip-label";
+                    label.textContent = value;
+                    chip.appendChild(label);
+
+                    const remove = document.createElement("button");
+                    remove.type = "button";
+                    remove.className = "multi-select-chip-remove";
+                    remove.setAttribute("aria-label", `Remove ${value}`);
+                    remove.textContent = "×";
+                    remove.addEventListener("click", (event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        const option = Array.from(select.options).find(
+                            (opt) => opt.value === value,
+                        );
+                        if (option) option.selected = false;
+                        select.dispatchEvent(new Event("change", { bubbles: true }));
+                    });
+                    chip.appendChild(remove);
+                    chips.appendChild(chip);
+                });
+            }
+
+            widget
+                .querySelectorAll('input[type="checkbox"][data-multi-select-option]')
+                .forEach((checkbox) => {
+                    checkbox.checked = selectedValues.includes(checkbox.value);
+                });
+        }
+
+        function enhanceMultiSelects() {
+            document.querySelectorAll("select[multiple]").forEach((select) => {
+                if (select.dataset.enhanced === "true") return;
+
+                select.dataset.enhanced = "true";
+                select.classList.add("multi-select-native");
+
+                const widget = document.createElement("div");
+                widget.className = "multi-select-widget";
+                widget.dataset.for = select.id;
+
+                const control = document.createElement("div");
+                control.className = "multi-select-control";
+                control.tabIndex = 0;
+                control.setAttribute("role", "combobox");
+                control.setAttribute("aria-haspopup", "listbox");
+                control.setAttribute("aria-expanded", "false");
+
+                const chips = document.createElement("div");
+                chips.className = "multi-select-chips";
+                control.appendChild(chips);
+
+                const toggle = document.createElement("button");
+                toggle.type = "button";
+                toggle.className = "multi-select-toggle";
+                toggle.setAttribute("aria-label", "Toggle options");
+                toggle.textContent = "▾";
+                control.appendChild(toggle);
+
+                const menu = document.createElement("div");
+                menu.className = "multi-select-menu";
+                menu.hidden = true;
+                menu.setAttribute("role", "listbox");
+                menu.setAttribute("aria-multiselectable", "true");
+
+                Array.from(select.options).forEach((option) => {
+                    const row = document.createElement("label");
+                    row.className = "multi-select-option";
+
+                    const checkbox = document.createElement("input");
+                    checkbox.type = "checkbox";
+                    checkbox.value = option.value;
+                    checkbox.dataset.multiSelectOption = "true";
+                    checkbox.checked = option.selected;
+                    checkbox.addEventListener("change", () => {
+                        option.selected = checkbox.checked;
+                        select.dispatchEvent(new Event("change", { bubbles: true }));
+                    });
+                    row.appendChild(checkbox);
+
+                    const optionLabel = document.createElement("span");
+                    optionLabel.className = "multi-select-option-label";
+                    optionLabel.textContent = option.textContent || option.value;
+                    row.appendChild(optionLabel);
+
+                    menu.appendChild(row);
+                });
+
+                const actions = document.createElement("div");
+                actions.className = "multi-select-actions";
+
+                const clearButton = document.createElement("button");
+                clearButton.type = "button";
+                clearButton.textContent = "Clear";
+                clearButton.addEventListener("click", (event) => {
+                    event.preventDefault();
+                    for (const option of select.options) option.selected = false;
+                    select.dispatchEvent(new Event("change", { bubbles: true }));
+                });
+                actions.appendChild(clearButton);
+
+                const allButton = document.createElement("button");
+                allButton.type = "button";
+                allButton.textContent = "All";
+                allButton.addEventListener("click", (event) => {
+                    event.preventDefault();
+                    for (const option of select.options) option.selected = true;
+                    select.dispatchEvent(new Event("change", { bubbles: true }));
+                });
+                actions.appendChild(allButton);
+
+                menu.appendChild(actions);
+
+                control.addEventListener("click", () => toggleMultiSelect(widget));
+                control.addEventListener("keydown", (event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        toggleMultiSelect(widget);
+                    } else if (event.key === "Escape") {
+                        setMultiSelectOpen(widget, false);
+                    }
+                });
+
+                select.addEventListener("change", () =>
+                    syncMultiSelectWidget(select),
+                );
+
+                widget.appendChild(control);
+                widget.appendChild(menu);
+                select.insertAdjacentElement("afterend", widget);
+                syncMultiSelectWidget(select);
+            });
+
+            document.addEventListener("click", (event) => {
+                if (!event.target.closest(".multi-select-widget")) {
+                    closeAllMultiSelectMenus();
+                }
+            });
+        }
+
+        async function loadConfig() {
+            const res = await fetch("/config");
+            if (!res.ok) { console.error("loadConfig failed:", res.status); return; }
+            const data = await res.json();
+            for (const id of CONFIG_IDS) setValue(id, data[id]);
+            // After values are populated, re-evaluate every dependency.
+            evaluateRequires();
+        }
+
+        async function saveConfig() {
+            const out = {};
+            for (const id of CONFIG_IDS) out[id] = getValue(id);
+            try {
+                const res = await fetch("/config", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(out),
+                });
+                if (!res.ok) {
+                    const t = await res.text();
+                    alert("Save failed: " + t);
+                }
+            } catch (e) {
+                alert("Save failed: " + e.message);
+            }
+        }
     </script>
-  </body>
+</body>
+
 </html>
