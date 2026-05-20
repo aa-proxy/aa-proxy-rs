@@ -71,11 +71,11 @@ use crate::ev::EvTaskCommand;
 use crate::hu_input::{handle_hu_input, HuInputState};
 use crate::io_uring::Endpoint;
 use crate::io_uring::IoDevice;
-use crate::io_uring::BUFFER_LEN;
 pub use crate::media_tap::{
     media_tcp_server, AudioStreamConfig, MediaSink, MediaStreamInfo, MediaStreamKind,
 };
 use crate::media_tap::{reassemble_media_packet, tap_media_message, MediaFrameBuffer};
+use crate::proxy::BUFFER_LEN;
 
 // module name for logging engine
 pub fn get_name(proxy_type: ProxyType) -> String {

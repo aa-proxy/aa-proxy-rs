@@ -20,6 +20,7 @@ pub mod media_tap;
 pub mod mitm;
 pub mod mitm_prettyprint;
 pub mod mpegts;
+pub mod proxy;
 #[cfg(feature = "wasm-scripting")]
 pub mod script_wasm;
 pub mod sdr_ui;

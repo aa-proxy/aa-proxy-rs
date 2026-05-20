@@ -42,7 +42,7 @@ pub enum WriteError {
     Io(#[from] io::Error),
 }
 
-use crate::io_uring::BUFFER_LEN;
+use crate::proxy::BUFFER_LEN;
 const MAX_PACKET_SIZE: usize = BUFFER_LEN;
 
 pub struct UsbStreamRead {

@@ -10,7 +10,6 @@ use aa_proxy_rs::config::{DEFAULT_WLAN_ADDR, TCP_SERVER_PORT};
 use aa_proxy_rs::crash;
 use aa_proxy_rs::device_info;
 use aa_proxy_rs::ev::BatteryData;
-use aa_proxy_rs::io_uring::io_loop;
 use aa_proxy_rs::led::{LedColor, LedManager, LedMode};
 use aa_proxy_rs::mitm::send_byebye;
 use aa_proxy_rs::mitm::OdometerData;
@@ -19,6 +18,7 @@ use aa_proxy_rs::mitm::SharedCompanionIp;
 use aa_proxy_rs::mitm::SharedMediaTapEndpoints;
 use aa_proxy_rs::mitm::SharedServiceDiscoveryResponse;
 use aa_proxy_rs::mitm::TirePressureData;
+use aa_proxy_rs::proxy::io_loop;
 #[cfg(feature = "wasm-scripting")]
 use aa_proxy_rs::script_wasm::start_wasm_engine;
 #[cfg(feature = "wasm-scripting")]

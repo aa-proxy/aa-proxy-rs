@@ -14,7 +14,6 @@ use crate::ev::send_ev_data;
 use crate::ev::BatteryData;
 use crate::ev::EV_MODEL_FILE;
 use crate::inject_displays;
-use crate::io_uring::media_tap_reverse_bridge_once;
 use crate::mitm::protos::KeyCode;
 use crate::mitm::send_byebye;
 use crate::mitm::send_input_key;
@@ -27,6 +26,7 @@ use crate::mitm::SharedServiceDiscoveryResponse;
 use crate::mitm::{send_odometer_data, OdometerData};
 use crate::mitm::{send_tire_pressure_data, TirePressureData};
 use crate::mitm::{SharedCompanionIp, SharedMediaTapEndpoints};
+use crate::proxy::media_tap_reverse_bridge_once;
 #[cfg(feature = "wasm-scripting")]
 use crate::script_wasm::{LoadedScript, ScriptRegistry};
 use crate::sdr_ui;
