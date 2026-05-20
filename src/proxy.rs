@@ -2,7 +2,6 @@
 use crate::script_wasm::ScriptRegistry;
 #[cfg(not(feature = "wasm-scripting"))]
 type ScriptRegistry = ();
-use crate::io_uring::IoDevice;
 use crate::mitm::{
     ensure_static_media_tap_listeners, static_media_tap_aux_slot_count, MediaTapEndpointInfo,
     SharedCompanionIp, SharedMediaChannels, SharedMediaSinks, SharedMediaTapEndpoints,
@@ -14,16 +13,19 @@ use core::net::SocketAddr;
 use humantime::format_duration;
 use mac_address::MacAddress;
 use simplelog::*;
-use std::cell::RefCell;
 use std::collections::HashMap;
-use std::marker::PhantomData;
 use std::net::IpAddr;
+#[cfg(feature = "io-uring")]
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::fs::File as TokioFile;
+#[cfg(not(feature = "io-uring"))]
+use tokio::fs::OpenOptions;
 use tokio::io::{self, copy_bidirectional, AsyncBufReadExt, BufReader};
+#[cfg(not(feature = "io-uring"))]
+use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::TcpStream as TokioTcpStream;
 use tokio::process::Command;
 use tokio::sync::broadcast::Sender as BroadcastSender;
@@ -31,8 +33,11 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, Mutex, Notify, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
+#[cfg(feature = "io-uring")]
+use tokio_uring;
+#[cfg(feature = "io-uring")]
 use tokio_uring::fs::OpenOptions;
-use tokio_uring::net::TcpListener;
+#[cfg(feature = "io-uring")]
 use tokio_uring::net::TcpStream;
 use tokio_util::sync::CancellationToken;
 
@@ -62,6 +67,95 @@ use crate::mitm::proxy;
 use crate::mitm::Packet;
 use crate::mitm::ProxyType;
 use crate::usb_stream;
+
+#[cfg(feature = "io-uring")]
+macro_rules! tcp_connect {
+    ($addr:expr) => {
+        tokio_uring::net::TcpStream::connect($addr)
+    };
+}
+
+#[cfg(not(feature = "io-uring"))]
+macro_rules! tcp_connect {
+    ($addr:expr) => {
+        TokioTcpStream::connect($addr)
+    };
+}
+
+#[cfg(feature = "io-uring")]
+type NativeTcpStream = tokio_uring::net::TcpStream;
+#[cfg(not(feature = "io-uring"))]
+type NativeTcpStream = TokioTcpStream;
+#[cfg(feature = "io-uring")]
+type NativeFile = tokio_uring::fs::File;
+#[cfg(not(feature = "io-uring"))]
+type NativeFile = tokio::fs::File;
+
+#[cfg(feature = "io-uring")]
+macro_rules! tcp_listener_bind {
+    ($port:expr) => {{
+        use tokio_uring::net::TcpListener;
+        let addr = format!("0.0.0.0:{}", $port).parse::<SocketAddr>().unwrap();
+        Some(TcpListener::bind(addr).unwrap())
+    }};
+}
+
+#[cfg(not(feature = "io-uring"))]
+macro_rules! tcp_listener_bind {
+    ($port:expr) => {{
+        use tokio::net::TcpListener;
+        let addr = format!("0.0.0.0:{}", $port).parse::<SocketAddr>().unwrap();
+        TcpListener::bind(addr).await?
+    }};
+}
+
+#[cfg(feature = "io-uring")]
+macro_rules! listener_ref {
+    ($l:expr) => {
+        &mut $l.as_mut().unwrap()
+    };
+}
+
+#[cfg(not(feature = "io-uring"))]
+macro_rules! listener_ref {
+    ($l:expr) => {
+        &$l
+    };
+}
+
+#[cfg(feature = "io-uring")]
+macro_rules! tcp_shutdown {
+    ($stream:expr) => {
+        if let Some(s) = $stream {
+            let _ = s.shutdown(std::net::Shutdown::Both);
+        }
+    };
+}
+
+#[cfg(not(feature = "io-uring"))]
+macro_rules! tcp_shutdown {
+    ($stream:expr) => {
+        if let Some(stream) = $stream {
+            use tokio::io::AsyncWriteExt;
+            let mut stream = stream.lock().await;
+            let _ = stream.shutdown().await;
+        }
+    };
+}
+
+#[cfg(feature = "io-uring")]
+macro_rules! spawn {
+    ($fut:expr) => {
+        tokio_uring::spawn($fut)
+    };
+}
+
+#[cfg(not(feature = "io-uring"))]
+macro_rules! spawn {
+    ($fut:expr) => {
+        tokio::spawn($fut)
+    };
+}
 
 async fn transfer_monitor(
     stats_interval: Option<Duration>,
@@ -369,12 +463,14 @@ pub async fn mac_from_ipv4(addr: SocketAddr) -> io::Result<Option<MacAddress>> {
 
 /// Asynchronously wait for an inbound TCP connection
 /// returning TcpStream of first client connected
-async fn tcp_wait_for_connection(
-    listener: &mut TcpListener,
-    start_companion_bridges: bool,
-    _media_tap_endpoints: SharedMediaTapEndpoints,
-    companion_ip: SharedCompanionIp,
-) -> Result<(TcpStream, SocketAddr, CancellationToken)> {
+macro_rules! impl_tcp_wait_for_connection {
+    ($listener_type:ty, $stream_type:ty) => {
+        async fn tcp_wait_for_connection(
+            listener: $listener_type,
+            start_companion_bridges: bool,
+            _media_tap_endpoints: SharedMediaTapEndpoints,
+            companion_ip: SharedCompanionIp,
+        ) -> Result<($stream_type, SocketAddr, CancellationToken)> {
     let retval = listener.accept();
     let (stream, addr) = match timeout(TCP_CLIENT_TIMEOUT, retval)
         .await
@@ -475,12 +571,19 @@ async fn tcp_wait_for_connection(
 
     Ok((stream, addr, cancel))
 }
+};}
+
+#[cfg(feature = "io-uring")]
+impl_tcp_wait_for_connection!(&mut tokio_uring::net::TcpListener, TcpStream);
+
+#[cfg(not(feature = "io-uring"))]
+impl_tcp_wait_for_connection!(&tokio::net::TcpListener, TokioTcpStream);
 
 /// Connects to Android Auto Head Unit Server directly on the MD/phone side.
 /// This is used only when `aa_server_tcp_addr` is set. It intentionally does
 /// not start the companion reverse TCP bridges, because there is no inbound
 /// phone client address in this mode.
-async fn tcp_connect_to_aa_server(addr: &str) -> Result<TcpStream> {
+async fn tcp_connect_to_aa_server(addr: &str) -> Result<NativeTcpStream> {
     let addr = addr.trim();
     let socket_addr: SocketAddr = addr.parse().map_err(|e| {
         std::io::Error::new(
@@ -494,7 +597,7 @@ async fn tcp_connect_to_aa_server(addr: &str) -> Result<TcpStream> {
         NAME, socket_addr
     );
 
-    let stream = match timeout(TCP_CLIENT_TIMEOUT, TcpStream::connect(socket_addr)).await {
+    let stream = match timeout(TCP_CLIENT_TIMEOUT, tcp_connect!(socket_addr)).await {
         Ok(Ok(stream)) => stream,
         Ok(Err(e)) => {
             error!(
@@ -544,12 +647,16 @@ pub async fn io_loop(
 
     // prepare/bind needed TCP listeners
     info!("{} 🛰️ Starting TCP server for MD...", NAME);
-    let bind_addr = format!("0.0.0.0:{}", TCP_SERVER_PORT).parse().unwrap();
-    let mut md_listener = Some(TcpListener::bind(bind_addr).unwrap());
+    let bind_addr = format!("0.0.0.0:{}", TCP_SERVER_PORT)
+        .parse::<SocketAddr>()
+        .unwrap();
+    let mut md_listener = tcp_listener_bind!(TCP_SERVER_PORT);
     info!("{} 🛰️ MD TCP server bound to: <u>{}</u>", NAME, bind_addr);
     info!("{} 🛰️ Starting TCP server for DHU...", NAME);
-    let bind_addr = format!("0.0.0.0:{}", TCP_DHU_PORT).parse().unwrap();
-    let mut dhu_listener = Some(TcpListener::bind(bind_addr).unwrap());
+    let bind_addr = format!("0.0.0.0:{}", TCP_DHU_PORT)
+        .parse::<SocketAddr>()
+        .unwrap();
+    let mut dhu_listener = tcp_listener_bind!(TCP_DHU_PORT);
     info!("{} 🛰️ DHU TCP server bound to: <u>{}</u>", NAME, bind_addr);
 
     // Shared media tap sink registry. Static tap listeners are opened immediately
@@ -590,10 +697,10 @@ pub async fn io_loop(
         let read_timeout = Duration::from_secs(config.timeout_secs.into());
 
         let mut client_mac: Option<MacAddress> = None;
-        let mut md_tcp = None;
-        let mut md_usb = None;
-        let mut hu_tcp = None;
-        let mut hu_usb = None;
+        let mut md_tcp: Option<NativeTcpStream> = None;
+        let mut md_usb = None; // type inferred from usb_stream::new()
+        let mut hu_tcp: Option<NativeTcpStream> = None;
+        let mut hu_usb: Option<NativeFile> = None;
         let mut usb_used = false;
         // CancellationToken for tcp_bridge tasks spawned for this session
         let mut bridge_cancel: Option<CancellationToken> = None;
@@ -635,7 +742,7 @@ pub async fn io_loop(
                 _ = tcp_start.notified() => {
                     info!("{} 🛰️ MD TCP server: listening for phone connection...", NAME);
                     if let Ok((s, ip, cancel)) = tcp_wait_for_connection(
-                            &mut md_listener.as_mut().unwrap(),
+                            listener_ref!(md_listener),
                             true,
                             media_tap_endpoints.clone(),
                             companion_ip.clone(),
@@ -659,7 +766,7 @@ pub async fn io_loop(
                 NAME
             );
             if let Ok((s, ip, cancel)) = tcp_wait_for_connection(
-                &mut md_listener.as_mut().unwrap(),
+                listener_ref!(md_listener),
                 true,
                 media_tap_endpoints.clone(),
                 companion_ip.clone(),
@@ -684,7 +791,7 @@ pub async fn io_loop(
                 NAME
             );
             if let Ok((s, _, _)) = tcp_wait_for_connection(
-                &mut dhu_listener.as_mut().unwrap(),
+                listener_ref!(dhu_listener),
                 false,
                 media_tap_endpoints.clone(),
                 companion_ip.clone(),
@@ -757,8 +864,14 @@ pub async fn io_loop(
         let mut reader_hu;
         let mut reader_md;
         // these will be used for cleanup
-        let mut md_tcp_stream = None;
-        let mut hu_tcp_stream = None;
+        #[cfg(feature = "io-uring")]
+        let mut md_tcp_stream: Option<Rc<NativeTcpStream>> = None;
+        #[cfg(not(feature = "io-uring"))]
+        let mut md_tcp_stream: Option<Arc<Mutex<OwnedWriteHalf>>> = None;
+        #[cfg(feature = "io-uring")]
+        let mut hu_tcp_stream: Option<Rc<NativeTcpStream>> = None;
+        #[cfg(not(feature = "io-uring"))]
+        let mut hu_tcp_stream: Option<Arc<Mutex<OwnedWriteHalf>>> = None;
 
         // MITM/proxy mpsc channels:
         // Keep enough in-flight capacity so reader tasks do not stall under bursty
@@ -777,34 +890,82 @@ pub async fn io_loop(
         let hu_w;
         let md_w;
         let mut usb_dev = None;
-        // MD transfer device
-        if let Some(md) = md_usb {
-            // MD over wired USB
-            let (dev, usb_r, usb_w) = md;
-            usb_dev = Some(dev);
-            let usb_r = Rc::new(RefCell::new(usb_r));
-            let usb_w = Rc::new(RefCell::new(usb_w));
-            md_r = IoDevice::UsbReader(usb_r, PhantomData::<TcpStream>);
-            md_w = IoDevice::UsbWriter(usb_w, PhantomData::<TcpStream>);
-        } else {
-            // MD using TCP stream (wireless)
-            let md = Rc::new(md_tcp.unwrap());
-            md_r = IoDevice::EndpointIo(md.clone());
-            md_w = IoDevice::EndpointIo(md.clone());
-            md_tcp_stream = Some(md.clone());
+
+        #[cfg(feature = "io-uring")]
+        {
+            use crate::io_uring::IoDevice;
+            use std::cell::RefCell;
+            use std::marker::PhantomData;
+
+            // MD transfer device
+            if let Some(md) = md_usb {
+                // MD over wired USB
+                let (dev, usb_r, usb_w) = md;
+                usb_dev = Some(dev);
+                let usb_r = Rc::new(RefCell::new(usb_r));
+                let usb_w = Rc::new(RefCell::new(usb_w));
+                md_r = IoDevice::UsbReader(usb_r, PhantomData::<TcpStream>);
+                md_w = IoDevice::UsbWriter(usb_w, PhantomData::<TcpStream>);
+            } else {
+                // MD using TCP stream (wireless)
+                let md = Rc::new(md_tcp.unwrap());
+                md_r = IoDevice::EndpointIo(md.clone());
+                md_w = IoDevice::EndpointIo(md.clone());
+                md_tcp_stream = Some(md.clone());
+            }
+            // HU transfer device
+            if let Some(hu) = hu_usb {
+                // HU connected directly via USB
+                let hu = Rc::new(hu);
+                hu_r = IoDevice::EndpointIo(hu.clone());
+                hu_w = IoDevice::EndpointIo(hu.clone());
+            } else {
+                // Head Unit Emulator via TCP
+                let hu = Rc::new(hu_tcp.unwrap());
+                hu_r = IoDevice::TcpStreamIo(hu.clone());
+                hu_w = IoDevice::TcpStreamIo(hu.clone());
+                hu_tcp_stream = Some(hu.clone());
+            }
         }
-        // HU transfer device
-        if let Some(hu) = hu_usb {
-            // HU connected directly via USB
-            let hu = Rc::new(hu);
-            hu_r = IoDevice::EndpointIo(hu.clone());
-            hu_w = IoDevice::EndpointIo(hu.clone());
-        } else {
-            // Head Unit Emulator via TCP
-            let hu = Rc::new(hu_tcp.unwrap());
-            hu_r = IoDevice::TcpStreamIo(hu.clone());
-            hu_w = IoDevice::TcpStreamIo(hu.clone());
-            hu_tcp_stream = Some(hu.clone());
+        #[cfg(not(feature = "io-uring"))]
+        {
+            use crate::io_tokio::IoDevice;
+
+            // MD transfer device
+            if let Some(md) = md_usb {
+                // MD over wired USB
+                let (dev, usb_r, usb_w) = md;
+                usb_dev = Some(dev);
+                md_r = IoDevice::UsbReader(Arc::new(Mutex::new(usb_r)));
+                md_w = IoDevice::UsbWriter(Arc::new(Mutex::new(usb_w)));
+            } else {
+                // MD using TCP stream (wireless)
+                let stream = md_tcp.unwrap();
+                let (read_half, write_half) = stream.into_split();
+                md_r = IoDevice::TcpRead(Arc::new(Mutex::new(read_half)));
+                let write_half = Arc::new(Mutex::new(write_half));
+                md_w = IoDevice::TcpWrite(write_half.clone());
+
+                // save for cleanup/shutdown later
+                md_tcp_stream = Some(write_half);
+            }
+            // HU transfer device
+            if let Some(hu) = hu_usb {
+                // HU connected directly via USB
+                let hu_file = Arc::new(Mutex::new(hu));
+                hu_r = IoDevice::FileIo(hu_file.clone());
+                hu_w = IoDevice::FileIo(hu_file);
+            } else {
+                // Head Unit Emulator via TCP
+                let stream = hu_tcp.unwrap();
+                let (read_half, write_half) = stream.into_split();
+                hu_r = IoDevice::TcpRead(Arc::new(Mutex::new(read_half)));
+                let write_half = Arc::new(Mutex::new(write_half));
+                hu_w = IoDevice::TcpWrite(write_half.clone());
+
+                // save for cleanup/shutdown later
+                hu_tcp_stream = Some(write_half);
+            }
         }
 
         // handling battery in JSON
@@ -814,10 +975,10 @@ pub async fn io_loop(
         }
 
         // dedicated reading threads:
-        reader_hu = tokio_uring::spawn(endpoint_reader(hu_r, txr_hu, true));
-        reader_md = tokio_uring::spawn(endpoint_reader(md_r, txr_md, false));
+        reader_hu = spawn!(endpoint_reader(hu_r, txr_hu, true));
+        reader_md = spawn!(endpoint_reader(md_r, txr_md, false));
         // main processing threads:
-        from_file = tokio_uring::spawn(proxy(
+        from_file = spawn!(proxy(
             ProxyType::HeadUnit,
             hu_w,
             file_bytes.clone(),
@@ -838,7 +999,7 @@ pub async fn io_loop(
             media_tap_endpoints.clone(),
             ws_event_tx.clone(),
         ));
-        from_stream = tokio_uring::spawn(proxy(
+        from_stream = spawn!(proxy(
             ProxyType::MobileDevice,
             md_w,
             stream_bytes.clone(),
@@ -920,12 +1081,8 @@ pub async fn io_loop(
         usb_monitor.abort();
 
         // make sure TCP connections are closed before next connection attempts
-        if let Some(stream) = md_tcp_stream {
-            let _ = stream.shutdown(std::net::Shutdown::Both);
-        }
-        if let Some(stream) = hu_tcp_stream {
-            let _ = stream.shutdown(std::net::Shutdown::Both);
-        }
+        tcp_shutdown!(md_tcp_stream);
+        tcp_shutdown!(hu_tcp_stream);
 
         // Disassociate a client from the WiFi AP.
         // Mainly needed when a button was used to switch to the next device,

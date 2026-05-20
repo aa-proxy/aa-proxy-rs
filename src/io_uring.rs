@@ -1,3 +1,4 @@
+use crate::io_device::GenericTcpStream;
 use crate::io_device::IoDevice as IoDeviceTrait;
 use crate::mitm::{FRAME_TYPE_FIRST, FRAME_TYPE_MASK, HEADER_LENGTH};
 use crate::proxy::BUFFER_LEN;
@@ -122,6 +123,13 @@ impl<A: Endpoint<A>> IoDeviceTrait for IoDevice<A> {
                 "cannot read from UsbWriter",
             )),
         }
+    }
+}
+
+#[cfg(feature = "io-uring")]
+impl GenericTcpStream for tokio_uring::net::TcpStream {
+    fn set_nodelay(&self, enabled: bool) -> std::io::Result<()> {
+        self.set_nodelay(enabled)
     }
 }
 

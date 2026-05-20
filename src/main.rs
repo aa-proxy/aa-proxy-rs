@@ -712,6 +712,12 @@ fn main() -> Result<()> {
         }
     }
 
+    // Log which I/O backend is active
+    #[cfg(feature = "io-uring")]
+    info!("⚙️ I/O backend: <b><green>io_uring</> (kernel async I/O)");
+    #[cfg(not(feature = "io-uring"))]
+    info!("⚙️ I/O backend: <b><yellow>tokio async</> (standard async I/O)");
+
     // check and display config
     if args.config.exists() {
         info!(
@@ -853,8 +859,22 @@ fn main() -> Result<()> {
         .await
     });
 
+    #[cfg(feature = "io-uring")]
+    macro_rules! run_io_loop {
+        ($fut:expr) => {
+            let _ = tokio_uring::start($fut);
+        };
+    }
+
+    #[cfg(not(feature = "io-uring"))]
+    macro_rules! run_io_loop {
+        ($fut:expr) => {
+            runtime.block_on($fut)?;
+        };
+    }
+
     // start tokio_uring runtime simultaneously
-    let _ = tokio_uring::start(io_loop(
+    run_io_loop!(io_loop(
         restart_tx,
         tcp_start_cloned,
         config,

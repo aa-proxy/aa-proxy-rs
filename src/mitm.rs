@@ -66,8 +66,13 @@ use crate::config_types::HexdumpLevel;
 use crate::ev::EvTaskCommand;
 use crate::hu_input::{handle_hu_input, HuInputState};
 use crate::io_device::IoDevice as IoDeviceTrait;
+#[cfg(not(feature = "io-uring"))]
+use crate::io_tokio::read_input_data;
+#[cfg(feature = "io-uring")]
 use crate::io_uring::read_input_data;
+#[cfg(feature = "io-uring")]
 use crate::io_uring::Endpoint;
+#[cfg(feature = "io-uring")]
 use crate::io_uring::IoDevice;
 pub use crate::media_tap::{
     media_tcp_server, AudioStreamConfig, MediaSink, MediaStreamInfo, MediaStreamKind,
@@ -2654,7 +2659,12 @@ macro_rules! impl_endpoint_reader {
 }
 
 // main reader thread for a device — io_uring backend
+#[cfg(feature = "io-uring")]
 impl_endpoint_reader!([A: Endpoint<A>], IoDevice<A>);
+
+// main reader thread for a device — tokio backend
+#[cfg(not(feature = "io-uring"))]
+impl_endpoint_reader!([D: IoDeviceTrait], D);
 
 /// checking if there was a true fatal SSL error
 /// Note that the error may not be fatal. For example if the underlying

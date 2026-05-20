@@ -23,3 +23,7 @@ pub trait IoDevice {
     async fn write_data(&mut self, buf: &[u8]) -> std::io::Result<usize>;
     async fn read_data(&mut self, buf: &mut [u8]) -> std::io::Result<usize>;
 }
+
+pub trait GenericTcpStream {
+    fn set_nodelay(&self, enabled: bool) -> std::io::Result<()>;
+}
