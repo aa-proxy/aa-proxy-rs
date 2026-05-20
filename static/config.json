@@ -1,28 +1,8 @@
 {
   "titles": [
     {
-      "title": "📶 SYSTEM / WIFI CONFIGURATION",
+      "title": "📶 WI-FI",
       "values": {
-        "enable_ssh": {
-          "typ": "boolean",
-          "description": "Enable SSH server"
-        },
-        "wifi_version": {
-          "typ": "integer",
-          "description": "Wi-Fi operation mode:\n`1` = Wi-Fi 1 (802.11b) (Only 2.4 GHz),\n`2` = Wi-Fi 2 (IEEE 802.11a) (Only 5 GHz),\n`3` = Wi-Fi 3 (IEEE 802.11g) (only 2.4 GHz),\n`4` = Wi-Fi 4 (IEEE 802.11n) (2.4/5 GHz),\n`5` = Wi-Fi 5 (IEEE 802.11ac) (only 5 GHz),\n`6` = Wi-Fi 6/6E (IEEE 802.11ax) (2.4/5 GHz for Wi-Fi 6, 2.4/5/6 GHz for Wi-Fi 6E),\n`7` = Wi-Fi 7 (IEEE 802.11be) (2.4/5/6 GHz)"
-        },
-        "band": {
-          "typ": "string",
-          "description": "Wi-Fi Operating frequency: `2.4` OR `5`. The default should be fine. 6 GHz is NOT supported!"
-        },
-        "country_code": {
-          "typ": "string",
-          "description": "Wi-Fi Country code (ISO/IEC 3166-1). Used to set regulatory domain. Set as needed to indicate country in which device is operating. This can limit available channels and transmit power."
-        },
-        "channel": {
-          "typ": "integer",
-          "description": "Wi-Fi Channel number (IEEE 802.11)"
-        },
         "ssid": {
           "typ": "string",
           "description": "Wi-Fi SSID"
@@ -31,168 +11,47 @@
           "typ": "string",
           "description": "Wi-Fi password used as the WPA pre-shared key (WPA-PSK)"
         },
-        "ble_password": {
+        "country_code": {
           "typ": "string",
-          "description": "BLE password to communicate with companion app, please set it on app too"
+          "description": "Wi-Fi Country code (ISO/IEC 3166-1). Used to set regulatory domain. Set as needed to indicate country in which device is operating. This can limit available channels and transmit power."
+        },
+        "wifi_version": {
+          "typ": "integer",
+          "description": "Wi-Fi operation mode:\n`1` = Wi-Fi 1 (802.11b) (Only 2.4 GHz),\n`2` = Wi-Fi 2 (IEEE 802.11a) (Only 5 GHz),\n`3` = Wi-Fi 3 (IEEE 802.11g) (only 2.4 GHz),\n`4` = Wi-Fi 4 (IEEE 802.11n) (2.4/5 GHz),\n`5` = Wi-Fi 5 (IEEE 802.11ac) (only 5 GHz),\n`6` = Wi-Fi 6/6E (IEEE 802.11ax) (2.4/5 GHz for Wi-Fi 6, 2.4/5/6 GHz for Wi-Fi 6E),\n`7` = Wi-Fi 7 (IEEE 802.11be) (2.4/5/6 GHz)",
+          "values": ["1", "2", "3", "4", "5", "6", "7"]
+        },
+        "band": {
+          "typ": "string",
+          "description": "Wi-Fi operating frequency: `2.4` OR `5`. The default should be fine. 6 GHz is NOT supported.",
+          "values": ["2.4", "5"]
+        },
+        "channel": {
+          "typ": "integer",
+          "description": "Wi-Fi channel number (IEEE 802.11)",
+          "advanced": true
+        },
+        "iface": {
+          "typ": "string",
+          "description": "WLAN / Wi-Fi hotspot interface (for obtaining IP and BSSID)",
+          "advanced": true
+        },
+        "external_antenna": {
+          "typ": "boolean",
+          "description": "Only for Radxa: enable if you have connected an external antenna",
+          "advanced": true
         }
       }
     },
     {
-      "title": "⚙️ GENERAL OPTIONS",
+      "title": "📻 BLUETOOTH",
       "values": {
-        "logfile": {
-          "typ": "string",
-          "description": "Log file path, by default it is saved to `/var/log` in `tmpfs`/memory. If you want, you can change it e.g. to `/data/aa-proxy-rs.log` and it will be saved to SD card (appended, not replaced)."
-        },
-        "crash_handler_enabled": {
+        "enable_btle": {
           "typ": "boolean",
-          "description": "Enable Rust panic report files. Normal runtime cost is negligible; stacktrace capture and file write happen only when a panic occurs."
+          "description": "Enable BLE/GATT server for the companion app"
         },
-        "crash_dir": {
-          "typ": "string",
-          "description": "Directory where Rust panic reports are written with timestamped filenames. Default: `/data/aa-proxy-rs/crashes`."
-        },
-        "stats_interval": {
-          "typ": "integer",
-          "description": "Interval of showing data transfer statistics in the log (0 = disabled) [seconds]"
-        },
-        "timeout_secs": {
-          "typ": "integer",
-          "description": "Data transfer timeout [seconds], after this idle time the session will be reconnected"
-        },
-        "webserver": {
-          "typ": "string",
-          "description": "Webserver bind address/port, empty = disabled"
-        },
-        "legacy": {
-          "typ": "boolean",
-          "description": "Enable legacy USB mode (some HeadUnits/cars needs this enabled for compatibility)"
-        },
-        "quick_reconnect": {
-          "typ": "boolean",
-          "description": "EXPERIMENTAL: Maintain persistent Bluetooth connection to enable faster reconnection with MD"
-        },
-        "wired": {
-          "typ": "string",
-          "description": "Enable wired USB connection to phone (VID:PID should be specified, zero is wildcard and can be used for single or both fields)\nyou can obtain it e.g. using `lsusb` after connecting phone,\nand then use e.g. \"18d1:0\" which will handle specified phone vendor ID (Google Pixel in this example)"
-        },
-        "udc": {
-          "typ": "string",
-          "description": "UDC Controller name (used in special configurations)"
-        },
-        "startup_delay": {
-          "typ": "integer",
-          "description": "Enables delaying the launch of `aa-proxy-rs` by a specified number of seconds (range: 0–254).\nDefault value: 0.\nIntended for specific scenarios (e.g., non-standard head units)"
-        }
-      }
-    },
-    {
-      "title": "🐞 DEBUGGING",
-      "values": {
-        "debug": {
-          "typ": "boolean",
-          "description": "Enable global debug logging. This also enables many non-packet debug messages."
-        },
-        "pkt_debug": {
-          "typ": "boolean",
-          "description": "Enable packet debug output independently from global debug logging. When enabled, pkt_debug lines are emitted at INFO level, so debug can stay disabled to avoid unrelated debug noise."
-        },
-        "hexdump_level": {
-          "typ": "select",
-          "description": "Hex dump level [possible values: Disabled, DecryptedInput, RawInput, DecryptedOutput, RawOutput, All]",
-          "values": [
-            "Disabled",
-            "DecryptedInput",
-            "RawInput",
-            "DecryptedOutput",
-            "RawOutput",
-            "All"
-          ]
-        },
-        "disable_console_debug": {
-          "typ": "boolean",
-          "description": "Disable debug level on console, save it only to logfile (helpful for `hexdump-level` option)"
-        },
-        "pkt_debug_filter_enabled": {
-          "typ": "boolean",
-          "description": "Enable packet debug filtering. This narrows pkt_debug output on top of hexdump_level."
-        },
-        "pkt_debug_filter_proxy": {
-          "typ": "select",
-          "description": "Packet debug proxy filter.",
-          "values": ["both", "hu", "md"]
-        },
-        "pkt_debug_filter_stages": {
-          "typ": "multi-select",
-          "description": "Stages to include, empty=all",
-          "values": [
-            "raw_input",
-            "raw_output",
-            "decrypted_input",
-            "decrypted_output"
-          ]
-        },
-        "pkt_debug_filter_service_kinds": {
-          "typ": "multi-select",
-          "description": "Service kinds to filter, empty=all",
-          "values": [
-            "control",
-            "sensor_source",
-            "media_sink",
-            "input_source",
-            "media_source",
-            "bluetooth",
-            "radio",
-            "navigation_status",
-            "media_playback_status",
-            "phone_status",
-            "media_browser",
-            "vendor_extension",
-            "generic_notification",
-            "wifi_projection",
-            "car_property"
-          ]
-        },
-        "pkt_debug_filter_channels": {
-          "typ": "string",
-          "description": "Comma-separated numeric channel IDs to include. Empty = all. Examples: 0x00,0x08,8."
-        },
-        "pkt_debug_filter_exclude_channels": {
-          "typ": "string",
-          "description": "Comma-separated numeric channel IDs to exclude. Examples: 0x01,1."
-        },
-        "pkt_debug_filter_message_ids": {
-          "typ": "string",
-          "description": "Comma-separated numeric message IDs to include. Empty = all. Examples: 0x0006,6."
-        },
-        "pkt_debug_filter_exclude_message_ids": {
-          "typ": "string",
-          "description": "Comma-separated numeric message IDs to exclude."
-        },
-        "pkt_debug_filter_pretty_proto": {
-          "typ": "boolean",
-          "description": "When packet debug filtering is enabled, also print decoded protobuf text for known control messages."
-        },
-        "pkt_debug_filter_max_payload_bytes": {
-          "typ": "integer",
-          "description": "When packet debug filtering is enabled, truncate payload dumps to this many bytes. 0 disables truncation."
-        }
-      }
-    },
-    {
-      "title": "📶 BLUETOOTH AND WIFI RELATED",
-      "values": {
         "advertise": {
           "typ": "boolean",
           "description": "BLE advertising"
-        },
-        "enable_btle": {
-          "typ": "boolean",
-          "description": "Enable BLE/GATT server for companion app"
-        },
-        "dongle_mode": {
-          "typ": "boolean",
-          "description": "Dongle mode"
         },
         "btalias": {
           "typ": "string",
@@ -202,360 +61,667 @@
           "typ": "string",
           "description": "Auto-connect to phone and initiate connection\nempty string/no value: don't auto-connect,\nzeros: iterate over all previously connected devices,\nmay be set to a comma seperated list of phone BT MAC addresses for connecting to a specific list of phones, wildcard may not be used with list"
         },
+        "ble_password": {
+          "typ": "string",
+          "description": "BLE password to communicate with the companion app; please set it on the app too"
+        },
         "bt_timeout_secs": {
           "typ": "integer",
-          "description": "Bluetooth handshake timeout [seconds], this is for rare cases when the phone stops responding, to prevent the bluetooth handshake deadlock with inifite waiting and not restarting connection again"
-        },
-        "iface": {
-          "typ": "string",
-          "description": "WLAN / Wi-Fi Hotspot interface (for obtaining IP and BSSID)"
-        },
-        "change_usb_order": {
-          "typ": "boolean",
-          "description": "Connect to HU USB before Bluetooth handshake"
+          "description": "Bluetooth handshake timeout [seconds], for rare cases when the phone stops responding (prevents the bluetooth handshake deadlock with infinite waiting and not restarting connection again)",
+          "advanced": true
         },
         "bt_poweroff": {
           "typ": "boolean",
-          "description": "Powers off the Bluetooth adapter after the handshake. Intended for use only in specific configurations"
+          "description": "Powers off the Bluetooth adapter after the handshake. Intended for use only in specific configurations.",
+          "advanced": true
         },
-        "external_antenna": {
+        "dongle_mode": {
           "typ": "boolean",
-          "description": "Only for Radxa: enable if you want to use (and have connected) an external antenna"
+          "description": "Dongle mode",
+          "advanced": true
+        },
+        "quick_reconnect": {
+          "typ": "boolean",
+          "description": "EXPERIMENTAL: Maintain persistent Bluetooth connection to enable faster reconnection with MD",
+          "advanced": true
         }
       }
     },
     {
-      "title": "🎧 BLUTOOTH HEADSET",
+      "title": "🚗 HEAD UNIT LINK",
       "values": {
-        "bt_sco": {
+        "legacy": {
           "typ": "boolean",
-          "description": "Enable the experimental Bluetooth SCO/eSCO call-audio bridge/listener."
+          "description": "Enable legacy USB mode (some head units / cars need this enabled for compatibility)"
         },
-        "bt_sco_keep_bluetooth_alive": {
+        "wired": {
+          "typ": "string",
+          "description": "Enable wired USB connection to phone (VID:PID should be specified; zero is wildcard and can be used for single or both fields).\nYou can obtain it e.g. using `lsusb` after connecting the phone, then use e.g. \"18d1:0\" which will handle the specified phone vendor ID (Google Pixel in this example).",
+          "advanced": true
+        },
+        "udc": {
+          "typ": "string",
+          "description": "UDC controller name (used in special configurations)",
+          "advanced": true
+        },
+        "change_usb_order": {
           "typ": "boolean",
-          "description": "When bt_sco is enabled, keep the Android Auto Bluetooth profile/RFCOMM connection alive after Wi-Fi bootstrap so the phone continues routing call audio to aa-proxy-rs."
+          "description": "Connect to HU USB before Bluetooth handshake",
+          "advanced": true
         },
-        "bt_sco_media_bridge": {
-          "typ": "boolean",
-          "description": "Experimental: bridge Bluetooth SCO call downlink into a selected Android Auto PCM sink. Requires MITM and bt_sco listener."
-        },
-        "bt_sco_media_bridge_audio_type": {
-          "typ": "select",
-          "description": "Preferred AA PCM sink for SCO downlink.",
-          "values": ["guidance", "media", "auto"]
-        },
-        "bt_sco_media_bridge_gain_percent": {
+        "startup_delay": {
           "typ": "integer",
-          "description": "SCO downlink output gain percent after conversion. 100 means no gain. Start with 300 if call audio is quiet."
-        },
-        "bt_sco_media_bridge_limiter": {
-          "typ": "select",
-          "description": "Limiter applied after gain: off preserves the proven path except unavoidable i16 saturation, hard clips peaks earlier, soft compresses peaks more gently.",
-          "values": ["off", "hard", "soft"]
-        },
-        "bt_sco_media_bridge_resampler": {
-          "typ": "select",
-          "description": "SCO 8 kHz to AA 48 kHz resampler: repeat preserves the proven path, linear smooths the 6x upsampling and may reduce roughness/crackle.",
-          "values": ["repeat", "linear"]
-        },
-        "bt_sco_media_bridge_ring_capacity": {
-          "typ": "integer",
-          "description": "Maximum converted AA PCM chunks buffered for SCO media bridge. 128 is a safe default; lower values reduce latency."
-        },
-        "bt_sco_media_bridge_start_existing": {
-          "typ": "boolean",
-          "description": "When SCO connects, send MEDIA_MESSAGE_START on the selected existing/configured PCM sink before piggyback DATA. Does not send CHANNEL_OPEN or SETUP."
-        },
-        "bt_sco_media_bridge_start_on_first_audio": {
-          "typ": "boolean",
-          "description": "Delay MEDIA_MESSAGE_START/DATA until the SCO downlink contains non-silent audio. Useful for diagnosing phone call routes where SCO opens but initially carries silence."
-        },
-        "bt_sco_media_bridge_audio_peak_threshold": {
-          "typ": "integer",
-          "description": "Peak threshold for start_on_first_audio. Converted 16-bit PCM frames below this value are treated as silence. 64 is a conservative starting point."
-        },
-        "bt_sco_media_bridge_start_timeout_ms": {
-          "typ": "integer",
-          "description": "Fallback timeout for start_on_first_audio. If no non-silent SCO downlink is seen within this time, START/DATA begins anyway."
-        },
-        "bt_sco_media_bridge_stop_existing_on_disconnect": {
-          "typ": "boolean",
-          "description": "When SCO disconnects, send MEDIA_MESSAGE_STOP on the selected existing PCM sink. Useful to reset DHU/HU audio renderer state between calls."
-        },
-        "bt_sco_media_bridge_fixed_cadence": {
-          "typ": "boolean",
-          "description": "Pace outgoing AA DATA packets at a fixed cadence instead of sending immediately when converted SCO chunks arrive. Disabled by default to preserve the proven behavior."
-        },
-        "bt_sco_media_bridge_cadence_ms": {
-          "typ": "integer",
-          "description": "DATA packet cadence in milliseconds when fixed cadence is enabled. 22 ms matches the current 6-SCO-packet chunk timing closely."
-        },
-        "bt_sco_media_bridge_jitter_buffer_ms": {
-          "typ": "integer",
-          "description": "Minimum converted-audio buffer before the first fixed-cadence DATA packet. 60 ms is a conservative starting point."
-        },
-        "bt_sco_mic_bridge": {
-          "typ": "boolean",
-          "description": "Experimental: bridge Android Auto HU microphone/source PCM into Bluetooth SCO call uplink. Requires MITM and bt_sco listener."
-        },
-        "bt_sco_mic_request": {
-          "typ": "boolean",
-          "description": "Send MEDIA_MESSAGE_MICROPHONE_REQUEST open/close when SCO connects/disconnects. Disable for passive mic logging only."
-        },
-        "bt_sco_mic_uplink_ring_capacity": {
-          "typ": "integer",
-          "description": "Maximum 60-byte SCO uplink packets buffered for microphone bridge. 256 is a safe default."
-        },
-        "bt_sco_mic_echo_control": {
-          "typ": "select",
-          "description": "Microphone echo handling for SCO uplink. off preserves current behavior; ducking lowers mic while downlink audio is active.",
-          "values": ["off", "ducking"]
-        },
-        "bt_sco_mic_gain_percent": {
-          "typ": "integer",
-          "description": "Microphone uplink gain percent after echo processing. 100 means no gain."
-        },
-        "bt_sco_mic_duck_threshold": {
-          "typ": "integer",
-          "description": "Downlink peak threshold that marks far-end audio as active for ducking."
-        },
-        "bt_sco_mic_duck_percent": {
-          "typ": "integer",
-          "description": "Mic gain percent while far-end/downlink audio is active. Lower values reduce echo more but hurt full-duplex speech."
-        },
-        "bt_sco_mic_duck_hold_ms": {
-          "typ": "integer",
-          "description": "How long to keep ducking after the last active downlink frame."
+          "description": "Delay the launch of `aa-proxy-rs` by a specified number of seconds (range: 0–254). Default: 0. Intended for specific scenarios (e.g. non-standard head units).",
+          "advanced": true
         }
       }
     },
     {
-      "title": "🕵️‍♂️ MITM CONFIGURATION",
+      "title": "🕵️ MITM",
       "values": {
         "mitm": {
           "typ": "boolean",
-          "description": "Enable MITM mode. This must be enabled for all options below to take effect."
-        },
-        "dpi": {
-          "typ": "integer",
-          "description": "Force DPI\n0 = do not change DPI\nIf you are unsure what value to use, start experimenting with e.g. 130. Logs are helpful, as they show both the original HU value and the new one."
-        },
-        "sdr_ui_override_enabled": {
-          "typ": "boolean",
-          "description": "Enable per-vehicle SDR UI config overrides for `content_insets`, `stable_content_insets`, and `margins` in media sink video configs.",
-          "values": null
-        },
-        "sdr_ui_override_autocreate_profiles": {
-          "typ": "boolean",
-          "description": "Automatically create disabled SDR UI override profiles from the first observed ServiceDiscoveryResponse for each vehicle.",
-          "values": null
-        },
-        "sdr_ui_override_file": {
-          "typ": "string",
-          "description": "TOML file used to store per-vehicle and optional per-phone SDR UI overrides. Default: `/data/aa-proxy-rs/sdr-ui-overrides.toml`.",
-          "values": null
-        },
-        "inject_displays_file": {
-          "typ": "string",
-          "description": "TOML file used to store injected display service profiles. Supports multiple main/cluster/auxiliary media sink entries. Display IDs are assigned automatically from the current SDR. Default: `/data/aa-proxy-rs/inject-displays.toml`.",
-          "values": null
+          "description": "Enable MITM mode. Required for every option inside this section."
         },
         "media_dump_base_port": {
           "typ": "integer",
-          "description": "Base TCP port for raw decrypted media stream dumping/debugging. Requires `mitm = true`.\n\nOne TCP listener is created per media sink using fixed offsets:\n+0 main video,\n+1 cluster video,\n+2 auxiliary video,\n+3 guidance/TTS audio,\n+4 system audio,\n+5 media audio,\n+6 telephony audio.\n\nExample: `12345` exposes main video on `tcp://127.0.0.1:12345`.\nUseful for ffplay/VLC debugging and stream inspection.\n\nSet to 0 or leave unset to disable."
-        },
-        "audio_max_unacked": {
-          "typ": "integer",
-          "description": "Override the `max_unacked` setting for audio channels. This may improve audio performance on some head units, but may worsen it on others. Adjust this value experimentally only if you experience audio stuttering.\n0 = leave unchanged."
-        },
-        "add_vendor_channel": {
-          "typ": "boolean",
-          "description": "Add vendor channel for android companion app"
-        },
-        "remove_tap_restriction": {
-          "typ": "boolean",
-          "description": "Remove tap restrictions. This affects situations where tapping too frequently while driving triggers a temporary lockout warning. Might not work, depending on phone and Android version."
-        },
-        "video_in_motion": {
-          "typ": "boolean",
-          "description": "Enable video playback while driving. Intended for passengers only - do not watch video while driving. Might not work, depending on phone and Android version. In some cases, this also requires `developer_mode` to be enabled below."
-        },
-        "disable_media_sink": {
-          "typ": "boolean",
-          "description": "Disable the media sink. This prevents regular audio from being routed to the head unit (it stays on the phone), allowing, for example, a passenger to watch YouTube locally on the phone with audio."
-        },
-        "disable_tts_sink": {
-          "typ": "boolean",
-          "description": "Disable the TTS sink. Similar to the option above, but navigation voice guidance is not routed to the head unit and remains on the phone."
-        },
-        "developer_mode": {
-          "typ": "boolean",
-          "description": "Enable developer mode. This option emulates a Google Head Unit, allowing installation and use of applications that are normally unavailable. Commonly used by developers when testing or developing new applications."
-        },
-        "remove_bluetooth": {
-          "typ": "boolean",
-          "description": "Remove the Bluetooth service from the `service discovery response`. This option may be helpful for head units with integrated wireless Android Auto."
-        },
-        "remove_wifi": {
-          "typ": "boolean",
-          "description": "Remove the Wi-Fi service from the `service discovery response`. This option may be helpful for head units with integrated wireless Android Auto."
-        },
-        "inject_display_types": {
-          "typ": "multi-select",
-          "description": "Add video display services to the service discovery response. Select one or more display types. Leave empty to disable. Useful when forcing additional display channels for capture. Requires mitm = true.",
-          "values": ["DISPLAY_TYPE_CLUSTER", "DISPLAY_TYPE_AUXILIARY"]
-        },
-        "inject_add_input_sources": {
-          "typ": "boolean",
-          "description": "When enabled, also inject matching `input_source_service` entries for configured display IDs. Disabled by default because HU-specific keycode sets may differ."
-        },
-        "inject_cluster_display_id": {
-          "typ": "integer",
-          "description": "Display ID to use for injected cluster display services."
-        },
-        "inject_cluster_width_margin": {
-          "typ": "integer",
-          "description": "Cluster video width margin for injected display service."
-        },
-        "inject_cluster_height_margin": {
-          "typ": "integer",
-          "description": "Cluster video height margin for injected display service."
-        },
-        "inject_cluster_density": {
-          "typ": "integer",
-          "description": "Cluster display density (DPI) for injected display service."
-        },
-        "inject_cluster_viewing_distance": {
-          "typ": "integer",
-          "description": "Cluster viewing distance for injected display service."
-        },
-        "inject_cluster_codec_resolution": {
-          "typ": "select",
-          "description": "Cluster video codec resolution enum for injected display service.",
-          "values": [
-            "VIDEO_800x480",
-            "VIDEO_1280x720",
-            "VIDEO_1920x1080",
-            "VIDEO_2560x1440",
-            "VIDEO_3840x2160",
-            "VIDEO_720x1280",
-            "VIDEO_1080x1920",
-            "VIDEO_1440x2560",
-            "VIDEO_2160x3840"
+          "description": "Base TCP port for raw decrypted media stream dumping/debugging. Requires `mitm = true`.\n\nOne TCP listener is created per media sink using fixed offsets:\n+0 main video,\n+1 cluster video,\n+2 auxiliary video,\n+3 guidance/TTS audio,\n+4 system audio,\n+5 media audio,\n+6 telephony audio.\n\nExample: `12345` exposes main video on `tcp://127.0.0.1:12345`.\nUseful for ffplay/VLC debugging and stream inspection.\n\nSet to 0 or leave unset to disable.",
+          "requires": "mitm",
+          "advanced": true
+        }
+      },
+      "subsections": [
+        {
+          "title": "🖥️ Display injection",
+          "requires": "mitm",
+          "advanced": true,
+          "values": {
+            "inject_displays_file": {
+              "typ": "string",
+              "description": "TOML file used to store injected display service profiles. Supports multiple main/cluster/auxiliary media sink entries. Display IDs are assigned automatically from the current SDR. Default: `/data/aa-proxy-rs/inject-displays.toml`. Supersedes the legacy `inject_display_types` / `inject_cluster_*` / `inject_aux_*` fields below (kept for backward compatibility but ignored at runtime)."
+            },
+            "inject_add_input_sources": {
+              "typ": "boolean",
+              "description": "Also inject matching `input_source_service` entries for configured display IDs. Disabled by default because HU-specific keycode sets may differ.",
+              "advanced": true
+            },
+            "inject_display_types": {
+              "typ": "multi-select",
+              "description": "Add video display services to the `service discovery response`. Useful when forcing additional display channels for capture.",
+              "values": [
+                "DISPLAY_TYPE_CLUSTER",
+                "DISPLAY_TYPE_AUXILIARY"
+              ]
+            }
+          },
+          "subsections": [
+            {
+              "title": "Cluster display",
+              "advanced": true,
+              "requires": {
+                "field": "inject_display_types",
+                "contains": "DISPLAY_TYPE_CLUSTER"
+              },
+              "values": {
+                "inject_cluster_display_id": {
+                  "typ": "integer",
+                  "description": "Display ID to use for the injected cluster display."
+                },
+                "inject_cluster_codec_resolution": {
+                  "typ": "select",
+                  "description": "Cluster video codec resolution.",
+                  "values": [
+                    "VIDEO_800x480",
+                    "VIDEO_1280x720",
+                    "VIDEO_1920x1080",
+                    "VIDEO_2560x1440",
+                    "VIDEO_3840x2160",
+                    "VIDEO_720x1280",
+                    "VIDEO_1080x1920",
+                    "VIDEO_1440x2560",
+                    "VIDEO_2160x3840"
+                  ]
+                },
+                "inject_cluster_density": {
+                  "typ": "integer",
+                  "description": "Cluster display density (DPI)."
+                },
+                "inject_cluster_viewing_distance": {
+                  "typ": "integer",
+                  "description": "Cluster viewing distance."
+                },
+                "inject_cluster_width_margin": {
+                  "typ": "integer",
+                  "description": "Cluster video width margin."
+                },
+                "inject_cluster_height_margin": {
+                  "typ": "integer",
+                  "description": "Cluster video height margin."
+                },
+                "inject_cluster_touch_width": {
+                  "typ": "integer",
+                  "description": "Cluster input touchscreen width (requires `inject_add_input_sources`)."
+                },
+                "inject_cluster_touch_height": {
+                  "typ": "integer",
+                  "description": "Cluster input touchscreen height (requires `inject_add_input_sources`)."
+                }
+              }
+            },
+            {
+              "title": "Auxiliary display",
+              "advanced": true,
+              "requires": {
+                "field": "inject_display_types",
+                "contains": "DISPLAY_TYPE_AUXILIARY"
+              },
+              "values": {
+                "inject_aux_display_id": {
+                  "typ": "integer",
+                  "description": "Display ID to use for the injected auxiliary display."
+                },
+                "inject_aux_density": {
+                  "typ": "integer",
+                  "description": "Auxiliary display density (DPI)."
+                },
+                "inject_aux_viewing_distance": {
+                  "typ": "integer",
+                  "description": "Auxiliary viewing distance."
+                },
+                "inject_aux_width_margin": {
+                  "typ": "integer",
+                  "description": "Auxiliary video width margin."
+                },
+                "inject_aux_height_margin": {
+                  "typ": "integer",
+                  "description": "Auxiliary video height margin."
+                },
+                "inject_aux_touch_width": {
+                  "typ": "integer",
+                  "description": "Auxiliary input touchscreen width (requires `inject_add_input_sources`)."
+                },
+                "inject_aux_touch_height": {
+                  "typ": "integer",
+                  "description": "Auxiliary input touchscreen height (requires `inject_add_input_sources`)."
+                }
+              }
+            }
           ]
         },
-        "inject_cluster_touch_width": {
-          "typ": "integer",
-          "description": "Cluster input touchscreen width when `inject_add_input_sources` is enabled."
+        {
+          "title": "🔊 Audio",
+          "requires": "mitm",
+          "advanced": true,
+          "values": {
+            "audio_max_unacked": {
+              "typ": "integer",
+              "description": "Override the `max_unacked` setting for audio channels. May improve audio performance on some head units but worsen it on others. Adjust experimentally only if you experience audio stuttering. 0 = leave unchanged."
+            },
+            "disable_media_sink": {
+              "typ": "boolean",
+              "description": "Disable the media sink. Prevents regular audio from being routed to the head unit (it stays on the phone), allowing a passenger to e.g. watch YouTube locally on the phone with audio."
+            },
+            "disable_tts_sink": {
+              "typ": "boolean",
+              "description": "Disable the TTS sink. Like `disable_media_sink`, but for navigation voice guidance."
+            }
+          }
         },
-        "inject_cluster_touch_height": {
-          "typ": "integer",
-          "description": "Cluster input touchscreen height when `inject_add_input_sources` is enabled."
+        {
+          "title": "🚦 Driving restrictions",
+          "requires": "mitm",
+          "values": {
+            "video_in_motion": {
+              "typ": "boolean",
+              "description": "Enable video playback while driving. Intended for passengers only — do not watch video while driving. May require `developer_mode` as well, depending on phone and Android version."
+            },
+            "remove_tap_restriction": {
+              "typ": "boolean",
+              "description": "Remove tap restrictions. Affects the situation where tapping too frequently while driving triggers a temporary lockout warning. May not work, depending on phone and Android version."
+            },
+            "collect_speed": {
+              "typ": "boolean",
+              "description": "Enable speed collection from the speed sensor for the websocket. By design this disables `remove_tap_restriction`."
+            },
+            "disable_driving_status": {
+              "typ": "boolean",
+              "description": "Disable driving restrictions.",
+              "advanced": true
+            }
+          }
         },
-        "inject_aux_display_id": {
-          "typ": "integer",
-          "description": "Display ID to use for injected auxiliary display services."
+        {
+          "title": "📊 Sensors",
+          "requires": "mitm",
+          "values": {
+            "odometer": {
+              "typ": "boolean",
+              "description": "Enable odometer sensor reporting (for head units that don't provide this data). When active, the current reading can be pushed via POST /odometer (km)."
+            },
+            "tire_pressure": {
+              "typ": "boolean",
+              "description": "Enable tire pressure sensor reporting (for head units that don't provide this data). When active, readings for up to 4 tires can be pushed via POST /tire-pressure (kPa, order: FL, FR, RL, RR)."
+            }
+          }
         },
-        "inject_aux_width_margin": {
-          "typ": "integer",
-          "description": "Auxiliary video width margin for injected display service."
+        {
+          "title": "⚡ Session & compatibility",
+          "requires": "mitm",
+          "values": {
+            "dpi": {
+              "typ": "integer",
+              "description": "Force DPI. 0 = don't change DPI. If unsure, start experimenting with e.g. 130. Logs are helpful — they show both the original HU value and the new one."
+            },
+            "add_vendor_channel": {
+              "typ": "boolean",
+              "description": "Add vendor channel for the Android companion app"
+            },
+            "developer_mode": {
+              "typ": "boolean",
+              "description": "Enable developer mode. Emulates a Google Head Unit, allowing installation and use of apps that are normally unavailable. Commonly used by developers when testing or developing new applications.",
+              "advanced": true
+            },
+            "remove_bluetooth": {
+              "typ": "boolean",
+              "description": "Remove the Bluetooth service from the `service discovery response`. May help on head units with integrated wireless Android Auto."
+            },
+            "remove_wifi": {
+              "typ": "boolean",
+              "description": "Remove the Wi-Fi service from the `service discovery response`. May help on head units with integrated wireless Android Auto."
+            },
+            "waze_lht_workaround": {
+              "typ": "boolean",
+              "description": "Enable a Waze workaround for LHT (Left-Hand Traffic) countries by swapping U_TURN_LEFT with U_TURN_RIGHT in navigation and HUD."
+            },
+            "stop_on_disconnect": {
+              "typ": "boolean",
+              "description": "Stop automatic reconnection after manually selecting `Disconnect` in Android Auto on the phone. aa-proxy will not attempt to reconnect until the next restart or until a Bluetooth connection is initiated manually from the phone."
+            },
+            "hu_button_handler": {
+              "typ": "string",
+              "description": "Path to a script or executable invoked on HU media-key long press.\nTwo arguments are always appended by aa-proxy-rs:\n  1. keycode (u32) — Android key code of the long-pressed key\n  2. elapsed_ms — how long the key was held, in milliseconds\nAdditional arguments embedded in the path are supported (shell-word splitting).\nWhen empty or absent, HU media-key interception is fully disabled.",
+              "advanced": true
+            }
+          }
         },
-        "inject_aux_height_margin": {
-          "typ": "integer",
-          "description": "Auxiliary video height margin for injected display service."
+        {
+          "title": "🖼️ SDR UI overrides",
+          "requires": "mitm",
+          "advanced": true,
+          "values": {
+            "sdr_ui_override_enabled": {
+              "typ": "boolean",
+              "description": "Enable per-vehicle SDR UI config overrides for `content_insets`, `stable_content_insets`, and `margins` in media sink video configs."
+            },
+            "sdr_ui_override_autocreate_profiles": {
+              "typ": "boolean",
+              "description": "Automatically create disabled SDR UI override profiles from the first observed ServiceDiscoveryResponse for each vehicle.",
+              "requires": "sdr_ui_override_enabled"
+            },
+            "sdr_ui_override_file": {
+              "typ": "string",
+              "description": "TOML file used to store per-vehicle and optional per-phone SDR UI overrides. Default: `/data/aa-proxy-rs/sdr-ui-overrides.toml`.",
+              "requires": "sdr_ui_override_enabled"
+            }
+          }
         },
-        "inject_aux_density": {
-          "typ": "integer",
-          "description": "Auxiliary display density (DPI) for injected display service."
+        {
+          "title": "🔌 EV routing",
+          "requires": "mitm",
+          "values": {
+            "ev": {
+              "typ": "boolean",
+              "description": "Enable EV routing"
+            },
+            "ev_battery_logger": {
+              "typ": "string",
+              "description": "Path to an executable that provides EV battery data (e.g. from an OBD dongle). Started automatically when an Android Auto session begins and terminated when it ends. Any parameters embedded in the path are passed as-is.",
+              "requires": "ev"
+            },
+            "ev_connector_types": {
+              "typ": "multi-select",
+              "description": "EV charging connector types supported by your car. If left empty, the default is EV_CONNECTOR_TYPE_MENNEKES.",
+              "values": [
+                "EV_CONNECTOR_TYPE_J1772",
+                "EV_CONNECTOR_TYPE_MENNEKES",
+                "EV_CONNECTOR_TYPE_CHADEMO",
+                "EV_CONNECTOR_TYPE_COMBO_1",
+                "EV_CONNECTOR_TYPE_COMBO_2",
+                "EV_CONNECTOR_TYPE_TESLA_SUPERCHARGER",
+                "EV_CONNECTOR_TYPE_GBT"
+              ],
+              "requires": "ev"
+            }
+          }
         },
-        "inject_aux_viewing_distance": {
-          "typ": "integer",
-          "description": "Auxiliary viewing distance for injected display service."
-        },
-        "inject_aux_touch_width": {
-          "typ": "integer",
-          "description": "Auxiliary input touchscreen width when `inject_add_input_sources` is enabled."
-        },
-        "inject_aux_touch_height": {
-          "typ": "integer",
-          "description": "Auxiliary input touchscreen height when `inject_add_input_sources` is enabled."
-        },
-        "stop_on_disconnect": {
-          "typ": "boolean",
-          "description": "Stop automatic reconnection after manually selecting `Disconnect` in Android Auto on the phone. aa-proxy will not attempt to reconnect until the next restart or until a Bluetooth connection is initiated manually from the phone."
-        },
-        "waze_lht_workaround": {
-          "typ": "boolean",
-          "description": "Enable a Waze workaround for LHT (Left-Hand Traffic) countries by swapping U_TURN_LEFT with U_TURN_RIGHT in navigation and HUD."
-        },
-        "odometer": {
-          "typ": "boolean",
-          "description": "Enable odometer sensor reporting (for head units that don't provide this data). Once active, the current reading can be pushed via POST /odometer (value in km)."
-        },
-        "collect_speed": {
-          "typ": "boolean",
-          "description": "Enable speed collection from speed sensor for web socket, this value disables `remove_tap_restriction` by design."
-        },
-        "disable_driving_status": {
-          "typ": "boolean",
-          "description": "Enable to disable driving restrictions."
-        },
-        "hu_button_handler": {
-          "typ": "string",
-          "description": "Path to a script or executable invoked on HU media-key long press.\nTwo arguments are always appended by aa-proxy-rs:\n  1. keycode (u32) — Android key code of the long-pressed key\n  2. elapsed_ms — how long the key was held, in milliseconds\nAdditional arguments embedded in the path are supported (shell-word splitting).\nWhen empty or absent, HU media-key interception is fully disabled.\nRequires `mitm = true`."
-        },
-        "tire_pressure": {
-          "typ": "boolean",
-          "description": "Enable tire pressure sensor reporting (for head units that don't provide this data). Once active, readings for up to 4 tires can be pushed via POST /tire-pressure (values in kPa, order: FL, FR, RL, RR)."
-        }
-      }
-    },
-    {
-      "title": "🔌 MITM/EV ROUTING CONFIGURATION",
-      "values": {
-        "ev": {
-          "typ": "boolean",
-          "description": "Enable EV routing"
-        },
-        "ev_battery_logger": {
-          "typ": "string",
-          "description": "Path to executable for providing EV battery data (e.g. from an OBD dongle). It is started automatically when an Android Auto session begins and terminated when the session ends.\nAny parameters provided at the end of the path are passed to the executable as-is."
-        },
-        "ev_connector_types": {
-          "typ": "multi-select",
-          "description": "List of EV connector types supported by your car. Select one or more values. If left empty, the default is EV_CONNECTOR_TYPE_MENNEKES.",
-          "values": [
-            "EV_CONNECTOR_TYPE_J1772",
-            "EV_CONNECTOR_TYPE_MENNEKES",
-            "EV_CONNECTOR_TYPE_CHADEMO",
-            "EV_CONNECTOR_TYPE_COMBO_1",
-            "EV_CONNECTOR_TYPE_COMBO_2",
-            "EV_CONNECTOR_TYPE_TESLA_SUPERCHARGER",
-            "EV_CONNECTOR_TYPE_GBT"
+        {
+          "title": "🎧 Call audio bridge (Bluetooth SCO)",
+          "requires": "mitm",
+          "values": {
+            "bt_sco": {
+              "typ": "boolean",
+              "description": "Enable the experimental Bluetooth SCO/eSCO call-audio bridge/listener."
+            },
+            "bt_sco_keep_bluetooth_alive": {
+              "typ": "boolean",
+              "description": "When `bt_sco` is enabled, keep the Android Auto Bluetooth profile / RFCOMM connection alive after Wi-Fi bootstrap so the phone continues routing call audio to aa-proxy-rs.",
+              "requires": "bt_sco"
+            }
+          },
+          "subsections": [
+            {
+              "title": "📥 Downlink → AA media",
+              "requires": "bt_sco",
+              "values": {
+                "bt_sco_media_bridge": {
+                  "typ": "boolean",
+                  "description": "Bridge Bluetooth SCO call downlink into a selected Android Auto PCM sink."
+                },
+                "bt_sco_media_bridge_audio_type": {
+                  "typ": "select",
+                  "description": "Preferred AA PCM sink for SCO downlink.",
+                  "values": ["guidance", "media", "auto"],
+                  "requires": "bt_sco_media_bridge"
+                },
+                "bt_sco_media_bridge_gain_percent": {
+                  "typ": "integer",
+                  "description": "SCO downlink output gain (percent) after conversion. 100 = no gain. Try 300 if call audio is quiet.",
+                  "requires": "bt_sco_media_bridge"
+                },
+                "bt_sco_media_bridge_limiter": {
+                  "typ": "select",
+                  "description": "Limiter applied after gain. `off` preserves the proven path; `hard` clips peaks earlier; `soft` compresses peaks more gently.",
+                  "values": ["off", "hard", "soft"],
+                  "requires": "bt_sco_media_bridge",
+                  "advanced": true
+                },
+                "bt_sco_media_bridge_resampler": {
+                  "typ": "select",
+                  "description": "SCO 8 kHz → AA 48 kHz resampler. `repeat` preserves the proven path; `linear` smooths the 6× upsampling and may reduce crackle.",
+                  "values": ["repeat", "linear"],
+                  "requires": "bt_sco_media_bridge",
+                  "advanced": true
+                },
+                "bt_sco_media_bridge_ring_capacity": {
+                  "typ": "integer",
+                  "description": "Maximum converted AA PCM chunks buffered for the SCO media bridge. 128 is a safe default; lower values reduce latency.",
+                  "requires": "bt_sco_media_bridge",
+                  "advanced": true
+                },
+                "bt_sco_media_bridge_start_existing": {
+                  "typ": "boolean",
+                  "description": "When SCO connects, send MEDIA_MESSAGE_START on the selected existing / configured PCM sink before piggyback DATA. Does not send CHANNEL_OPEN or SETUP.",
+                  "requires": "bt_sco_media_bridge",
+                  "advanced": true
+                },
+                "bt_sco_media_bridge_start_on_first_audio": {
+                  "typ": "boolean",
+                  "description": "Delay MEDIA_MESSAGE_START / DATA until the SCO downlink contains non-silent audio. Useful when SCO opens but initially carries silence.",
+                  "requires": "bt_sco_media_bridge"
+                },
+                "bt_sco_media_bridge_audio_peak_threshold": {
+                  "typ": "integer",
+                  "description": "Peak threshold for `start_on_first_audio`. Converted 16-bit PCM frames below this value are treated as silence. 64 is conservative.",
+                  "requires": ["bt_sco_media_bridge", "bt_sco_media_bridge_start_on_first_audio"],
+                  "advanced": true
+                },
+                "bt_sco_media_bridge_start_timeout_ms": {
+                  "typ": "integer",
+                  "description": "Fallback timeout for `start_on_first_audio`. If no non-silent SCO downlink is seen within this time, START / DATA begins anyway.",
+                  "requires": ["bt_sco_media_bridge", "bt_sco_media_bridge_start_on_first_audio"],
+                  "advanced": true
+                },
+                "bt_sco_media_bridge_stop_existing_on_disconnect": {
+                  "typ": "boolean",
+                  "description": "When SCO disconnects, send MEDIA_MESSAGE_STOP on the selected existing PCM sink. Useful to reset DHU/HU audio renderer state between calls.",
+                  "requires": "bt_sco_media_bridge",
+                  "advanced": true
+                },
+                "bt_sco_media_bridge_fixed_cadence": {
+                  "typ": "boolean",
+                  "description": "Pace outgoing AA DATA packets at a fixed cadence instead of sending immediately when converted SCO chunks arrive.",
+                  "requires": "bt_sco_media_bridge"
+                },
+                "bt_sco_media_bridge_cadence_ms": {
+                  "typ": "integer",
+                  "description": "DATA packet cadence in milliseconds when fixed cadence is enabled. 22 ms matches the current 6-SCO-packet chunk timing closely.",
+                  "requires": ["bt_sco_media_bridge", "bt_sco_media_bridge_fixed_cadence"],
+                  "advanced": true
+                },
+                "bt_sco_media_bridge_jitter_buffer_ms": {
+                  "typ": "integer",
+                  "description": "Minimum converted-audio buffer before the first fixed-cadence DATA packet. 60 ms is conservative.",
+                  "requires": ["bt_sco_media_bridge", "bt_sco_media_bridge_fixed_cadence"],
+                  "advanced": true
+                }
+              }
+            },
+            {
+              "title": "📤 AA mic → SCO uplink",
+              "requires": "bt_sco",
+              "values": {
+                "bt_sco_mic_bridge": {
+                  "typ": "boolean",
+                  "description": "Bridge Android Auto HU microphone PCM into Bluetooth SCO call uplink."
+                },
+                "bt_sco_mic_request": {
+                  "typ": "boolean",
+                  "description": "Send MEDIA_MESSAGE_MICROPHONE_REQUEST open/close when SCO connects/disconnects. Disable for passive mic logging only.",
+                  "requires": "bt_sco_mic_bridge"
+                },
+                "bt_sco_mic_gain_percent": {
+                  "typ": "integer",
+                  "description": "Microphone uplink gain percent after echo processing. 100 = no gain.",
+                  "requires": "bt_sco_mic_bridge"
+                },
+                "bt_sco_mic_echo_control": {
+                  "typ": "select",
+                  "description": "Microphone echo handling. `off` preserves current behavior; `ducking` lowers mic while downlink audio is active.",
+                  "values": ["off", "ducking"],
+                  "requires": "bt_sco_mic_bridge"
+                },
+                "bt_sco_mic_duck_threshold": {
+                  "typ": "integer",
+                  "description": "Downlink peak threshold that marks far-end audio as active for ducking.",
+                  "requires": {
+                    "field": "bt_sco_mic_echo_control",
+                    "equals": "ducking"
+                  }
+                },
+                "bt_sco_mic_duck_percent": {
+                  "typ": "integer",
+                  "description": "Mic gain percent while far-end / downlink audio is active. Lower values reduce echo more but hurt full-duplex speech.",
+                  "requires": {
+                    "field": "bt_sco_mic_echo_control",
+                    "equals": "ducking"
+                  }
+                },
+                "bt_sco_mic_duck_hold_ms": {
+                  "typ": "integer",
+                  "description": "How long to keep ducking after the last active downlink frame.",
+                  "requires": {
+                    "field": "bt_sco_mic_echo_control",
+                    "equals": "ducking"
+                  },
+                  "advanced": true
+                },
+                "bt_sco_mic_uplink_ring_capacity": {
+                  "typ": "integer",
+                  "description": "Maximum 60-byte SCO uplink packets buffered for the microphone bridge. 256 is a safe default.",
+                  "requires": "bt_sco_mic_bridge",
+                  "advanced": true
+                }
+              }
+            }
           ]
         }
-      }
+      ]
     },
     {
-      "title": "🧰 DEVELOPER OPTIONS",
+      "title": "⚙️ SYSTEM",
       "values": {
-        "dhu": {
+        "enable_ssh": {
           "typ": "boolean",
-          "description": "Use a Google Android Auto Desktop Head Unit emulator instead of real HU device (will listen on TCP 5277 port). For usage without a real SBC!"
+          "description": "Enable SSH server"
         },
-        "aa_server_tcp_addr": {
+        "webserver": {
           "typ": "string",
-          "description": "Optional direct TCP address for Android Auto Head Unit Server on the phone/MD side, for example 127.0.0.1:5278 or 192.168.1.9:5279. Leave empty to keep the normal USB/Bluetooth/Wi-Fi MD transport. When set, aa-proxy-rs skips the Bluetooth/Wi-Fi AA handshake and opens this TCP connection only after the HU/DHU side is ready. Also don't forget to run `socat TCP-LISTEN:5279,bind=0.0.0.0,reuseaddr,fork TCP:127.0.0.1:5278`"
+          "description": "Webserver bind address/port; empty = disabled"
+        },
+        "logfile": {
+          "typ": "string",
+          "description": "Log file path. By default it is saved to `/var/log` in `tmpfs`/memory. To save it to SD card (appended, not replaced), change it to e.g. `/data/aa-proxy-rs.log`."
+        },
+        "stats_interval": {
+          "typ": "integer",
+          "description": "Interval of showing data transfer statistics in the log (0 = disabled) [seconds]"
+        },
+        "timeout_secs": {
+          "typ": "integer",
+          "description": "Data transfer timeout [seconds]. After this idle time the session will be reconnected."
+        },
+        "crash_handler_enabled": {
+          "typ": "boolean",
+          "description": "Enable Rust panic report files. Normal runtime cost is negligible; stacktrace capture and file write happen only when a panic occurs."
+        },
+        "crash_dir": {
+          "typ": "string",
+          "description": "Directory where Rust panic reports are written with timestamped filenames. Default: `/data/aa-proxy-rs/crashes`.",
+          "requires": "crash_handler_enabled",
+          "advanced": true
         },
         "eth_mode": {
           "typ": "string",
-          "description": "Configure Ethernet mode (optional). Options:\n- `DHCP` (case-insensitive): dynamic IP assignment\n- Static IP: e.g. `192.168.100.1/24`\n- Leave blank to disable"
+          "description": "Configure Ethernet mode (optional). Options:\n- `DHCP` (case-insensitive): dynamic IP assignment\n- Static IP: e.g. `192.168.100.1/24`\n- Leave blank to disable",
+          "advanced": true
+        }
+      }
+    },
+    {
+      "title": "🧰 DEVELOPER",
+      "advanced": true,
+      "values": {
+        "dhu": {
+          "typ": "boolean",
+          "description": "Use a Google Android Auto Desktop Head Unit emulator instead of a real HU (listens on TCP 5277). For usage without a real SBC."
+        },
+        "aa_server_tcp_addr": {
+          "typ": "string",
+          "description": "Optional direct TCP address for the Android Auto Head Unit Server on the phone/MD side, e.g. `127.0.0.1:5278` or `192.168.1.9:5279`. Leave empty to keep the normal USB/Bluetooth/Wi-Fi MD transport. When set, aa-proxy-rs skips the Bluetooth/Wi-Fi AA handshake and opens this TCP connection only after the HU/DHU side is ready. Also don't forget to run `socat TCP-LISTEN:5279,bind=0.0.0.0,reuseaddr,fork TCP:127.0.0.1:5278`."
         },
         "usb_serial_console": {
           "typ": "boolean",
-          "description": "Enables the USB serial gadget (ttyGS0) for low-level console debugging. This should be disabled during normal Android Auto operation."
+          "description": "Enable the USB serial gadget (ttyGS0) for low-level console debugging. Should be disabled during normal Android Auto operation."
         }
       }
+    },
+    {
+      "title": "🐞 DEBUG",
+      "advanced": true,
+      "values": {
+        "debug": {
+          "typ": "boolean",
+          "description": "Enable global debug logging. This also enables many non-packet debug messages."
+        },
+        "disable_console_debug": {
+          "typ": "boolean",
+          "description": "Disable debug level on console; save it only to the log file. Helpful when using `hexdump_level`."
+        },
+        "hexdump_level": {
+          "typ": "select",
+          "description": "Hex dump level.",
+          "values": [
+            "Disabled",
+            "DecryptedInput",
+            "RawInput",
+            "DecryptedOutput",
+            "RawOutput",
+            "All"
+          ]
+        },
+        "pkt_debug": {
+          "typ": "boolean",
+          "description": "Enable packet debug output independently from global debug logging. When enabled, pkt_debug lines are emitted at INFO level, so `debug` can stay disabled to avoid unrelated debug noise."
+        },
+        "pkt_debug_filter_enabled": {
+          "typ": "boolean",
+          "description": "Enable packet debug filtering. This narrows pkt_debug output on top of `hexdump_level`.",
+          "requires": "pkt_debug"
+        }
+      },
+      "subsections": [
+        {
+          "title": "🔍 Packet debug filter",
+          "requires": "pkt_debug_filter_enabled",
+          "values": {
+            "pkt_debug_filter_proxy": {
+              "typ": "select",
+              "description": "Packet debug proxy filter.",
+              "values": ["both", "hu", "md"]
+            },
+            "pkt_debug_filter_stages": {
+              "typ": "multi-select",
+              "description": "Stages to include. Empty = all.",
+              "values": [
+                "raw_input",
+                "raw_output",
+                "decrypted_input",
+                "decrypted_output"
+              ]
+            },
+            "pkt_debug_filter_service_kinds": {
+              "typ": "multi-select",
+              "description": "Service kinds to filter. Empty = all.",
+              "values": [
+                "control",
+                "sensor_source",
+                "media_sink",
+                "input_source",
+                "media_source",
+                "bluetooth",
+                "radio",
+                "navigation_status",
+                "media_playback_status",
+                "phone_status",
+                "media_browser",
+                "vendor_extension",
+                "generic_notification",
+                "wifi_projection",
+                "car_property"
+              ]
+            },
+            "pkt_debug_filter_channels": {
+              "typ": "string",
+              "description": "Comma-separated numeric channel IDs to include. Empty = all. Examples: `0x00,0x08,8`.",
+              "advanced": true
+            },
+            "pkt_debug_filter_exclude_channels": {
+              "typ": "string",
+              "description": "Comma-separated numeric channel IDs to exclude. Examples: `0x01,1`.",
+              "advanced": true
+            },
+            "pkt_debug_filter_message_ids": {
+              "typ": "string",
+              "description": "Comma-separated numeric message IDs to include. Empty = all. Examples: `0x0006,6`.",
+              "advanced": true
+            },
+            "pkt_debug_filter_exclude_message_ids": {
+              "typ": "string",
+              "description": "Comma-separated numeric message IDs to exclude.",
+              "advanced": true
+            },
+            "pkt_debug_filter_pretty_proto": {
+              "typ": "boolean",
+              "description": "When packet debug filtering is enabled, also print decoded protobuf text for known control messages."
+            },
+            "pkt_debug_filter_max_payload_bytes": {
+              "typ": "integer",
+              "description": "When packet debug filtering is enabled, truncate payload dumps to this many bytes. 0 disables truncation.",
+              "advanced": true
+            }
+          }
+        }
+      ]
     }
   ]
 }
