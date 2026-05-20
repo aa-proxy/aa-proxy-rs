@@ -144,8 +144,13 @@
             "bluetooth",
             "radio",
             "navigation_status",
+            "media_playback_status",
+            "phone_status",
+            "media_browser",
             "vendor_extension",
-            "wifi_projection"
+            "generic_notification",
+            "wifi_projection",
+            "car_property"
           ]
         },
         "pkt_debug_filter_channels": {
