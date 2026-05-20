@@ -3,8 +3,9 @@ use crate::script_wasm::ScriptRegistry;
 #[cfg(not(feature = "wasm-scripting"))]
 type ScriptRegistry = ();
 use crate::mitm::{
-    MediaTapEndpointInfo, SharedCompanionIp, SharedMediaChannels, SharedMediaSinks,
-    SharedMediaTapEndpoints, SharedServiceDiscoveryResponse,
+    ensure_static_media_tap_listeners, static_media_tap_aux_slot_count, MediaTapEndpointInfo, SharedCompanionIp,
+    SharedMediaChannels, SharedMediaSinks, SharedMediaTapEndpoints,
+    SharedServiceDiscoveryResponse,
 };
 use crate::web::ServerEvent;
 use bytesize::ByteSize;
@@ -597,15 +598,27 @@ pub async fn io_loop(
     let mut dhu_listener = Some(TcpListener::bind(bind_addr).unwrap());
     info!("{} 🛰️ DHU TCP server bound to: <u>{}</u>", NAME, bind_addr);
 
-    // Shared media tap sink registry. TCP listeners are created lazily when the
-    // rewritten ServiceDiscoveryResponse is known, so audio ports follow the actual SDR.
-    let persistent_media_sinks: SharedMediaSinks = {
-        let config_snapshot = config.read().await.clone();
-        if config_snapshot.media_dump_base_port.is_some() && !config_snapshot.mitm {
-            error!("<red>media_dump_base_port is set but mitm = false — media tap disabled!</>");
-        }
-        Arc::new(Mutex::new(HashMap::new()))
+    // Shared media tap sink registry. Static tap listeners are opened immediately
+    // when media_dump_base_port is configured, then SDR processing binds channels
+    // to the fixed offsets as sinks become available.
+    let media_tap_startup_config = config.read().await.clone();
+    if media_tap_startup_config.media_dump_base_port.is_some() && !media_tap_startup_config.mitm {
+        error!("<red>media_dump_base_port is set but mitm = false — media tap disabled!</>");
+    }
+    let persistent_media_sinks: SharedMediaSinks = Arc::new(Mutex::new(HashMap::new()));
+    let startup_media_base_port = if media_tap_startup_config.mitm {
+        media_tap_startup_config.media_dump_base_port
+    } else {
+        None
     };
+    let startup_aux_tap_slots = static_media_tap_aux_slot_count(&media_tap_startup_config);
+    ensure_static_media_tap_listeners(
+        persistent_media_sinks.clone(),
+        startup_media_base_port,
+        media_tap_startup_config.media_wait_for_live_idr,
+        startup_aux_tap_slots,
+    )
+    .await;
     let persistent_media_channels: SharedMediaChannels = Arc::new(Mutex::new(HashMap::new()));
 
     loop {
