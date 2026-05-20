@@ -1,0 +1,1338 @@
+:root {
+    --pico-primary: var(--accent);
+    --pico-primary-hover: #15d6c1;
+    --pico-primary-focus: var(--accent-glow);
+    --pico-background-color: transparent;
+    --dash-bg: #0a0e14;
+    --card-bg: rgba(17, 24, 39, 0.7);
+    --accent: #14b8a6;
+    --accent-glow: rgba(20, 184, 166, 0.4);
+    --border: rgba(20, 184, 166, 0.15);
+    --rail-width: 80px;
+    --field-border: rgba(255, 255, 255, 0.05);
+}
+
+html {
+    font-size: 16px !important;
+}
+
+body {
+    background: radial-gradient(circle at top left, #0e1720, #0a0e14 70%);
+    background-attachment: fixed;
+    color: #e6edf3;
+    min-height: 100vh;
+    display: flex;
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, "Fira Sans", "Droid Sans", "Helvetica Neue", sans-serif;
+    margin: 0;
+}
+
+.action-rail {
+    width: var(--rail-width);
+    height: 100vh;
+    background: linear-gradient(180deg, rgba(17, 24, 39, 0.8) 0%, rgba(10, 12, 18, 0.9) 100%);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border-right: 1px solid var(--border);
+    position: fixed;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 1rem 0;
+    z-index: 1000;
+    gap: 0.6rem;
+    /* `min-height: 0` allows vertical compaction on short viewports.
+       Do NOT set `overflow: hidden` here — the `.rail-btn::after` tooltip
+       sits outside the rail's width and would be clipped. */
+    min-height: 0;
+}
+
+/* Allow the bottom-group spacer to shrink so its `flex: 1` doesn't push
+   the bottom group off-screen when the rail can't fit all buttons. */
+.action-rail > div[style*="flex: 1"] {
+    flex-shrink: 1;
+    min-height: 0;
+}
+
+.rail-brand {
+    font-size: 1.8rem;
+    margin-bottom: 0;
+    filter: drop-shadow(0 4px 6px rgba(0, 0, 0, 0.5));
+    user-select: none;
+    line-height: 1;
+}
+
+.logo-img {
+    height: 1em;
+    width: auto;
+    vertical-align: text-bottom;
+}
+
+.rail-separator {
+    width: 40px;
+    height: 1px;
+    background: linear-gradient(90deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0.1) 50%, rgba(255, 255, 255, 0) 100%);
+    margin-bottom: 0.5rem;
+}
+
+.rail-btn {
+    width: 50px;
+    height: 50px;
+    border-radius: 14px;
+    border: 1px solid rgba(20, 184, 166, 0.2);
+    background: linear-gradient(145deg, rgba(255, 255, 255, 0.05) 0%, rgba(255, 255, 255, 0.01) 100%);
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    position: relative;
+    font-size: 1.3rem;
+    color: rgba(255, 255, 255, 0.7);
+    margin: 0 !important;
+}
+
+.rail-btn:hover {
+    border-color: rgba(20, 184, 166, 0.6);
+    background: linear-gradient(145deg, rgba(20, 184, 166, 0.1) 0%, rgba(20, 184, 166, 0.02) 100%);
+    transform: scale(1.05) translateY(-1px);
+    box-shadow: 0 6px 12px rgba(0, 0, 0, 0.3);
+}
+
+.rail-btn:active {
+    transform: scale(0.97);
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.4), inset 0 2px 4px rgba(0, 0, 0, 0.5);
+    background: rgba(0, 0, 0, 0.2);
+    border-color: rgba(255, 255, 255, 0.05);
+}
+
+.rail-btn::after {
+    content: attr(data-label);
+    position: absolute;
+    left: 75px;
+    background: rgba(0, 0, 0, 0.8);
+    backdrop-filter: blur(8px);
+    padding: 8px 14px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    font-size: 0.8rem;
+    white-space: nowrap;
+    opacity: 0;
+    pointer-events: none;
+    transform: translateX(-15px) scale(0.95);
+    box-shadow: 0 8px 16px rgba(0, 0, 0, 0.5);
+    z-index: 10;
+}
+
+.rail-btn:hover::after {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+}
+
+.main-content {
+    margin-left: var(--rail-width);
+    flex: 1;
+    padding: 3rem 2rem;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}
+
+.dashboard-header {
+    width: 100%;
+    max-width: 1100px;
+    margin-bottom: 2.5rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+}
+
+.dashboard-header .title {
+    font-size: 2rem;
+    font-weight: 700;
+    margin: 0;
+    letter-spacing: -0.02em;
+    line-height: 1;
+}
+
+.dashboard-header .title .logo-img {
+    height: 1.5em;
+    /* 25% larger than the text */
+    vertical-align: middle;
+    margin-right: 0.2rem;
+}
+
+.build-tags {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.tag-base {
+    padding: 0.2rem 0.6rem;
+    border-radius: 6px;
+    font-size: 0.8rem;
+    color: #9ca3af;
+}
+
+.tag-build {
+    background: rgba(156, 163, 175, 0.1);
+    border: 1px solid rgba(156, 163, 175, 0.25);
+}
+
+.tag-build .val {
+    color: #fbbf24;
+    font-weight: 500;
+}
+
+.tag-git {
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+.tag-git .val {
+    color: #38bdf8;
+    font-weight: 500;
+}
+
+#config-form {
+    width: 100%;
+    max-width: 1100px;
+}
+
+input[type="number"] {
+    -moz-appearance: textfield;
+    appearance: textfield;
+}
+
+.config-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 2.5rem;
+}
+
+.config-card-wrapper {
+    position: relative;
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.3);
+    margin-bottom: 0;
+    z-index: 1;
+}
+
+/* The wrapper has its own stacking context (so `.card-glass-bg` can sit
+   at z-index: -1 without dropping behind the page). Absolute dropdowns
+   inside the card can't paint over later siblings without lifting the
+   wrapper itself. */
+.config-card-wrapper:has(details.single-select[open]),
+.config-card-wrapper:has(.multi-select-menu:not([hidden])) {
+    z-index: 50;
+}
+
+.card-glass-bg {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.04) 0px, rgba(255, 255, 255, 0) 80px), var(--card-bg);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border-radius: 19px;
+    overflow: hidden;
+    clip-path: inset(0 round 19px);
+    -webkit-clip-path: inset(0 round 19px);
+    mask-image: radial-gradient(white, black);
+    -webkit-mask-image: -webkit-radial-gradient(white, black);
+    z-index: -1;
+    pointer-events: none;
+}
+
+details.config-card {
+    background: transparent;
+    border: none;
+    margin: 0;
+    position: relative;
+}
+
+summary.card-header {
+    background: transparent;
+    border-bottom: 1px solid var(--border);
+    padding: 1.25rem 2rem;
+    cursor: pointer;
+    list-style: none;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-radius: 19px 19px 0 0;
+    outline: none;
+}
+
+summary.card-header::-webkit-details-marker {
+    display: none;
+}
+
+details.config-card:not([open]) summary.card-header {
+    border-bottom: none;
+    border-radius: 19px;
+}
+
+.card-header-title {
+    color: #fff !important;
+    font-size: 1.1rem !important;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    margin: 0;
+}
+
+summary.card-header::after {
+    content: '▼';
+    background-image: none !important;
+    font-size: 0.8rem;
+    color: rgba(255, 255, 255, 0.5);
+    transform: none !important;
+}
+
+details[open] summary.card-header::after {
+    content: '▲';
+    transform: none !important;
+}
+
+.card-content {
+    padding: 0 2rem;
+}
+
+.config-field {
+    padding: 1.5rem 0;
+    border-bottom: 1px solid var(--field-border);
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: flex-start !important;
+    justify-content: space-between !important;
+    gap: 2rem;
+    width: 100%;
+}
+
+.config-field:last-child {
+    border-bottom: none;
+}
+
+.field-info {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: block !important;
+    text-align: left !important;
+}
+
+.field-label {
+    color: var(--accent) !important;
+    font-weight: 600 !important;
+    font-size: 1.05rem !important;
+    margin-bottom: 0.4rem !important;
+    font-family: monospace !important;
+    text-align: left !important;
+    display: block !important;
+    width: 100% !important;
+    /* Wrap long monospace keys so they don't force horizontal overflow
+       on narrow viewports. */
+    overflow-wrap: anywhere;
+}
+
+.field-desc {
+    color: #8b949e;
+    font-size: 0.9rem;
+    line-height: 1.6;
+    text-align: left !important;
+    display: block !important;
+    overflow-wrap: anywhere;
+}
+
+.desc-list {
+    margin-left: 1rem;
+    margin-top: 0.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+}
+
+.field-desc code {
+    background: rgba(255, 255, 255, 0.05);
+    padding: 0.1rem 0.3rem;
+    border-radius: 4px;
+    font-size: 0.85em;
+    color: #60a5fa !important;
+}
+
+.control-wrap {
+    flex: 0 0 220px !important;
+    width: 100%;
+    max-width: 220px;
+    display: flex !important;
+    justify-content: flex-end !important;
+    align-items: flex-start !important;
+}
+
+input:not([type="checkbox"]),
+.single-select summary,
+.multi-select summary {
+    background-color: rgba(0, 0, 0, 0.2) !important;
+    border: 1px solid rgba(20, 184, 166, 0.2) !important;
+    color: #fff !important;
+    border-radius: 10px !important;
+    font-size: 0.95rem !important;
+    padding: 0.5rem 1rem !important;
+    box-sizing: border-box !important;
+    margin-bottom: 0 !important;
+}
+
+input:not([type="checkbox"]) {
+    box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.1) !important;
+    width: 100%;
+    max-width: 220px;
+}
+
+input:not([type="checkbox"]):hover,
+input[type="checkbox"]:not(.multi-select-dropdown input):hover,
+.single-select:hover summary,
+.multi-select:hover summary {
+    border-color: rgba(20, 184, 166, 0.6) !important;
+}
+
+input:not([type="checkbox"]):focus {
+    background-color: rgba(0, 0, 0, 0.4) !important;
+    border-color: var(--accent) !important;
+    box-shadow: 0 0 0 3px rgba(20, 184, 166, 0.2) !important;
+}
+
+input[type="checkbox"]:not(.multi-select-dropdown input) {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 44px;
+    height: 24px;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 24px;
+    position: relative;
+    cursor: pointer;
+    outline: none;
+    box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.3);
+    margin: 0;
+    flex-shrink: 0;
+    border: none !important;
+}
+
+input[type="checkbox"]:not(.multi-select-dropdown input):hover {
+    background: rgba(255, 255, 255, 0.15);
+    box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.3), 0 0 8px rgba(255, 255, 255, 0.05);
+}
+
+input[type="checkbox"]:not(.multi-select-dropdown input)::after {
+    content: '';
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 20px;
+    height: 20px;
+    background: #fff;
+    border-radius: 50%;
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
+}
+
+input[type="checkbox"]:not(.multi-select-dropdown input):checked {
+    background: var(--accent);
+    box-shadow: 0 0 12px var(--accent-glow);
+}
+
+input[type="checkbox"]:not(.multi-select-dropdown input):checked:hover {
+    background: #15d6c1;
+    box-shadow: 0 0 16px var(--accent-glow);
+}
+
+input[type="checkbox"]:not(.multi-select-dropdown input):checked::after {
+    transform: translateX(20px);
+}
+
+.single-select,
+.multi-select {
+    width: 100%;
+    position: relative;
+    margin-bottom: 0 !important;
+}
+
+.single-select summary,
+.multi-select summary {
+    list-style: none;
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.single-select summary::after,
+.multi-select summary::after {
+    content: '▼';
+    background-image: none !important;
+    font-size: 0.7em;
+    color: var(--accent);
+    transform: none !important;
+}
+
+.single-select[open] summary::after,
+.multi-select[open] summary::after {
+    content: '▲';
+    transform: none !important;
+}
+
+.single-select-dropdown,
+.multi-select-dropdown {
+    position: absolute;
+    top: calc(100% + 5px);
+    left: 0;
+    right: 0;
+    background: var(--dash-bg);
+    border: 1px solid rgba(20, 184, 166, 0.3);
+    border-radius: 10px;
+    z-index: 100;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+    max-height: 250px;
+    overflow-y: auto;
+    text-align: left;
+}
+
+.single-select-dropdown {
+    padding: 0.5rem;
+    gap: 0.2rem;
+}
+
+.multi-select-dropdown {
+    padding: 0.75rem;
+    gap: 0.6rem;
+}
+
+.single-select-option {
+    padding: 0.5rem 0.75rem;
+    color: #e6edf3;
+    font-size: 0.9rem;
+    cursor: pointer;
+    border-radius: 6px;
+}
+
+.single-select-option:hover {
+    background: rgba(20, 184, 166, 0.15);
+}
+
+.single-select-option.selected {
+    background: rgba(20, 184, 166, 0.25);
+    color: #fff;
+    font-weight: bold;
+}
+
+.single-select-option.disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    pointer-events: none;
+    background: rgba(255, 255, 255, 0.05) !important;
+}
+
+.multi-select-dropdown label {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    color: #e6edf3;
+    font-size: 0.9rem;
+    cursor: pointer;
+}
+
+.multi-select-dropdown input[type="checkbox"] {
+    appearance: auto !important;
+    -webkit-appearance: auto !important;
+    width: 16px !important;
+    height: 16px !important;
+    background: none !important;
+    border-radius: 2px !important;
+    box-shadow: none !important;
+    cursor: pointer;
+    margin: 0;
+}
+
+.multi-select-dropdown input[type="checkbox"]::after {
+    display: none !important;
+}
+
+@media (max-width: 900px) {
+    html, body {
+        /* Suppress any stray horizontal page scroll on phones; the rail and
+           cards constrain their own widths below. */
+        overflow-x: hidden;
+    }
+
+    .action-rail {
+        width: 100%;
+        height: 70px;
+        top: 0;
+        bottom: auto;
+        flex-direction: row;
+        /* Keep every rail-btn at its natural 44px size and let the rail
+           scroll horizontally to expose buttons that don't fit. */
+        justify-content: flex-start;
+        gap: 0.3rem;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+        border-top: none;
+        padding: 0 0.4rem;
+        overflow-x: auto;
+        overflow-y: hidden;
+        box-sizing: border-box;
+        scrollbar-width: thin;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    .rail-brand,
+    .rail-separator,
+    .action-rail>div[style="flex: 1"] {
+        display: none !important;
+    }
+
+    .main-content {
+        margin-left: 0;
+        margin-bottom: 0;
+        margin-top: 80px;
+        padding: 1rem 0.9rem;
+        min-width: 0;
+        max-width: 100%;
+    }
+
+    .rail-btn {
+        flex: 0 0 auto;
+        width: 44px;
+        min-width: 44px;
+        max-width: 44px;
+        height: 44px;
+        font-size: 1.2rem;
+    }
+
+    .rail-advanced {
+        flex: 0 0 auto;
+        margin: 0;
+    }
+
+    .rail-btn::after {
+        display: none;
+    }
+
+    .config-field {
+        padding: 1.25rem 0;
+        gap: 0.75rem;
+        flex-direction: column !important;
+        align-items: flex-start !important;
+    }
+
+    .control-wrap {
+        width: 100% !important;
+        max-width: 100% !important;
+        flex: 0 0 auto !important;
+        justify-content: flex-start !important;
+    }
+
+    input.input,
+    .styled-select {
+        max-width: 100%;
+        width: 100%;
+    }
+
+    input:not([type="checkbox"]) {
+        max-width: 100%;
+    }
+
+    .card-content {
+        padding: 0 0.9rem;
+    }
+
+    summary.card-header {
+        padding: 1rem 0.9rem;
+    }
+
+    .dashboard-header {
+        padding: 0 0.25rem 0.5rem;
+    }
+}
+
+/* ============================================================
+   CONTROLLER PANEL
+   Styled to match the dashboard's card aesthetic: dark inputs,
+   accent border, subtle glow on hover.
+   ============================================================ */
+
+.controller-layout {
+    display: grid;
+    gap: 0.75rem;
+    grid-template-columns: repeat(1, minmax(0, 1fr));
+}
+
+.controller-columns {
+    display: grid;
+    gap: 0.75rem;
+    grid-template-columns: repeat(1, minmax(0, 1fr));
+}
+
+.keypad-grid {
+    display: grid;
+    gap: 0.35rem;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.dpad-grid {
+    display: grid;
+    gap: 0.35rem;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    justify-items: stretch;
+}
+
+/* All dpad buttons stretch to fill their grid cell so the arrow keys
+   match the width of the phone-keypad buttons next to them. */
+.dpad-grid > button {
+    width: 100%;
+}
+
+.dpad-center {
+    min-width: unset;
+}
+
+.wide-grid {
+    display: grid;
+    gap: 0.35rem;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+/* Small accent-coloured group label above each keypad / dpad / wide
+   grid. Replaces the default <p><strong>…</strong></p> look. */
+.controller-drawer-body p {
+    margin: 0 0 0.4rem;
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--accent);
+}
+.controller-drawer-body p strong {
+    font-weight: inherit;
+}
+
+/* Button visual language matches the dashboard's text inputs:
+   dark fill, accent border, accent glow on hover. `margin: 0` overrides
+   Pico's default `margin-bottom` so rows don't pick up ~1rem of spacing. */
+.controller-drawer-body button {
+    background-color: rgba(0, 0, 0, 0.2);
+    border: 1px solid rgba(20, 184, 166, 0.2);
+    color: #fff;
+    border-radius: 8px;
+    padding: 0.65rem 0.75rem;
+    margin: 0;
+    font-size: 1rem;
+    line-height: 1;
+    cursor: pointer;
+    transition: border-color 120ms ease, background-color 120ms ease, box-shadow 120ms ease;
+}
+
+.controller-drawer-body button:hover {
+    border-color: var(--accent);
+    background-color: rgba(20, 184, 166, 0.08);
+    box-shadow: 0 0 0 3px rgba(20, 184, 166, 0.12);
+}
+
+.controller-drawer-body button:active {
+    background-color: rgba(20, 184, 166, 0.15);
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.4);
+    transform: translateY(1px);
+}
+
+/* Empty spacers in the dpad grid shouldn't take button visual space. */
+.dpad-grid > span {
+    display: block;
+}
+
+@media (min-width: 900px) {
+    .controller-columns {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+/* ============================================================
+   ACTION RAIL — height-responsive compaction
+   Keep every rail button visible on shorter viewports (e.g. a
+   15.6" laptop browser window) by shrinking the gap, padding,
+   and button size as the available height shrinks. The
+   .rail-separator is the first thing to drop.
+   ============================================================ */
+
+@media (max-height: 820px) {
+    .action-rail {
+        gap: 0.45rem;
+        padding: 0.75rem 0;
+    }
+
+    .rail-separator {
+        display: none;
+    }
+
+    .rail-btn {
+        width: 44px;
+        height: 44px;
+        font-size: 1.15rem;
+        border-radius: 12px;
+    }
+}
+
+@media (max-height: 680px) {
+    .action-rail {
+        gap: 0.3rem;
+        padding: 0.5rem 0;
+    }
+
+    .rail-btn {
+        width: 38px;
+        height: 38px;
+        font-size: 1rem;
+        border-radius: 10px;
+    }
+}
+
+/* ============================================================
+   CONTROLLER PANEL DRAWER
+   The controller panel lives in a fixed-position aside that
+   slides in from the right edge when toggled from the rail
+   button. Hidden by default; gains .open via JS.
+   ============================================================ */
+
+.controller-drawer {
+    position: fixed;
+    top: 0;
+    left: var(--rail-width);
+    right: auto;
+    height: 100vh;
+    width: min(440px, calc(92vw - var(--rail-width)));
+    background: linear-gradient(180deg, rgba(17, 24, 39, 0.95) 0%, rgba(10, 12, 18, 0.97) 100%);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border-right: 1px solid var(--border);
+    box-shadow: 16px 0 40px rgba(0, 0, 0, 0.5);
+    /* Closed position: shifted off-screen past the rail's left edge.
+       `translateX(-100%)` alone would leave the rightmost `--rail-width`
+       pixels still overlapping the rail; subtracting it clears the rail. */
+    transform: translateX(calc(-100% - var(--rail-width)));
+    transition: transform 0.25s ease;
+    /* Below the rail (z:1000) so the drawer slides out from behind it;
+       above the scrim (z:900) so its content stays visible when open. */
+    z-index: 950;
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+}
+
+.controller-drawer.open {
+    transform: translateX(0);
+}
+
+/* Narrow viewport: the rail is a top bar (see its own @media block).
+   The drawer goes full-width and slides down from behind it. */
+@media (max-width: 900px) {
+    .controller-drawer {
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: auto;
+        width: 100%;
+        height: 100vh;
+        /* Keep drawer content below the top-fixed rail. */
+        padding-top: 70px;
+        border-right: none;
+        border-left: none;
+        border-bottom: 1px solid var(--border);
+        box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5);
+        /* Closed: shifted off-screen above the viewport. */
+        transform: translateY(-100%);
+    }
+
+    .controller-drawer.open {
+        transform: translateY(0);
+    }
+
+    /* Scrim covers main content, leaving the rail interactive. */
+    .drawer-scrim {
+        top: 70px;
+        left: 0;
+    }
+}
+
+.controller-drawer-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1rem 1.25rem;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+
+.controller-drawer-title {
+    font-size: 1.05rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    color: #fff;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.controller-drawer-close {
+    background: transparent;
+    border: none;
+    color: rgba(255, 255, 255, 0.6);
+    font-size: 1.5rem;
+    cursor: pointer;
+    padding: 0.25rem 0.6rem;
+    border-radius: 8px;
+    line-height: 1;
+}
+
+.controller-drawer-close:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: #fff;
+}
+
+.controller-drawer-body {
+    padding: 1.25rem;
+    overflow-y: auto;
+}
+
+/* Dim the page behind the open drawer to focus attention and
+   intercept clicks outside it. Covers the main content area only —
+   not the rail — so the rail stays interactive while the drawer is
+   open and the slide-from-behind-rail effect remains uninterrupted. */
+.drawer-scrim {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: var(--rail-width);
+    background: rgba(0, 0, 0, 0.45);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease;
+    z-index: 900;
+}
+
+.drawer-scrim.open {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+/* When the drawer is open, highlight the rail toggle. */
+.rail-btn.drawer-toggle.open {
+    border-color: var(--accent);
+    color: #fff;
+    background: linear-gradient(145deg, rgba(20, 184, 166, 0.18) 0%, rgba(20, 184, 166, 0.04) 100%);
+}
+
+/* ============================================================
+   SUB-SECTIONS (nested cards)
+   Top-level `.config-card` keeps its existing glass look. Nested
+   `.config-card.sub-card` reads as a recessed pane carved into the
+   parent: slightly darker background, gentle inset shadow at the
+   top to suggest depth, smaller header, and a tighter border-radius
+   that establishes a clean visual hierarchy from outer card (20px)
+   → sub-card (12px) → sub-sub-card (8px via .sub-card .sub-card).
+   ============================================================ */
+
+.sub-section-host {
+    margin: 1.25rem 0;
+}
+
+/* Match the 1.5rem bottom padding that `.card-content` gives the last
+   `.config-field` in sections without subsections. */
+.sub-section-host:last-child {
+    margin-bottom: 1.5rem;
+}
+
+.config-card.sub-card {
+    background: linear-gradient(180deg, rgba(0, 0, 0, 0.22) 0%, rgba(0, 0, 0, 0.10) 100%);
+    border: 1px solid rgba(255, 255, 255, 0.04);
+    border-radius: 12px;
+    box-shadow:
+        inset 0 1px 2px rgba(0, 0, 0, 0.35),
+        0 1px 0 rgba(255, 255, 255, 0.025);
+    margin: 0;
+}
+
+.config-card.sub-card > summary.card-header {
+    padding: 0.7rem 1.1rem;
+    border-bottom: 1px solid var(--field-border);
+    border-radius: 12px 12px 0 0;
+}
+
+.config-card.sub-card:not([open]) > summary.card-header {
+    border-bottom: none;
+    border-radius: 12px;
+}
+
+.config-card.sub-card > summary.card-header:hover {
+    background: rgba(255, 255, 255, 0.02);
+}
+
+.config-card.sub-card > summary.card-header .card-header-title {
+    font-size: 0.92rem !important;
+    color: rgba(255, 255, 255, 0.85) !important;
+    letter-spacing: 0.04em;
+    text-transform: none;
+}
+
+.config-card.sub-card > summary.card-header::after {
+    font-size: 0.7rem;
+    color: rgba(255, 255, 255, 0.4);
+}
+
+.config-card.sub-card > .card-content {
+    padding: 0.25rem 1.1rem 0.75rem;
+}
+
+/* Sub-sub-card (depth ≥ 2, e.g. Cluster display / Auxiliary display
+   inside MITM → Display injection). One step further recessed so
+   the hierarchy stays readable without becoming visually busy. */
+.config-card.sub-card .config-card.sub-card {
+    background: linear-gradient(180deg, rgba(0, 0, 0, 0.35) 0%, rgba(0, 0, 0, 0.18) 100%);
+    border-radius: 8px;
+    box-shadow:
+        inset 0 1px 3px rgba(0, 0, 0, 0.5),
+        0 1px 0 rgba(255, 255, 255, 0.02);
+}
+
+.config-card.sub-card .config-card.sub-card > summary.card-header {
+    padding: 0.55rem 0.9rem;
+    border-radius: 8px 8px 0 0;
+}
+
+.config-card.sub-card .config-card.sub-card:not([open]) > summary.card-header {
+    border-radius: 8px;
+}
+
+.config-card.sub-card .config-card.sub-card > summary.card-header .card-header-title {
+    font-size: 0.85rem !important;
+    color: rgba(255, 255, 255, 0.78) !important;
+}
+
+.config-card.sub-card .config-card.sub-card > .card-content {
+    padding: 0.25rem 0.9rem 0.6rem;
+}
+
+/* The sub-section's outer wrapper should NOT paint its own card-glass
+   background — that styling is for top-level cards only. */
+.sub-section-host > .config-card-wrapper {
+    border: none;
+    box-shadow: none;
+    border-radius: 0;
+}
+.sub-section-host > .config-card-wrapper > .card-glass-bg {
+    display: none;
+}
+
+/* ============================================================
+   ADVANCED VISIBILITY
+   Fields and sections marked data-advanced="true" stay in the DOM
+   but are hidden unless <body> carries `.show-advanced`. The
+   "Show advanced" toggle in the action rail flips that body class.
+   ============================================================ */
+
+[data-advanced="true"] {
+    display: none !important;
+}
+
+body.show-advanced [data-advanced="true"] {
+    display: revert !important;
+}
+
+/* `.config-field` declares `display: flex` on the class itself, so the
+   `revert` above doesn't restore it. Re-assert it explicitly. */
+body.show-advanced .config-field[data-advanced="true"] {
+    display: flex !important;
+}
+
+/* ============================================================
+   REQUIRES — disabled state
+   When a field/section's `data-requires*` predicates are not met,
+   JS sets `data-requires-met="false"` on the element. The element
+   stays visible (discoverable) but is greyed out and non-interactive.
+   ============================================================ */
+
+[data-requires-met="false"] {
+    opacity: 0.45;
+    filter: grayscale(0.4);
+    pointer-events: none;
+    user-select: none;
+}
+
+[data-requires-met="false"] input,
+[data-requires-met="false"] select,
+[data-requires-met="false"] textarea,
+[data-requires-met="false"] button,
+[data-requires-met="false"] details {
+    pointer-events: none;
+}
+
+/* ============================================================
+   ACTION RAIL — "Show advanced" toggle switch
+   A small inline switch placed in the rail. Use a checkbox-as-switch
+   pattern reusing the existing toggle visual language. The label is
+   the word "Adv" in small uppercase below the switch.
+   ============================================================ */
+
+.rail-advanced {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.25rem;
+    margin: 0.75rem 0 0;
+}
+
+.rail-advanced .rail-switch {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 38px;
+    height: 22px;
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(20, 184, 166, 0.2);
+    border-radius: 22px;
+    position: relative;
+    cursor: pointer;
+    outline: none;
+    box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.3);
+    margin: 0;
+}
+
+.rail-advanced .rail-switch:hover {
+    border-color: rgba(20, 184, 166, 0.6);
+}
+
+.rail-advanced .rail-switch::after {
+    content: '';
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 16px;
+    height: 16px;
+    background: #fff;
+    border-radius: 50%;
+    transition: transform 0.2s ease;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+.rail-advanced .rail-switch:checked {
+    background: var(--accent);
+    box-shadow: 0 0 12px var(--accent-glow);
+}
+
+.rail-advanced .rail-switch:checked::after {
+    transform: translateX(16px);
+}
+
+.rail-advanced .rail-advanced-label {
+    font-size: 0.6rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: rgba(255, 255, 255, 0.55);
+    user-select: none;
+    line-height: 1;
+}
+
+body.show-advanced .rail-advanced .rail-advanced-label {
+    color: var(--accent);
+}
+
+/* ============================================================
+   MULTI-SELECT CHIP WIDGET
+   The renderer emits `<select multiple>`; `enhanceMultiSelects()` in
+   index.html progressively enhances it into the chip-based dropdown
+   styled by these classes.
+   ============================================================ */
+
+.multi-select-native {
+    display: none !important;
+}
+
+.multi-select-widget {
+    position: relative;
+    width: 100%;
+}
+
+.multi-select-control {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    min-height: 2.6rem;
+    width: 100%;
+    padding: 0.35rem 0.45rem;
+    background-color: rgba(0, 0, 0, 0.2);
+    border: 1px solid rgba(20, 184, 166, 0.2);
+    border-radius: 10px;
+    color: #fff;
+    cursor: pointer;
+    box-sizing: border-box;
+}
+
+.multi-select-control:hover {
+    border-color: rgba(20, 184, 166, 0.6);
+}
+
+.multi-select-control:focus,
+.multi-select-control:focus-within {
+    background-color: rgba(0, 0, 0, 0.4);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(20, 184, 166, 0.2);
+    outline: none;
+}
+
+.multi-select-chips {
+    display: flex;
+    flex: 1;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.35rem;
+    min-width: 0;
+}
+
+.multi-select-placeholder {
+    color: rgba(255, 255, 255, 0.4);
+    padding-inline: 0.25rem;
+    font-size: 0.9rem;
+}
+
+.multi-select-chip {
+    display: inline-flex;
+    align-items: center;
+    max-width: 100%;
+    gap: 0.35rem;
+    padding: 0.15rem 0.45rem;
+    border-radius: 999px;
+    background: rgba(20, 184, 166, 0.18);
+    border: 1px solid rgba(20, 184, 166, 0.3);
+    color: #fff;
+    font-size: 0.85rem;
+    line-height: 1.45;
+}
+
+.multi-select-chip-label {
+    max-width: 18rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.multi-select-chip-remove {
+    width: 1.15rem;
+    height: 1.15rem;
+    min-width: 1.15rem;
+    padding: 0;
+    margin: 0;
+    border: 0;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.16);
+    color: #fff;
+    font-size: 0.85rem;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.multi-select-chip-remove:hover,
+.multi-select-chip-remove:focus-visible {
+    background: rgba(255, 255, 255, 0.28);
+}
+
+.multi-select-toggle {
+    width: 2rem;
+    min-width: 2rem;
+    padding: 0.25rem;
+    margin: 0;
+    border: 0;
+    background: transparent;
+    color: rgba(255, 255, 255, 0.5);
+    box-shadow: none;
+    cursor: pointer;
+}
+
+.multi-select-menu {
+    position: absolute;
+    z-index: 10000;
+    top: calc(100% + 0.25rem);
+    left: 0;
+    right: 0;
+    max-height: 18rem;
+    overflow: auto;
+    padding: 0.35rem;
+    border: 1px solid rgba(20, 184, 166, 0.3);
+    border-radius: 10px;
+    background: var(--dash-bg);
+    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+}
+
+.multi-select-menu .multi-select-option {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    width: 100%;
+    padding: 0.35rem 0.45rem;
+    margin: 0;
+    border-radius: 6px;
+    cursor: pointer;
+    color: #e6edf3;
+    font-size: 0.9rem;
+}
+
+.multi-select-menu .multi-select-option:hover {
+    background: rgba(20, 184, 166, 0.15);
+}
+
+.multi-select-menu .multi-select-option input[type="checkbox"] {
+    appearance: auto !important;
+    -webkit-appearance: auto !important;
+    width: 16px !important;
+    height: 16px !important;
+    background: none !important;
+    border-radius: 2px !important;
+    box-shadow: none !important;
+    cursor: pointer;
+    margin: 0;
+    flex-shrink: 0;
+}
+
+.multi-select-menu .multi-select-option input[type="checkbox"]::after {
+    display: none !important;
+}
+
+.multi-select-option-label {
+    overflow-wrap: anywhere;
+}
+
+.multi-select-actions {
+    display: flex;
+    gap: 0.4rem;
+    justify-content: flex-end;
+    padding: 0.35rem 0.15rem 0.1rem;
+    border-top: 1px solid var(--field-border);
+    margin-top: 0.25rem;
+}
+
+.multi-select-actions button {
+    width: auto;
+    padding: 0.25rem 0.6rem;
+    margin: 0;
+    font-size: 0.8rem;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(20, 184, 166, 0.2);
+    border-radius: 6px;
+    color: rgba(255, 255, 255, 0.8);
+    cursor: pointer;
+}
+
+.multi-select-actions button:hover {
+    background: rgba(20, 184, 166, 0.1);
+    border-color: rgba(20, 184, 166, 0.4);
+    color: #fff;
+}
