@@ -1,5 +1,5 @@
-use crate::io_device::GenericTcpStream;
-use crate::io_device::IoDevice as IoDeviceTrait;
+use crate::io_backend::GenericTcpStream;
+use crate::io_backend::IoDevice as IoDeviceTrait;
 use crate::mitm::{FRAME_TYPE_FIRST, FRAME_TYPE_MASK, HEADER_LENGTH};
 use crate::proxy::BUFFER_LEN;
 use crate::usb_stream::{UsbStreamRead, UsbStreamWrite};

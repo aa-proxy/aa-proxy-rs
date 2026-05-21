@@ -65,7 +65,7 @@ use crate::config::{Action::Stop, AppConfig, BtScoMediaBridgeAudioType, SharedCo
 use crate::config_types::HexdumpLevel;
 use crate::ev::EvTaskCommand;
 use crate::hu_input::{handle_hu_input, HuInputState};
-use crate::io_device::IoDevice as IoDeviceTrait;
+use crate::io_backend::IoDevice as IoDeviceTrait;
 #[cfg(not(feature = "io-uring"))]
 use crate::io_tokio::read_input_data;
 #[cfg(feature = "io-uring")]

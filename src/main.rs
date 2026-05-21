@@ -19,6 +19,7 @@ use aa_proxy_rs::mitm::SharedMediaTapEndpoints;
 use aa_proxy_rs::mitm::SharedServiceDiscoveryResponse;
 use aa_proxy_rs::mitm::TirePressureData;
 use aa_proxy_rs::proxy::io_loop;
+use aa_proxy_rs::run_io_loop;
 #[cfg(feature = "wasm-scripting")]
 use aa_proxy_rs::script_wasm::start_wasm_engine;
 #[cfg(feature = "wasm-scripting")]
@@ -858,20 +859,6 @@ fn main() -> Result<()> {
         )
         .await
     });
-
-    #[cfg(feature = "io-uring")]
-    macro_rules! run_io_loop {
-        ($fut:expr) => {
-            let _ = tokio_uring::start($fut);
-        };
-    }
-
-    #[cfg(not(feature = "io-uring"))]
-    macro_rules! run_io_loop {
-        ($fut:expr) => {
-            runtime.block_on($fut)?;
-        };
-    }
 
     // start tokio_uring runtime simultaneously
     run_io_loop!(io_loop(

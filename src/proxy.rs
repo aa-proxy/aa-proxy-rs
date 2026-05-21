@@ -2,11 +2,18 @@
 use crate::script_wasm::ScriptRegistry;
 #[cfg(not(feature = "wasm-scripting"))]
 type ScriptRegistry = ();
+use crate::io_backend::NativeFile;
+use crate::io_backend::NativeTcpStream;
+use crate::listener_ref;
 use crate::mitm::{
     ensure_static_media_tap_listeners, static_media_tap_aux_slot_count, MediaTapEndpointInfo,
     SharedCompanionIp, SharedMediaChannels, SharedMediaSinks, SharedMediaTapEndpoints,
     SharedServiceDiscoveryResponse,
 };
+use crate::spawn;
+use crate::tcp_connect;
+use crate::tcp_listener_bind;
+use crate::tcp_shutdown;
 use crate::web::ServerEvent;
 use bytesize::ByteSize;
 use core::net::SocketAddr;
@@ -67,95 +74,6 @@ use crate::mitm::proxy;
 use crate::mitm::Packet;
 use crate::mitm::ProxyType;
 use crate::usb_stream;
-
-#[cfg(feature = "io-uring")]
-macro_rules! tcp_connect {
-    ($addr:expr) => {
-        tokio_uring::net::TcpStream::connect($addr)
-    };
-}
-
-#[cfg(not(feature = "io-uring"))]
-macro_rules! tcp_connect {
-    ($addr:expr) => {
-        TokioTcpStream::connect($addr)
-    };
-}
-
-#[cfg(feature = "io-uring")]
-type NativeTcpStream = tokio_uring::net::TcpStream;
-#[cfg(not(feature = "io-uring"))]
-type NativeTcpStream = TokioTcpStream;
-#[cfg(feature = "io-uring")]
-type NativeFile = tokio_uring::fs::File;
-#[cfg(not(feature = "io-uring"))]
-type NativeFile = tokio::fs::File;
-
-#[cfg(feature = "io-uring")]
-macro_rules! tcp_listener_bind {
-    ($port:expr) => {{
-        use tokio_uring::net::TcpListener;
-        let addr = format!("0.0.0.0:{}", $port).parse::<SocketAddr>().unwrap();
-        Some(TcpListener::bind(addr).unwrap())
-    }};
-}
-
-#[cfg(not(feature = "io-uring"))]
-macro_rules! tcp_listener_bind {
-    ($port:expr) => {{
-        use tokio::net::TcpListener;
-        let addr = format!("0.0.0.0:{}", $port).parse::<SocketAddr>().unwrap();
-        TcpListener::bind(addr).await?
-    }};
-}
-
-#[cfg(feature = "io-uring")]
-macro_rules! listener_ref {
-    ($l:expr) => {
-        &mut $l.as_mut().unwrap()
-    };
-}
-
-#[cfg(not(feature = "io-uring"))]
-macro_rules! listener_ref {
-    ($l:expr) => {
-        &$l
-    };
-}
-
-#[cfg(feature = "io-uring")]
-macro_rules! tcp_shutdown {
-    ($stream:expr) => {
-        if let Some(s) = $stream {
-            let _ = s.shutdown(std::net::Shutdown::Both);
-        }
-    };
-}
-
-#[cfg(not(feature = "io-uring"))]
-macro_rules! tcp_shutdown {
-    ($stream:expr) => {
-        if let Some(stream) = $stream {
-            use tokio::io::AsyncWriteExt;
-            let mut stream = stream.lock().await;
-            let _ = stream.shutdown().await;
-        }
-    };
-}
-
-#[cfg(feature = "io-uring")]
-macro_rules! spawn {
-    ($fut:expr) => {
-        tokio_uring::spawn($fut)
-    };
-}
-
-#[cfg(not(feature = "io-uring"))]
-macro_rules! spawn {
-    ($fut:expr) => {
-        tokio::spawn($fut)
-    };
-}
 
 async fn transfer_monitor(
     stats_interval: Option<Duration>,

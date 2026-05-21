@@ -14,7 +14,7 @@ pub mod display;
 pub mod ev;
 pub mod hu_input;
 pub mod inject_displays;
-pub mod io_device;
+pub mod io_backend;
 #[cfg(not(feature = "io-uring"))]
 pub mod io_tokio;
 #[cfg(feature = "io-uring")]
