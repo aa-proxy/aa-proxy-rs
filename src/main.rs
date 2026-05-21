@@ -861,22 +861,25 @@ fn main() -> Result<()> {
     });
 
     // start tokio_uring runtime simultaneously
-    run_io_loop!(io_loop(
-        restart_tx,
-        tcp_start_cloned,
-        config,
-        tx,
-        sensor_channel,
-        input_channel,
-        last_battery_data,
-        last_speed,
-        last_service_discovery_response,
-        media_tap_endpoints,
-        companion_ip,
-        usb_connected,
-        script_registry.clone(),
-        ws_event_tx.clone(),
-    ));
+    run_io_loop!(
+        runtime,
+        io_loop(
+            restart_tx,
+            tcp_start_cloned,
+            config,
+            tx,
+            sensor_channel,
+            input_channel,
+            last_battery_data,
+            last_speed,
+            last_service_discovery_response,
+            media_tap_endpoints,
+            companion_ip,
+            usb_connected,
+            script_registry.clone(),
+            ws_event_tx.clone(),
+        )
+    );
 
     info!(
         "🚩 aa-proxy-rs terminated, running time: {}",

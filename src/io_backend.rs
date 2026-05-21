@@ -145,7 +145,7 @@ macro_rules! spawn {
 #[cfg(feature = "io-uring")]
 #[macro_export]
 macro_rules! run_io_loop {
-    ($fut:expr) => {
+    ($runtime:expr, $fut:expr) => {
         let _ = tokio_uring::start($fut);
     };
 }
@@ -153,7 +153,7 @@ macro_rules! run_io_loop {
 #[cfg(not(feature = "io-uring"))]
 #[macro_export]
 macro_rules! run_io_loop {
-    ($fut:expr) => {
-        runtime.block_on($fut)?;
+    ($runtime:expr, $fut:expr) => {
+        $runtime.block_on($fut)?;
     };
 }
