@@ -968,8 +968,8 @@ pub async fn io_loop(
             }
         }
 
-        // handling battery in JSON
-        if config.mitm && config.ev {
+        // handling battery/input injection in JSON/REST
+        if config.mitm {
             let mut tx_lock = tx.lock().await;
             *tx_lock = Some(tx_hu.clone());
         }
