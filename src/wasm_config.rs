@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use toml_edit::{value, DocumentMut, Item, Table};
 
-pub const WASM_CONFIG_FILE: &str = "/data/aa-proxy-rs/wasm-config.toml";
+pub const WASM_CONFIG_FILE: &str = "/etc/aa-proxy-rs/wasm-config.toml";
 pub const WASM_CONFIG_KEY_PREFIX: &str = "wasm.";
 
 #[derive(Clone, Debug)]
