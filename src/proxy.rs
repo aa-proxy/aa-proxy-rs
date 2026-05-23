@@ -870,9 +870,17 @@ pub async fn io_loop(
             // HU transfer device
             if let Some(hu) = hu_usb {
                 // HU connected directly via USB
-                let hu_file = Arc::new(Mutex::new(hu));
-                hu_r = IoDevice::FileIo(hu_file.clone());
-                hu_w = IoDevice::FileIo(hu_file);
+                use std::os::unix::io::{AsRawFd, FromRawFd};
+                let fd2 = unsafe { libc::dup(hu.as_raw_fd()) };
+                if fd2 < 0 {
+                    error!("{} 🔴 dup() failed for USB accessory", NAME);
+                    let _ = need_restart.send(None);
+                    continue;
+                }
+                let hu_w_file = unsafe { std::fs::File::from_raw_fd(fd2) };
+                let hu_w_file = TokioFile::from_std(hu_w_file);
+                hu_r = IoDevice::FileIo(Arc::new(Mutex::new(hu)));
+                hu_w = IoDevice::FileIo(Arc::new(Mutex::new(hu_w_file)));
             } else {
                 // Head Unit Emulator via TCP
                 let stream = hu_tcp.unwrap();
