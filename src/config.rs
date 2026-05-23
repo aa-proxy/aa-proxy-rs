@@ -326,7 +326,7 @@ pub struct AppConfig {
     /// second uses +1, and so on. This avoids collisions when multiple displays
     /// with the same display type are injected.
     /// Requires mitm = true. Connect with e.g. `vlc tcp://127.0.0.1:12345`.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "empty_string_as_none")]
     pub media_dump_base_port: Option<u16>,
     /// Startup behavior for media TCP tap clients.
     /// true  = wait for a fresh live IDR before forwarding inter-frames (clean decode)

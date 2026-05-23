@@ -360,7 +360,7 @@
           "description": "TOML file used to store injected display service profiles. Supports multiple main/cluster/auxiliary media sink entries. Display IDs are assigned automatically from the current SDR. Default: `/data/aa-proxy-rs/inject-displays.toml`.",
           "values": null
         },
-	"media_dump_base_port": {
+        "media_dump_base_port": {
           "typ": "integer",
           "description": "Base TCP port for raw decrypted media stream dumping/debugging. Requires `mitm = true`.\n\nOne TCP listener is created per media sink using fixed offsets:\n+0 main video,\n+1 cluster video,\n+2 auxiliary video,\n+3 guidance/TTS audio,\n+4 system audio,\n+5 media audio,\n+6 telephony audio.\n\nExample: `12345` exposes main video on `tcp://127.0.0.1:12345`.\nUseful for ffplay/VLC debugging and stream inspection.\n\nSet to 0 or leave unset to disable."
         },
