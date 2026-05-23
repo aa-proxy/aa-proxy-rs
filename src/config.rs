@@ -56,11 +56,11 @@ where
     T::Err: Display,
     D: Deserializer<'de>,
 {
-    let s: String = Deserialize::deserialize(deserializer)?;
-    if s.trim().is_empty() {
-        Ok(None)
-    } else {
-        T::from_str(&s).map(Some).map_err(DeError::custom)
+    let s: Option<String> = Option::deserialize(deserializer)?;
+    match s {
+        None => Ok(None),
+        Some(s) if s.trim().is_empty() => Ok(None),
+        Some(s) => T::from_str(&s).map(Some).map_err(DeError::custom),
     }
 }
 
