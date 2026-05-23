@@ -104,52 +104,47 @@ pub(crate) async fn read_input_data<D: IoDeviceTrait>(
     use anyhow::Context;
     use std::io::Write;
 
-    let mut newdata = vec![0u8; BUFFER_LEN];
-    let len;
+    let read_size;
 
     if incremental_read {
         // read header
         let mut header = vec![0u8; HEADER_LENGTH];
-        let header_len = tokio::time::timeout(
+        let len = tokio::time::timeout(
             std::time::Duration::from_millis(15000),
             obj.read_data(&mut header),
         )
         .await
         .context("read_input_data/header: timeout")?
         .context("read_input_data/header: read error")?;
-        if header_len > 0 {
-            rbuf.write_all(&header[..header_len])?;
+
+        // fill the output/read buffer with the obtained header data
+        if len > 0 {
+            rbuf.write_all(&header[..len])?;
         }
-        if header_len >= HEADER_LENGTH {
-            // compute payload size
-            let mut payload_size = (header[3] as u16 + ((header[2] as u16) << 8)) as usize;
-            if (header[1] & FRAME_TYPE_MASK) == FRAME_TYPE_FIRST {
-                // header is 8 bytes; need to read 4 more bytes
-                payload_size += 4;
-            }
-            // prepare buffer for the payload and continue normally
-            let mut payload = vec![0u8; payload_size];
-            let payload_len = tokio::time::timeout(
-                std::time::Duration::from_millis(15000),
-                obj.read_data(&mut payload),
-            )
-            .await
-            .context("read_input_data/payload: timeout")?
-            .context("read_input_data/payload: read error")?;
-            if payload_len > 0 {
-                rbuf.write_all(&payload[..payload_len])?;
-            }
+
+        // compute payload size
+        let mut payload_size = (header[3] as u16 + ((header[2] as u16) << 8)) as usize;
+        if (header[1] & FRAME_TYPE_MASK) == FRAME_TYPE_FIRST {
+            // header is 8 bytes; need to read 4 more bytes
+            payload_size += 4;
         }
-        return Ok(());
+        // prepare buffer for the payload and continue normally
+        read_size = payload_size;
+    } else {
+        read_size = BUFFER_LEN;
     }
 
-    len = tokio::time::timeout(
+    // normal read (used directly, or after incremental header read above)
+    let mut newdata = vec![0u8; read_size];
+
+    let len = tokio::time::timeout(
         std::time::Duration::from_millis(15000),
         obj.read_data(&mut newdata),
     )
     .await
     .context("read_input_data: timeout")?
     .context("read_input_data: read error")?;
+
     if len > 0 {
         rbuf.write_all(&newdata[..len])?;
     }
