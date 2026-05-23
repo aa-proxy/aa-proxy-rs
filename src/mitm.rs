@@ -2599,7 +2599,14 @@ async fn ssl_builder(proxy_type: ProxyType) -> Result<Ssl> {
 
 /// runtime musl detection
 fn is_musl() -> bool {
-    std::path::Path::new("/lib/ld-musl-riscv64.so.1").exists()
+    #[cfg(feature = "io-uring")]
+    {
+        std::path::Path::new("/lib/ld-musl-riscv64.so.1").exists()
+    }
+    #[cfg(not(feature = "io-uring"))]
+    {
+        false
+    }
 }
 
 /// reads all available data to VecDeque
