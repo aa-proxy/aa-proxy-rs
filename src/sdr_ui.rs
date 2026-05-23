@@ -1,5 +1,7 @@
 use crate::config::AppConfig;
-use crate::mitm::protos::{Insets, ServiceDiscoveryResponse, UiConfig, VideoConfiguration};
+use crate::mitm::protos::{
+    DisplayType, Insets, ServiceDiscoveryResponse, UiConfig, VideoConfiguration,
+};
 use anyhow::{anyhow, Context, Result};
 use chrono::Local;
 use serde::{Deserialize, Serialize};
@@ -391,7 +393,8 @@ pub async fn process_service_discovery_response(
         if let Some(vehicle_profile) = profiles.vehicles.iter().find(|v| v.id == vehicle_id) {
             vehicle_profile_enabled = vehicle_profile.enabled;
             if vehicle_profile.enabled {
-                patch_count += apply_display_profiles(msg, &vehicle_profile.displays, "vehicle")?;
+                patch_count +=
+                    apply_display_profiles(msg, &vehicle_profile.displays, "vehicle", cfg.dpi > 0)?;
             }
 
             if let Some(phone) = &phone {
@@ -401,8 +404,12 @@ pub async fn process_service_discovery_response(
                     phone_profile_exists = true;
                     phone_profile_enabled = phone_profile.enabled;
                     if vehicle_profile.enabled && phone_profile.enabled {
-                        patch_count +=
-                            apply_display_profiles(msg, &phone_profile.displays, "phone")?;
+                        patch_count += apply_display_profiles(
+                            msg,
+                            &phone_profile.displays,
+                            "phone",
+                            cfg.dpi > 0,
+                        )?;
                     }
                 }
             }
@@ -568,6 +575,7 @@ fn apply_display_profiles(
     msg: &mut ServiceDiscoveryResponse,
     displays: &[SdrUiDisplayProfile],
     source: &str,
+    global_main_dpi_active: bool,
 ) -> Result<usize> {
     let mut patched = 0usize;
 
@@ -578,13 +586,17 @@ fn apply_display_profiles(
 
         let service_id = svc.id();
         let sink_display_id = svc.media_sink_service.display_id();
-        let sink_display_type = format!("{:?}", svc.media_sink_service.display_type());
+        let sink_display_type_enum = svc.media_sink_service.display_type();
+        let sink_display_type = format!("{:?}", sink_display_type_enum);
         let Some(display_profile) = displays
             .iter()
             .find(|d| display_matches(d, Some(service_id), sink_display_id, &sink_display_type))
         else {
             continue;
         };
+
+        let skip_density_override =
+            global_main_dpi_active && sink_display_type_enum == DisplayType::DISPLAY_TYPE_MAIN;
 
         let Some(sink) = svc.media_sink_service.as_mut() else {
             continue;
@@ -603,7 +615,8 @@ fn apply_display_profiles(
                 continue;
             }
 
-            let count = apply_video_profile(video_cfg, video_profile, source)?;
+            let count =
+                apply_video_profile(video_cfg, video_profile, source, skip_density_override)?;
             patched += count;
         }
     }
@@ -615,6 +628,7 @@ fn apply_video_profile(
     video_cfg: &mut VideoConfiguration,
     profile: &SdrUiVideoConfigProfile,
     source: &str,
+    skip_density_override: bool,
 ) -> Result<usize> {
     let mut patched = 0usize;
     let resolution = video_cfg.codec_resolution();
@@ -667,6 +681,38 @@ fn apply_video_profile(
     if let Some((width_margin, height_margin)) = derived_margins {
         video_cfg.set_width_margin(width_margin);
         video_cfg.set_height_margin(height_margin);
+    }
+
+    if skip_density_override {
+        if profile.density.is_some() || profile.real_density.is_some() {
+            debug!(
+                "{} skipped SDR UI density/real_density override from {} because global MAIN dpi is active",
+                NAME, source
+            );
+        }
+    } else {
+        if let Some(density) = profile.density {
+            let prev = video_cfg.density();
+            if prev != density {
+                video_cfg.set_density(density);
+                debug!(
+                    "{} SDR UI override: density <b>{}</> -> <b>{}</> ({})",
+                    NAME, prev, density, source
+                );
+                patched += 1;
+            }
+        }
+        if let Some(real_density) = profile.real_density {
+            let prev = video_cfg.real_density();
+            if prev != real_density {
+                video_cfg.set_real_density(real_density);
+                debug!(
+                    "{} SDR UI override: real_density <b>{}</> -> <b>{}</> ({})",
+                    NAME, prev, real_density, source
+                );
+                patched += 1;
+            }
+        }
     }
 
     if patched > 0 {
@@ -784,7 +830,8 @@ fn video_matches(profile: &SdrUiVideoConfigProfile, video_cfg: &VideoConfigurati
             return false;
         }
     }
-    // density/real_density are deliberately metadata, not strict match keys. Some users also set global DPI.
+    // density/real_density are not match keys (so profiles still match after global DPI
+    // rewrites them), but they are applied in apply_video_profile when set and not skipped.
     true
 }
 

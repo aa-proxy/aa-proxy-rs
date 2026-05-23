@@ -92,11 +92,7 @@ fn max_existing_video_display_id(msg: &ServiceDiscoveryResponse) -> u32 {
         .unwrap_or(0)
 }
 
-fn profile_from_config(
-    cfg: &AppConfig,
-    profile: &InjectDisplayProfile,
-    display_id: u32,
-) -> DisplayProfile {
+fn profile_from_config(profile: &InjectDisplayProfile, display_id: u32) -> DisplayProfile {
     DisplayProfile {
         inject_display_id: profile.id.clone(),
         display_type: profile.display_type,
@@ -114,11 +110,7 @@ fn profile_from_config(
         },
         width_margin: profile.width_margin,
         height_margin: profile.height_margin,
-        density: if cfg.dpi > 0 {
-            cfg.dpi.into()
-        } else {
-            profile.density
-        },
+        density: profile.density,
         viewing_distance: profile.viewing_distance,
         touch_width: profile.touch_width,
         touch_height: profile.touch_height,
@@ -147,7 +139,7 @@ fn display_profiles(msg: &ServiceDiscoveryResponse, cfg: &AppConfig) -> Vec<Disp
     let mut profiles = Vec::new();
 
     for profile in file.displays.iter().filter(|profile| profile.enabled) {
-        profiles.push(profile_from_config(cfg, profile, next_display_id));
+        profiles.push(profile_from_config(profile, next_display_id));
         next_display_id = next_display_id.saturating_add(1);
     }
 

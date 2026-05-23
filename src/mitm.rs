@@ -1778,25 +1778,34 @@ pub async fn pkt_modify_hook(
                 return Ok(PacketAction::Forward);
             }
 
-            // DPI
+            // Global DPI is a coarse legacy override for the MAIN AA display only.
+            // Per-display SDR UI density overrides handle cluster/aux/custom display DPI.
             if cfg.dpi > 0 {
-                if let Some(svc) = msg
-                    .services
-                    .iter_mut()
-                    .find(|svc| !svc.media_sink_service.video_configs.is_empty())
-                {
-                    // get previous/original value
-                    let prev_val = svc.media_sink_service.video_configs[0].density();
-                    // set new value
-                    svc.media_sink_service.as_mut().unwrap().video_configs[0]
-                        .set_density(cfg.dpi.into());
-                    info!(
-                        "{} <yellow>{:?}</>: replacing DPI value: from <b>{}</> to <b>{}</>",
-                        get_name(proxy_type),
-                        control.unwrap(),
-                        prev_val,
-                        cfg.dpi
-                    );
+                if let Some(svc) = msg.services.iter_mut().find(|svc| {
+                    svc.media_sink_service.display_type() == DisplayType::DISPLAY_TYPE_MAIN
+                        && !svc.media_sink_service.video_configs.is_empty()
+                }) {
+                    for video_cfg in svc
+                        .media_sink_service
+                        .as_mut()
+                        .unwrap()
+                        .video_configs
+                        .iter_mut()
+                    {
+                        let prev_density = video_cfg.density();
+                        let prev_real_density = video_cfg.real_density();
+                        video_cfg.set_density(cfg.dpi.into());
+                        video_cfg.set_real_density(cfg.dpi.into());
+                        info!(
+                            "{} <yellow>{:?}</>: replacing MAIN DPI values: density <b>{}</> -> <b>{}</>, real_density <b>{}</> -> <b>{}</>",
+                            get_name(proxy_type),
+                            control.unwrap(),
+                            prev_density,
+                            cfg.dpi,
+                            prev_real_density,
+                            cfg.dpi
+                        );
+                    }
                 }
             }
 
