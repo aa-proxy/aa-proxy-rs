@@ -357,10 +357,19 @@ pub enum HexdumpLevel {
     All,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct UsbId {
     pub vid: u16,
     pub pid: u16,
+}
+
+impl Serialize for UsbId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
 }
 
 impl std::str::FromStr for UsbId {
