@@ -56,11 +56,21 @@ where
     T::Err: Display,
     D: Deserializer<'de>,
 {
-    let s: Option<String> = Option::deserialize(deserializer)?;
-    match s {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Repr {
+        Str(String),
+        Int(i64),
+        Float(f64),
+    }
+
+    let v: Option<Repr> = Option::deserialize(deserializer)?;
+    match v {
         None => Ok(None),
-        Some(s) if s.trim().is_empty() => Ok(None),
-        Some(s) => T::from_str(&s).map(Some).map_err(DeError::custom),
+        Some(Repr::Str(s)) if s.trim().is_empty() => Ok(None),
+        Some(Repr::Str(s)) => T::from_str(s.trim()).map(Some).map_err(DeError::custom),
+        Some(Repr::Int(i)) => T::from_str(&i.to_string()).map(Some).map_err(DeError::custom),
+        Some(Repr::Float(f)) => T::from_str(&f.to_string()).map(Some).map_err(DeError::custom),
     }
 }
 
