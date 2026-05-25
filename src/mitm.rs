@@ -639,6 +639,10 @@ pub enum PacketAction {
     Drop,
     /// Send the packet back toward the originating side (crafted reply).
     SendBack,
+    /// Replace the current packet with a complete list of packets.
+    /// Used by buffered rewriters that must drop original fragments and emit a
+    /// re-fragmented message after the final original fragment arrives.
+    Replace(Vec<Packet>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -691,6 +695,7 @@ impl SslMemBuf {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
 pub struct Packet {
     pub channel: u8,
     pub flags: u8,
@@ -1059,7 +1064,7 @@ pub async fn pkt_modify_hook(
                     debug!("{} hu_input: sending packet back", get_name(proxy_type));
                     return Ok(PacketAction::SendBack);
                 }
-                PacketAction::Forward => {}
+                PacketAction::Forward | PacketAction::Replace(_) => {}
             }
         }
     }
@@ -3134,6 +3139,41 @@ pub async fn proxy<D: IoDeviceTrait>(
                     // fixme: compute final_len for precise stats
                     bytes_written.fetch_add(HEADER_LENGTH + pkt.payload.len(), Ordering::Relaxed);
                 }
+                PacketAction::Replace(packets) => {
+                    debug!(
+                        "{} pkt_modify_hook: replacing packet with {} packet(s)",
+                        get_name(proxy_type),
+                        packets.len()
+                    );
+                    for mut out_pkt in packets {
+                        let _ = pkt_debug(
+                            proxy_type,
+                            HexdumpLevel::DecryptedOutput,
+                            hex_requested,
+                            &out_pkt,
+                            &cfg,
+                            Some(&ctx.debug_channel_kinds),
+                        )
+                        .await;
+                        out_pkt.encrypt_payload(&mut mem_buf, &mut server).await?;
+                        let _ = pkt_debug(
+                            proxy_type,
+                            HexdumpLevel::RawOutput,
+                            hex_requested,
+                            &out_pkt,
+                            &cfg,
+                            Some(&ctx.debug_channel_kinds),
+                        )
+                        .await;
+                        out_pkt.transmit(&mut device).await.with_context(|| {
+                            format!("proxy/{}: transmit failed", get_name(proxy_type))
+                        })?;
+                        bytes_written.fetch_add(
+                            HEADER_LENGTH + out_pkt.payload.len(),
+                            Ordering::Relaxed,
+                        );
+                    }
+                }
             }
         }
 
@@ -3172,6 +3212,16 @@ pub async fn proxy<D: IoDeviceTrait>(
                         PacketAction::Drop => {}
                         PacketAction::SendBack | PacketAction::Forward => {
                             tx.send(pkt).await?;
+                        }
+                        PacketAction::Replace(packets) => {
+                            debug!(
+                                "{} pkt_modify_hook: replacing inbound packet with {} packet(s)",
+                                get_name(proxy_type),
+                                packets.len()
+                            );
+                            for out_pkt in packets {
+                                tx.send(out_pkt).await?;
+                            }
                         }
                     }
                 }
