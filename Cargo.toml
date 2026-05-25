@@ -68,6 +68,8 @@ wasmtime = { version = "38", features = ["async"], optional = true }
 wasmtime-wasi = { version = "38", optional = true }
 notify = { version = "8", optional = true }
 ureq = "2"
+rust_h264 = "0.4"
+png = "0.17"
 
 [patch.crates-io]
 tokio-uring = { git = "https://github.com/manio/tokio-uring", branch = "musl-riscv" }
