@@ -148,10 +148,7 @@
             "inject_display_types": {
               "typ": "multi-select",
               "description": "Add video display services to the `service discovery response`. Useful when forcing additional display channels for capture.",
-              "values": [
-                "DISPLAY_TYPE_CLUSTER",
-                "DISPLAY_TYPE_AUXILIARY"
-              ]
+              "values": ["DISPLAY_TYPE_CLUSTER", "DISPLAY_TYPE_AUXILIARY"]
             }
           },
           "subsections": [
@@ -462,13 +459,19 @@
                 "bt_sco_media_bridge_audio_peak_threshold": {
                   "typ": "integer",
                   "description": "Peak threshold for `start_on_first_audio`. Converted 16-bit PCM frames below this value are treated as silence. 64 is conservative.",
-                  "requires": ["bt_sco_media_bridge", "bt_sco_media_bridge_start_on_first_audio"],
+                  "requires": [
+                    "bt_sco_media_bridge",
+                    "bt_sco_media_bridge_start_on_first_audio"
+                  ],
                   "advanced": true
                 },
                 "bt_sco_media_bridge_start_timeout_ms": {
                   "typ": "integer",
                   "description": "Fallback timeout for `start_on_first_audio`. If no non-silent SCO downlink is seen within this time, START / DATA begins anyway.",
-                  "requires": ["bt_sco_media_bridge", "bt_sco_media_bridge_start_on_first_audio"],
+                  "requires": [
+                    "bt_sco_media_bridge",
+                    "bt_sco_media_bridge_start_on_first_audio"
+                  ],
                   "advanced": true
                 },
                 "bt_sco_media_bridge_stop_existing_on_disconnect": {
@@ -485,13 +488,19 @@
                 "bt_sco_media_bridge_cadence_ms": {
                   "typ": "integer",
                   "description": "DATA packet cadence in milliseconds when fixed cadence is enabled. 22 ms matches the current 6-SCO-packet chunk timing closely.",
-                  "requires": ["bt_sco_media_bridge", "bt_sco_media_bridge_fixed_cadence"],
+                  "requires": [
+                    "bt_sco_media_bridge",
+                    "bt_sco_media_bridge_fixed_cadence"
+                  ],
                   "advanced": true
                 },
                 "bt_sco_media_bridge_jitter_buffer_ms": {
                   "typ": "integer",
                   "description": "Minimum converted-audio buffer before the first fixed-cadence DATA packet. 60 ms is conservative.",
-                  "requires": ["bt_sco_media_bridge", "bt_sco_media_bridge_fixed_cadence"],
+                  "requires": [
+                    "bt_sco_media_bridge",
+                    "bt_sco_media_bridge_fixed_cadence"
+                  ],
                   "advanced": true
                 }
               }
