@@ -30,6 +30,7 @@ pub const DEFAULT_WASM_HOOKS_DIR: &str = "/data/wasm-hooks";
 pub const DEFAULT_CRASH_DIR: &str = "/data/aa-proxy-rs/crashes";
 pub const DEFAULT_SDR_UI_OVERRIDE_FILE: &str = "/etc/aa-proxy-rs/sdr-ui-overrides.toml";
 pub const DEFAULT_INJECT_DISPLAYS_FILE: &str = "/etc/aa-proxy-rs/inject-displays.toml";
+pub const DEFAULT_MAP_ALBUM_ART_FILE: &str = "/data/aa-proxy-rs/map-album-art.png";
 
 pub type SharedConfig = Arc<RwLock<AppConfig>>;
 pub type SharedConfigJson = Arc<RwLock<ConfigJson>>;

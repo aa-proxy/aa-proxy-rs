@@ -342,12 +342,86 @@ fn rewrite_video_focus_notification(
     Ok(())
 }
 
+fn ensure_map_album_art_h264_virtual_tap(
+    proxy_type: ProxyType,
+    ctx: &mut ModifyContext,
+    cfg: &AppConfig,
+) {
+    let Some(target_display_id) = crate::map_album_art_h264::target_display_id(cfg) else {
+        if !ctx.map_album_art_h264_virtual_taps.is_empty() {
+            info!(
+                "{} <blue>map album art h264:</> dropping internal video tap(s); source is no longer rust_h264",
+                get_name(proxy_type)
+            );
+            ctx.map_album_art_h264_virtual_taps.clear();
+            crate::map_album_art_h264::clear_internal_tap_channel();
+        }
+        return;
+    };
+
+    let target_channels: Vec<u8> = ctx
+        .injected_media_profile_ids
+        .iter()
+        .filter_map(|(&channel, profile_id)| {
+            if profile_id == target_display_id {
+                Some(channel)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if target_channels.is_empty() {
+        if !ctx.map_album_art_h264_virtual_taps.is_empty() {
+            info!(
+                "{} <blue>map album art h264:</> dropping internal video tap(s); target display <b>{}</> is not currently mapped",
+                get_name(proxy_type),
+                target_display_id
+            );
+            ctx.map_album_art_h264_virtual_taps.clear();
+            crate::map_album_art_h264::clear_internal_tap_channel();
+        }
+        return;
+    }
+
+    if let Some(&channel) = target_channels.first() {
+        crate::map_album_art_h264::set_internal_tap_channel(target_display_id, channel);
+    }
+
+    ctx.map_album_art_h264_virtual_taps
+        .retain(|channel, _| target_channels.contains(channel));
+
+    for channel in target_channels {
+        if ctx.map_album_art_h264_virtual_taps.contains_key(&channel) {
+            continue;
+        }
+
+        let Some(sink) = ctx.media_channels.get(&channel).cloned() else {
+            continue;
+        };
+
+        let receiver = sink.subscribe();
+        sink.note_client_connected();
+        ctx.map_album_art_h264_virtual_taps
+            .insert(channel, receiver);
+
+        info!(
+            "{} <blue>map album art h264:</> internal video tap subscribed display=<b>{}</> channel=<b>{:#04x}</>; requesting injected media stream",
+            get_name(proxy_type),
+            target_display_id,
+            channel
+        );
+    }
+}
+
 pub fn maybe_emit_pending_injected_focus(
     proxy_type: ProxyType,
     ctx: &mut ModifyContext,
     cfg: &AppConfig,
     tx: &Sender<Packet>,
 ) -> Result<()> {
+    ensure_map_album_art_h264_virtual_tap(proxy_type, ctx, cfg);
+
     let mut ready_channels: Vec<(u8, u8, bool, DisplayType)> = Vec::new();
     let mut toggle_channels: Vec<(u8, u8, DisplayType)> = Vec::new();
     let mut release_channels: Vec<(u8, u8, DisplayType)> = Vec::new();

@@ -1,3 +1,4 @@
+use crate::album_art_inject::{AlbumArtProcessResult, MapAlbumArtInjector};
 use crate::bt_sco;
 use crate::bt_sco_media_bridge;
 use crate::ev::send_ev_data;
@@ -167,6 +168,8 @@ pub struct ModifyContext {
     /// Per-channel reassembly state for tapped media messages that span multiple
     /// AA transport frames.
     pub(crate) media_fragments: HashMap<u8, MediaFrameBuffer>,
+    /// Album-art rewrite state for fragmented MediaPlaybackMetadata messages.
+    pub(crate) map_album_art_injector: MapAlbumArtInjector,
     /// Original HU-advertised services from ServiceDiscoveryResponse.
     pub(crate) hu_service_ids: HashSet<i32>,
     /// Services synthesized by aa-proxy-rs and exposed only to the phone side.
@@ -183,6 +186,11 @@ pub struct ModifyContext {
     pub(crate) injected_media_connect_gen: HashMap<u8, u64>,
     /// Last observed tap-consumer presence by media channel.
     pub(crate) injected_media_had_tap_client: HashMap<u8, bool>,
+    /// Internal broadcast receivers kept alive while map_album_art_source=rust_h264.
+    /// They make the selected injected display behave like it has a tap client, so
+    /// the projected video stream starts without requiring an external mpv/VLC client.
+    pub(crate) map_album_art_h264_virtual_taps:
+        HashMap<u8, tokio::sync::broadcast::Receiver<Arc<(u64, Vec<u8>)>>>,
     /// VEC service ids injected by aa-proxy-rs into the service discovery response.
     pub(crate) vendor_service_ids: HashSet<u8>,
     /// Active VEC channel ids opened by the mobile device against our injected VEC(s).
@@ -653,6 +661,21 @@ pub enum PacketFlow {
     ToEndpoint,
 }
 
+fn is_complete_frame_boundary(flags: u8) -> bool {
+    let frame_type = flags & FRAME_TYPE_MASK;
+    frame_type == (FRAME_TYPE_FIRST | FRAME_TYPE_LAST) || frame_type == FRAME_TYPE_LAST
+}
+
+fn should_emit_pending_map_album_art_metadata(
+    proxy_type: ProxyType,
+    pkt: &Packet,
+    cfg: &AppConfig,
+) -> bool {
+    proxy_type == ProxyType::MobileDevice
+        && cfg.map_album_art_enabled
+        && is_complete_frame_boundary(pkt.flags)
+}
+
 /// rust-openssl doesn't support BIO_s_mem
 /// This SslMemBuf is about to provide `Read` and `Write` implementations
 /// to be used with `openssl::ssl::SslStream`
@@ -1071,6 +1094,28 @@ pub async fn pkt_modify_hook(
 
     // message_id is the first 2 bytes of payload
     let message_id: i32 = u16::from_be_bytes(pkt.payload[0..=1].try_into()?).into();
+
+    // Optional map-preview album art injection.
+    // This runs on the phone -> proxy ingress path. Fragmented metadata is buffered,
+    // rewritten with the real replacement PNG length, then re-fragmented before
+    // forwarding so there is no padding/trailing-data inside album_art.
+    if proxy_type == ProxyType::MobileDevice && flow == PacketFlow::FromEndpoint {
+        if cfg.map_album_art_enabled {
+            match ctx
+                .map_album_art_injector
+                .process_packet(pkt, message_id, cfg)
+            {
+                AlbumArtProcessResult::Forward => {}
+                AlbumArtProcessResult::Drop => return Ok(PacketAction::Drop),
+                AlbumArtProcessResult::Replace(packets) => {
+                    return Ok(PacketAction::Replace(packets))
+                }
+            }
+        } else {
+            ctx.map_album_art_injector.clear();
+        }
+    }
+
     let data = &pkt.payload[2..]; // start of message data
 
     // handling data on sensor channel
@@ -1435,18 +1480,36 @@ pub async fn pkt_modify_hook(
         }
     }
 
-    // tap media frames for debug streaming (only on MobileDevice path = phone → HU direction)
-    if tap_media && proxy_type == ProxyType::MobileDevice {
+    // tap media frames for debug streaming and map-album-art H.264 capture
+    // (only on MobileDevice path = phone → HU direction).
+    // H.264 album-art capture must not depend on an external media tap client;
+    // if source=rust_h264 is active, reassemble media packets and feed the
+    // selected injected display directly.
+    let map_album_art_h264_active = crate::map_album_art_h264::is_active(cfg);
+    if proxy_type == ProxyType::MobileDevice && (tap_media || map_album_art_h264_active) {
         if let Some(frame_data) = reassemble_media_packet(&mut ctx.media_fragments, pkt) {
             if frame_data.len() >= 2 {
-                if let Some(sink) = media_sink_for_channel(ctx, pkt.channel).await {
-                    tap_media_message(proxy_type, pkt, &sink, &frame_data).await;
-                } else {
-                    debug!(
-                        "{} media tap: no sink registered for channel {:#04x}",
-                        get_name(proxy_type),
-                        pkt.channel
+                if map_album_art_h264_active {
+                    crate::map_album_art_h264::maybe_feed_media_frame(
+                        cfg,
+                        pkt.channel,
+                        ctx.injected_media_profile_ids
+                            .get(&pkt.channel)
+                            .map(|id| id.as_str()),
+                        &frame_data,
                     );
+                }
+
+                if tap_media {
+                    if let Some(sink) = media_sink_for_channel(ctx, pkt.channel).await {
+                        tap_media_message(proxy_type, pkt, &sink, &frame_data).await;
+                    } else {
+                        debug!(
+                            "{} media tap: no sink registered for channel {:#04x}",
+                            get_name(proxy_type),
+                            pkt.channel
+                        );
+                    }
                 }
             }
         }
@@ -2982,6 +3045,7 @@ pub async fn proxy<D: IoDeviceTrait>(
         media_wait_for_live_idr: cfg.media_wait_for_live_idr,
         media_channels: HashMap::new(),
         media_fragments: HashMap::new(),
+        map_album_art_injector: MapAlbumArtInjector::default(),
         hu_service_ids: HashSet::new(),
         injected_service_ids: HashSet::new(),
         injected_channels: HashSet::new(),
@@ -2990,6 +3054,7 @@ pub async fn proxy<D: IoDeviceTrait>(
         injected_media_state: HashMap::new(),
         injected_media_connect_gen: HashMap::new(),
         injected_media_had_tap_client: HashMap::new(),
+        map_album_art_h264_virtual_taps: HashMap::new(),
         vendor_service_ids: HashSet::new(),
         vendor_channel_states: HashMap::new(),
         vendor_topic_event_bridges: HashMap::new(),
@@ -3210,8 +3275,34 @@ pub async fn proxy<D: IoDeviceTrait>(
                     .await;
                     match action {
                         PacketAction::Drop => {}
-                        PacketAction::SendBack | PacketAction::Forward => {
+                        PacketAction::SendBack => {
                             tx.send(pkt).await?;
+                        }
+                        PacketAction::Forward => {
+                            let emit_pending_metadata_after_forward =
+                                should_emit_pending_map_album_art_metadata(proxy_type, &pkt, &cfg);
+
+                            tx.send(pkt).await?;
+
+                            // If REST/companion/rust_h264 updated the album art, re-emit the
+                            // cached MediaPlaybackMetadata only after forwarding the current
+                            // complete message. Emitting before the packet (or while the current
+                            // packet is a FIRST/MIDDLE fragment) can interleave synthetic metadata
+                            // into an active fragmented stream and upset some HUs/DHU builds.
+                            if emit_pending_metadata_after_forward {
+                                if let Some(packets) =
+                                    ctx.map_album_art_injector.take_pending_metadata_emit(&cfg)
+                                {
+                                    debug!(
+                                        "{} map album art: sending cached MEDIA_PLAYBACK_METADATA after safe boundary ({} packet(s))",
+                                        get_name(proxy_type),
+                                        packets.len()
+                                    );
+                                    for out_pkt in packets {
+                                        tx.send(out_pkt).await?;
+                                    }
+                                }
+                            }
                         }
                         PacketAction::Replace(packets) => {
                             debug!(
@@ -3259,6 +3350,7 @@ mod tests {
             media_wait_for_live_idr: false,
             media_channels: HashMap::new(),
             media_fragments: HashMap::new(),
+            map_album_art_injector: MapAlbumArtInjector::default(),
             hu_service_ids: HashSet::new(),
             injected_service_ids: HashSet::new(),
             injected_channels: HashSet::new(),
@@ -3267,6 +3359,7 @@ mod tests {
             injected_media_state: HashMap::new(),
             injected_media_connect_gen: HashMap::new(),
             injected_media_had_tap_client: HashMap::new(),
+            map_album_art_h264_virtual_taps: HashMap::new(),
             vendor_service_ids: HashSet::new(),
             vendor_channel_states: HashMap::new(),
             vendor_topic_event_bridges: HashMap::new(),

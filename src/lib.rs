@@ -1,3 +1,4 @@
+pub mod album_art_inject;
 pub mod aoa;
 pub mod bluetooth;
 pub mod bt_helper;
@@ -20,10 +21,13 @@ pub mod io_tokio;
 #[cfg(feature = "io-uring")]
 pub mod io_uring;
 pub mod led;
+pub mod map_album_art;
+pub mod map_album_art_h264;
 pub mod media_tap;
 pub mod mitm;
 pub mod mitm_prettyprint;
 pub mod mpegts;
+pub mod packet_fragment;
 pub mod proxy;
 #[cfg(feature = "wasm-scripting")]
 pub mod script_wasm;
