@@ -217,6 +217,10 @@ pub struct InjectDisplayProfile {
     pub touch_width: i32,
     #[serde(default = "default_touch_height")]
     pub touch_height: i32,
+    /// Whether to advertise a touchscreen inside the input_source_service.
+    /// The input_source_service itself can still be advertised when this is false.
+    #[serde(default)]
+    pub input_touchscreen: bool,
     pub input_source: bool,
 }
 
@@ -236,6 +240,7 @@ impl Default for InjectDisplayProfile {
             viewing_distance: default_viewing_distance(),
             touch_width: default_touch_width(),
             touch_height: default_touch_height(),
+            input_touchscreen: false,
             input_source: false,
         }
     }

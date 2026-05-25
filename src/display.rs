@@ -72,6 +72,7 @@ struct DisplayProfile {
     viewing_distance: u32,
     touch_width: i32,
     touch_height: i32,
+    input_touchscreen: bool,
     input_source: bool,
 }
 
@@ -114,6 +115,7 @@ fn profile_from_config(profile: &InjectDisplayProfile, display_id: u32) -> Displ
         viewing_distance: profile.viewing_distance,
         touch_width: profile.touch_width,
         touch_height: profile.touch_height,
+        input_touchscreen: profile.input_touchscreen,
         input_source: profile.input_source,
     }
 }
@@ -210,12 +212,12 @@ fn create_input_source_service(id: i32, profile: DisplayProfile) -> Service {
 
     let mut source = InputSourceService::new();
     source.keycodes_supported = keycodes;
-    if profile.display_type == DisplayType::DISPLAY_TYPE_AUXILIARY {
+    if profile.input_touchscreen {
         let mut touchscreen = input_source_service::TouchScreen::new();
         touchscreen.set_width(profile.touch_width);
         touchscreen.set_height(profile.touch_height);
         touchscreen.set_type(TouchScreenType::RESISTIVE);
-        touchscreen.set_is_secondary(true);
+        touchscreen.set_is_secondary(profile.display_type != DisplayType::DISPLAY_TYPE_MAIN);
         source.touchscreen.push(touchscreen);
     }
     source.set_display_id(profile.display_id);
