@@ -340,7 +340,8 @@ async fn craft_response(req: &Request, state: AppState) -> Response {
         "/get-config-data" => {
             // async read instead of blocking
             let cfg_guard = state.config_json.read().await;
-            let cfg_str = serde_json::to_string(&*cfg_guard).unwrap_or_default();
+            let cfg_str =
+                serde_json::to_string(&cfg_guard.to_flat_config_data()).unwrap_or_default();
 
             debug!("{} 🥏 /get-config-data response: {}", NAME, cfg_str);
 

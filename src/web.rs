@@ -1888,7 +1888,7 @@ async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 
 async fn get_config_data(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let cfg = merged_config_json(&state).await;
-    Json(cfg)
+    Json(cfg.to_flat_config_data())
 }
 
 /// POST /set-time
