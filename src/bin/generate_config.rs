@@ -1,6 +1,6 @@
-use aa_proxy_rs::config::{AppConfig, ConfigJson, ConfigValues};
 #[cfg(feature = "wasm-scripting")]
 use aa_proxy_rs::config::wasm_script_limits_config_section;
+use aa_proxy_rs::config::{AppConfig, ConfigJson, ConfigValues};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::{collections::BTreeMap, fs, path::Path};
@@ -94,12 +94,11 @@ fn emit_section(
 
         // These values are generated at runtime on the actual device; comment
         // them out so the generated TOML doesn't override the live detection.
-        let commented: &str =
-            if key == "wifi_version" || key == "band" || key == "channel" {
-                "#"
-            } else {
-                ""
-            };
+        let commented: &str = if key == "wifi_version" || key == "band" || key == "channel" {
+            "#"
+        } else {
+            ""
+        };
         output.push_str(&format!("  {}{} = {}\n\n", commented, key, default));
     }
 

@@ -69,8 +69,12 @@ where
         None => Ok(None),
         Some(Repr::Str(s)) if s.trim().is_empty() => Ok(None),
         Some(Repr::Str(s)) => T::from_str(s.trim()).map(Some).map_err(DeError::custom),
-        Some(Repr::Int(i)) => T::from_str(&i.to_string()).map(Some).map_err(DeError::custom),
-        Some(Repr::Float(f)) => T::from_str(&f.to_string()).map(Some).map_err(DeError::custom),
+        Some(Repr::Int(i)) => T::from_str(&i.to_string())
+            .map(Some)
+            .map_err(DeError::custom),
+        Some(Repr::Float(f)) => T::from_str(&f.to_string())
+            .map(Some)
+            .map_err(DeError::custom),
     }
 }
 

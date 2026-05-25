@@ -299,8 +299,16 @@ fn render_section(section: &ConfigValues, depth: usize, html: &mut String) {
         _ => ("", section.title.as_str()),
     };
 
-    let card_class = if depth == 0 { "config-card" } else { "config-card sub-card" };
-    let advanced_attr = if section.advanced { r#" data-advanced="true""# } else { "" };
+    let card_class = if depth == 0 {
+        "config-card"
+    } else {
+        "config-card sub-card"
+    };
+    let advanced_attr = if section.advanced {
+        r#" data-advanced="true""#
+    } else {
+        ""
+    };
     let requires_attrs = requires_data_attrs(&section.requires);
     // `requires`-gated sections render closed by default; client-side
     // `evaluateRequires` opens them on met predicates and closes them again
@@ -356,7 +364,11 @@ fn render_field(key: &str, val: &ConfigValue, html: &mut String) {
         _ => format!(r#"<input type="text" id="{key}" />"#),
     };
 
-    let advanced_attr = if val.advanced { r#" data-advanced="true""# } else { "" };
+    let advanced_attr = if val.advanced {
+        r#" data-advanced="true""#
+    } else {
+        ""
+    };
     let requires_attrs = requires_data_attrs(&val.requires);
 
     html.push_str(&format!(
@@ -398,11 +410,7 @@ fn render_single_select(key: &str, typ: &str, options: Option<&[String]>) -> Str
     let opts = options.unwrap_or(&[]);
     let options_html = opts
         .iter()
-        .map(|opt| {
-            format!(
-                r#"<div class="single-select-option" data-value="{opt}">{opt}</div>"#
-            )
-        })
+        .map(|opt| format!(r#"<div class="single-select-option" data-value="{opt}">{opt}</div>"#))
         .collect::<Vec<_>>()
         .join("\n        ");
 

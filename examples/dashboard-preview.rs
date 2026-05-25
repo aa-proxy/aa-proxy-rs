@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use aa_proxy_rs::config::{AppConfig, ConfigJson};
-use aa_proxy_rs::web::{render_config_values, render_config_ids};
+use aa_proxy_rs::web::{render_config_ids, render_config_values};
 
 use axum::{
     extract::State,
