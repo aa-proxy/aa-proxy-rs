@@ -262,6 +262,89 @@ pub struct ConfigJson {
     pub titles: Vec<ConfigValues>,
 }
 
+/// Legacy/companion-app friendly representation of `static/config.json`.
+///
+/// The web UI can render nested `subsections`, section-level `advanced`, and
+/// `requires` metadata. Older companion app builds, however, still expect
+/// `/config-data` to look like the pre-nesting shape:
+///
+/// `{ "titles": [{ "title": "...", "values": { "key": { typ, description, values } } }] }`
+///
+/// Keep this DTO intentionally small so clients using the old Moshi models do
+/// not need to understand web-only metadata.
+#[derive(Debug, Clone, Serialize)]
+pub struct ConfigDataJson {
+    pub titles: Vec<ConfigDataValues>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ConfigDataValues {
+    pub title: String,
+    pub values: IndexMap<String, ConfigDataValue>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ConfigDataValue {
+    pub typ: String,
+    pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub values: Option<Vec<String>>,
+}
+
+impl ConfigJson {
+    /// Flatten nested sections for `/config-data` consumers that still use the
+    /// original companion-app schema. Nested section titles are rendered as a
+    /// breadcrumb, e.g. `MITM / Display injection / Cluster`.
+    pub fn to_flat_config_data(&self) -> ConfigDataJson {
+        let mut titles = Vec::new();
+
+        for section in &self.titles {
+            flatten_config_data_section(section, "", &mut titles);
+        }
+
+        ConfigDataJson { titles }
+    }
+}
+
+fn flatten_config_data_section(
+    section: &ConfigValues,
+    parent_title: &str,
+    out: &mut Vec<ConfigDataValues>,
+) {
+    let title = match (parent_title.is_empty(), section.title.is_empty()) {
+        (true, true) => String::new(),
+        (true, false) => section.title.clone(),
+        (false, true) => parent_title.to_string(),
+        (false, false) => format!("{} / {}", parent_title, section.title),
+    };
+
+    if !section.values.is_empty() {
+        let values = section
+            .values
+            .iter()
+            .map(|(key, value)| {
+                (
+                    key.clone(),
+                    ConfigDataValue {
+                        typ: value.typ.clone(),
+                        description: value.description.clone(),
+                        values: value.values.clone(),
+                    },
+                )
+            })
+            .collect();
+
+        out.push(ConfigDataValues {
+            title: title.clone(),
+            values,
+        });
+    }
+
+    for subsection in &section.subsections {
+        flatten_config_data_section(subsection, &title, out);
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct AppConfig {
