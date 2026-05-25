@@ -393,6 +393,38 @@ pub struct AppConfig {
     /// true  = wait for a fresh live IDR before forwarding inter-frames (clean decode)
     /// false = forward immediately after cached-IDR preview (lower latency, may artifact)
     pub media_wait_for_live_idr: bool,
+    /// Enable replacing MediaPlaybackMetadata.album_art with a PNG generated from the map/video path.
+    pub map_album_art_enabled: bool,
+    /// Artwork provider: file, rest, companion, or rust_h264. If the selected source
+    /// has no artwork yet, metadata is left untouched.
+    pub map_album_art_source: String,
+    /// PNG file used as replacement album art when map_album_art_source=file.
+    pub map_album_art_file: PathBuf,
+    /// Maximum replacement PNG size accepted by all album-art providers.
+    pub map_album_art_max_bytes: usize,
+    /// Plaintext payload size for FIRST fragments when re-fragmenting rewritten album-art metadata.
+    /// Continuation fragments use this value + 4, matching the observed AA/OpenAuto layout.
+    pub map_album_art_chunk_bytes: usize,
+    /// Injected display profile id to sample when map_album_art_source = rust_h264 or companion.
+    /// Example: aux-1 or cluster-1 from inject-displays.toml.
+    pub map_album_art_video_display_id: String,
+    /// Minimum interval between sampled video frames for runtime artwork providers.
+    pub map_album_art_capture_interval_ms: u64,
+    /// Output artwork size in pixels after crop/resize.
+    pub map_album_art_output_size_px: u32,
+    /// Enable cropping before resizing runtime video frames into album art.
+    /// When false, the full decoded frame is resized to the configured output size.
+    pub map_album_art_crop_enabled: bool,
+    /// Crop interpretation mode: percent or pixel.
+    pub map_album_art_crop_mode: String,
+    /// Crop X offset. Interpreted as percent or pixels according to map_album_art_crop_mode.
+    pub map_album_art_crop_x: u32,
+    /// Crop Y offset. Interpreted as percent or pixels according to map_album_art_crop_mode.
+    pub map_album_art_crop_y: u32,
+    /// Crop width. Interpreted as percent or pixels according to map_album_art_crop_mode.
+    pub map_album_art_crop_w: u32,
+    /// Crop height. Interpreted as percent or pixels according to map_album_art_crop_mode.
+    pub map_album_art_crop_h: u32,
     pub collect_speed: bool,
     pub disable_driving_status: bool,
     /// Optional shell command invoked on HU media-key long press.
@@ -704,6 +736,20 @@ impl Default for AppConfig {
             external_antenna: false,
             media_dump_base_port: None,
             media_wait_for_live_idr: true,
+            map_album_art_enabled: false,
+            map_album_art_source: "file".to_string(),
+            map_album_art_file: DEFAULT_MAP_ALBUM_ART_FILE.into(),
+            map_album_art_max_bytes: 262_144,
+            map_album_art_chunk_bytes: 16_120,
+            map_album_art_video_display_id: "aux-1".to_string(),
+            map_album_art_capture_interval_ms: 2_000,
+            map_album_art_output_size_px: 256,
+            map_album_art_crop_enabled: true,
+            map_album_art_crop_mode: "percent".to_string(),
+            map_album_art_crop_x: 30,
+            map_album_art_crop_y: 20,
+            map_album_art_crop_w: 40,
+            map_album_art_crop_h: 40,
             collect_speed: false,
             disable_driving_status: false,
             hu_button_handler: None,
@@ -963,6 +1009,22 @@ impl AppConfig {
             doc["media_dump_base_port"] = value(port as i64);
         }
         doc["media_wait_for_live_idr"] = value(self.media_wait_for_live_idr);
+        doc["map_album_art_enabled"] = value(self.map_album_art_enabled);
+        doc["map_album_art_source"] = value(self.map_album_art_source.to_string());
+        doc["map_album_art_file"] = value(self.map_album_art_file.display().to_string());
+        doc["map_album_art_max_bytes"] = value(self.map_album_art_max_bytes as i64);
+        doc["map_album_art_chunk_bytes"] = value(self.map_album_art_chunk_bytes as i64);
+        doc["map_album_art_video_display_id"] =
+            value(self.map_album_art_video_display_id.to_string());
+        doc["map_album_art_capture_interval_ms"] =
+            value(self.map_album_art_capture_interval_ms as i64);
+        doc["map_album_art_output_size_px"] = value(self.map_album_art_output_size_px as i64);
+        doc["map_album_art_crop_enabled"] = value(self.map_album_art_crop_enabled);
+        doc["map_album_art_crop_mode"] = value(self.map_album_art_crop_mode.to_string());
+        doc["map_album_art_crop_x"] = value(self.map_album_art_crop_x as i64);
+        doc["map_album_art_crop_y"] = value(self.map_album_art_crop_y as i64);
+        doc["map_album_art_crop_w"] = value(self.map_album_art_crop_w as i64);
+        doc["map_album_art_crop_h"] = value(self.map_album_art_crop_h as i64);
         doc["collect_speed"] = value(self.collect_speed);
         doc["disable_driving_status"] = value(self.disable_driving_status);
         if let Some(cmd) = &self.hu_button_handler {

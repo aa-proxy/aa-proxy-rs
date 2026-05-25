@@ -363,6 +363,71 @@
           }
         },
         {
+          "title": "🗺️ Album art injection",
+          "requires": "mitm",
+          "advanced": true,
+          "values": {
+            "map_album_art_enabled": {
+              "typ": "boolean",
+              "description": "Enable replacing MediaPlaybackMetadata album art. Requires mitm = true. Disabled by default."
+            },
+            "map_album_art_source": {
+              "typ": "select",
+              "description": "Artwork provider for MediaPlaybackMetadata album art. file reads map_album_art_file. rest and companion use the last PNG uploaded via POST /map-album-art. rust_h264 decodes the selected injected display video stream. If the selected source has no art yet, metadata is left untouched.",
+              "values": ["file", "rest", "companion", "rust_h264"]
+            },
+            "map_album_art_file": {
+              "typ": "string",
+              "description": "PNG file used as replacement album art when map_album_art_source=file. If missing, metadata is left untouched."
+            },
+            "map_album_art_max_bytes": {
+              "typ": "integer",
+              "description": "Maximum replacement PNG size accepted by all album-art providers. Default: 262144 bytes."
+            },
+            "map_album_art_chunk_bytes": {
+              "typ": "integer",
+              "description": "Plaintext payload size for FIRST fragments when re-fragmenting rewritten album-art metadata. Continuation fragments use this value + 4 to match the observed AA/OpenAuto layout. 0 uses default 16120."
+            },
+            "map_album_art_video_display_id": {
+              "typ": "string",
+              "description": "Injected display id to sample when map_album_art_source is companion or rust_h264, for example aux-1 or cluster-1 from inject-displays.toml."
+            },
+            "map_album_art_capture_interval_ms": {
+              "typ": "integer",
+              "description": "Minimum interval between sampled video frames for runtime artwork providers. Default: 2000 ms."
+            },
+            "map_album_art_output_size_px": {
+              "typ": "integer",
+              "description": "Output artwork size after crop/resize for runtime video providers. Default: 256 px."
+            },
+            "map_album_art_crop_enabled": {
+              "typ": "boolean",
+              "description": "Enable crop before resizing runtime video frames into album art. Default: true. Set false to use the full decoded frame."
+            },
+            "map_album_art_crop_mode": {
+              "typ": "select",
+              "description": "Runtime video crop mode. percent interprets map_album_art_crop_x/y/w/h as percentages; pixel interprets them as exact decoded-frame pixels. Default: percent.",
+              "values": ["percent", "pixel"]
+            },
+            "map_album_art_crop_x": {
+              "typ": "integer",
+              "description": "Runtime video crop X offset. Interpreted by map_album_art_crop_mode. Default: 30 in percent mode. Example for 800x480 with 550x230 margins: 275 in pixel mode."
+            },
+            "map_album_art_crop_y": {
+              "typ": "integer",
+              "description": "Runtime video crop Y offset. Interpreted by map_album_art_crop_mode. Default: 20 in percent mode. Example for 800x480 with 550x230 margins: 115 in pixel mode."
+            },
+            "map_album_art_crop_w": {
+              "typ": "integer",
+              "description": "Runtime video crop width. Interpreted by map_album_art_crop_mode. Default: 40 in percent mode. Example for 800x480 with 550x230 margins: 250 in pixel mode."
+            },
+            "map_album_art_crop_h": {
+              "typ": "integer",
+              "description": "Runtime video crop height. Interpreted by map_album_art_crop_mode. Default: 40 in percent mode. Example for 800x480 with 550x230 margins: 250 in pixel mode."
+            }
+          }
+        },
+        {
           "title": "🔌 EV routing",
           "requires": "mitm",
           "values": {
