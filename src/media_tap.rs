@@ -807,7 +807,7 @@ pub(crate) async fn tap_media_message(
                 } else {
                     let idr = is_idr_frame(media_data);
                     if idr {
-                        info!(
+                        debug!(
                             "{} <blue>media tap:</> received IDR from phone on ch {:#04x}: pts={}us, {} nal bytes, first: {:02X?}",
                             tap_name(proxy_type),
                             pkt.channel,

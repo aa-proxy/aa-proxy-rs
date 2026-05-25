@@ -809,7 +809,7 @@ pub fn emulate_injected_media_packet(
                 state.ack_counter = state.ack_counter.saturating_add(1);
                 rewrite_media_ack(pkt, state.session_id, state.ack_counter)?;
                 if state.ack_counter == 1 || state.ack_counter % 256 == 0 {
-                    info!(
+                    debug!(
                         "{} <blue>injected media:</> DATA ack on channel <b>{:#04x}</> display={:?} session_id={} ack={}",
                         get_name(proxy_type),
                         pkt.channel,
