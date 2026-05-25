@@ -17,7 +17,7 @@
         },
         "wifi_version": {
           "typ": "integer",
-          "description": "Wi-Fi operation mode:\n`1` = Wi-Fi 1 (802.11b) (Only 2.4 GHz),\n`2` = Wi-Fi 2 (IEEE 802.11a) (Only 5 GHz),\n`3` = Wi-Fi 3 (IEEE 802.11g) (only 2.4 GHz),\n`4` = Wi-Fi 4 (IEEE 802.11n) (2.4/5 GHz),\n`5` = Wi-Fi 5 (IEEE 802.11ac) (only 5 GHz),\n`6` = Wi-Fi 6/6E (IEEE 802.11ax) (2.4/5 GHz for Wi-Fi 6, 2.4/5/6 GHz for Wi-Fi 6E),\n`7` = Wi-Fi 7 (IEEE 802.11be) (2.4/5/6 GHz)",
+          "description": "Wi-Fi operation mode:\n`1` = Wi-Fi 1 (IEEE 802.11b) - 2.4 GHz only,\n`2` = Wi-Fi 2 (IEEE 802.11a) - 5 GHz only,\n`3` = Wi-Fi 3 (IEEE 802.11g) - 2.4 GHz only,\n`4` = Wi-Fi 4 (IEEE 802.11n) - 2.4/5 GHz,\n`5` = Wi-Fi 5 (IEEE 802.11ac) - 5 GHz only,\n`6` = Wi-Fi 6/6E (IEEE 802.11ax) - 2.4/5 GHz (Wi-Fi 6), 2.4/5/6 GHz (Wi-Fi 6E),\n`7` = Wi-Fi 7 (IEEE 802.11be) - 2.4/5/6 GHz",
           "values": ["1", "2", "3", "4", "5", "6", "7"]
         },
         "band": {
