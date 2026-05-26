@@ -658,53 +658,46 @@ impl Default for ConfigJson {
     }
 }
 
-fn filter_iw_list(pattern: &str) -> std::io::Result<bool> {
-    // Run the command `iw list`
+/// Run `iw list` once and return its stdout. All WiFi capability checks share this cache.
+fn iw_list_output() -> std::io::Result<String> {
     let output = Command::new("iw").arg("list").output()?;
-
-    // Convert the command output bytes to a string
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    // Iterate over each line in the output
-    for line in stdout.lines() {
-        // Check if the line contains search pattern
-        if line.contains(pattern) {
-            return Ok(true);
-        }
-    }
-
-    Ok(false)
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-fn supports_5ghz_wifi() -> std::io::Result<bool> {
-    filter_iw_list("5180.0 MHz")
+/// Check whether the cached `iw list` output contains `pattern` on any line.
+fn filter_iw_list_cached(iw_output: &str, pattern: &str) -> bool {
+    iw_output.lines().any(|line| line.contains(pattern))
 }
 
-fn get_latest_wifi_version() -> std::io::Result<u16> {
+fn supports_5ghz_wifi_cached(iw_output: &str) -> bool {
+    filter_iw_list_cached(iw_output, "5180.0 MHz")
+}
+
+fn get_latest_wifi_version_from(iw_output: &str) -> std::io::Result<u16> {
     // note:
-    // for checking 6GHz: filter_iw_list("5955.0 MHz")
+    // for checking 6GHz: filter_iw_list_cached(iw_output, "5955.0 MHz")
     // We don't use this right now. This is for future expansion with Wi-Fi 6E devices
 
-    if filter_iw_list("HE PHY Capabilities")? {
+    if filter_iw_list_cached(iw_output, "HE PHY Capabilities") {
         // 802.11ax
         Ok(6)
-    } else if filter_iw_list("VHT Capabilities")? {
+    } else if filter_iw_list_cached(iw_output, "VHT Capabilities") {
         // 802.11ac
         Ok(5)
-    } else if filter_iw_list(" HT Capabilities")?
-        || filter_iw_list("HT20")?
-        || filter_iw_list("HT TX/RX MCS")?
+    } else if filter_iw_list_cached(iw_output, " HT Capabilities")
+        || filter_iw_list_cached(iw_output, "HT20")
+        || filter_iw_list_cached(iw_output, "HT TX/RX MCS")
     {
         // 802.11n
         Ok(4)
-    } else if filter_iw_list("54.0 Mbps")? {
+    } else if filter_iw_list_cached(iw_output, "54.0 Mbps") {
         // 802.11g
         Ok(3)
-    } else if supports_5ghz_wifi()? {
+    } else if supports_5ghz_wifi_cached(iw_output) {
         // I don't know a proper way to check for 802.11a, but it is the first version to support
         // 5 GHz Wi-Fi and this far down the if statement we can use this to check.
         Ok(2)
-    } else if filter_iw_list("11.0 Mbps")? {
+    } else if filter_iw_list_cached(iw_output, "11.0 Mbps") {
         // 802.11b
         Ok(1)
     } else {
@@ -715,8 +708,14 @@ fn get_latest_wifi_version() -> std::io::Result<u16> {
     }
 }
 
+fn get_latest_wifi_version() -> std::io::Result<u16> {
+    get_latest_wifi_version_from(&iw_list_output()?)
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
+        // Run `iw list` once for all WiFi-capability defaults (wifi_version, band, channel).
+        let iw_cache = iw_list_output().unwrap_or_default();
         Self {
             advertise: true,
             enable_btle: true,
@@ -796,24 +795,19 @@ impl Default for AppConfig {
             ev_connector_types: EvConnectorTypes::default(),
             enable_ssh: true,
             usb_serial_console: false,
-            wifi_version: get_latest_wifi_version().unwrap_or(1),
-            band: {
-                if supports_5ghz_wifi().unwrap_or(false) {
-                    // Eventually: Add check for 6 GHz
-                    "5"
-                } else {
-                    "2.4"
-                }
-                .to_string()
+            wifi_version: get_latest_wifi_version_from(&iw_cache).unwrap_or(1),
+            band: if supports_5ghz_wifi_cached(&iw_cache) {
+                // Eventually: Add check for 6 GHz
+                "5".to_string()
+            } else {
+                "2.4".to_string()
             },
             country_code: "US".to_string(),
-            channel: {
-                if supports_5ghz_wifi().unwrap_or(false) {
-                    // Eventually: Add check for 6 GHz
-                    36
-                } else {
-                    6
-                }
+            channel: if supports_5ghz_wifi_cached(&iw_cache) {
+                // Eventually: Add check for 6 GHz
+                36
+            } else {
+                6
             },
             ssid: String::from(IDENTITY_NAME),
             wpa_passphrase: String::from(IDENTITY_NAME),
