@@ -66,6 +66,10 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>
 const NAME: &str = "<i><bright-black> main: </>";
 const HOSTAPD_CONF_IN: &str = "/etc/hostapd.conf.in";
 const HOSTAPD_CONF_OUT: &str = "/var/run/hostapd.conf";
+const DNSMASQ_CONF_IN: &str = "/etc/dnsmasq.conf.in";
+const DNSMASQ_CONF_OUT: &str = "/var/run/dnsmasq.conf";
+const INTERFACES_IN: &str = "/etc/network/interfaces.in";
+const INTERFACES_OUT: &str = "/var/run/interfaces";
 const UMTPRD_CONF_IN: &str = "/etc/umtprd/umtprd.conf.in";
 const UMTPRD_CONF_OUT: &str = "/var/run/umtprd.conf";
 const GADGET_INIT_IN: &str = "/etc/S92usb_gadget.in";
@@ -609,6 +613,22 @@ fn generate_hostapd_conf(config: AppConfig) -> std::io::Result<()> {
     fs::write(HOSTAPD_CONF_OUT, rendered)
 }
 
+fn generate_network_conf(config: &AppConfig, input: &str, output: &str) -> std::io::Result<()> {
+    info!(
+        "{} 🗃️ Generating config from input template: <bold><green>{}</>",
+        NAME, input
+    );
+
+    let template = fs::read_to_string(input)?;
+    let rendered = render_template(&template, &[("WLAN_SUBNET", &config.wlan_subnet)]);
+
+    info!(
+        "{} 💾 Saving generated file as: <bold><green>{}</>",
+        NAME, output
+    );
+    fs::write(output, rendered)
+}
+
 fn generate_usb_strings(input: &str, output: &str) -> std::io::Result<()> {
     info!(
         "{} 🗃️ Generating config from input template: <bold><green>{}</>",
@@ -681,6 +701,10 @@ fn main() -> Result<()> {
     // generate system configs from template and exit
     if args.generate_system_config {
         generate_usb_strings(UMTPRD_CONF_IN, UMTPRD_CONF_OUT)
+            .expect("error generating config from template");
+        generate_network_conf(&config, DNSMASQ_CONF_IN, DNSMASQ_CONF_OUT)
+            .expect("error generating config from template");
+        generate_network_conf(&config, INTERFACES_IN, INTERFACES_OUT)
             .expect("error generating config from template");
 
         generate_usb_strings(GADGET_INIT_IN, GADGET_INIT_OUT)

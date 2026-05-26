@@ -399,6 +399,7 @@ pub struct AppConfig {
     #[serde(default, deserialize_with = "empty_string_as_none")]
     pub udc: Option<String>,
     pub iface: String,
+    pub wlan_subnet: String,
     #[serde(default, deserialize_with = "empty_string_as_none")]
     pub btalias: Option<String>,
     pub timeout_secs: u16,
@@ -749,6 +750,7 @@ impl Default for AppConfig {
             stats_interval: 0,
             udc: None,
             iface: "wlan0".to_string(),
+            wlan_subnet: "10.0.0".to_string(),
             btalias: None,
             timeout_secs: 10,
             webserver: webserver_default_bind(),

@@ -35,6 +35,11 @@
           "description": "WLAN / Wi-Fi hotspot interface (for obtaining IP and BSSID)",
           "advanced": true
         },
+        "wlan_subnet": {
+          "typ": "string",
+          "description": "Internal Wi-Fi hotspot subnet (first three octets). The device IP will be <subnet>.1, DHCP pool <subnet>.2–<subnet>.20. Change only if this conflicts with another network in your car. Default: 10.0.0",
+          "advanced": true
+        },
         "external_antenna": {
           "typ": "boolean",
           "description": "Only for Radxa: enable if you have connected an external antenna",
