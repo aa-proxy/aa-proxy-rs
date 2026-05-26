@@ -691,7 +691,10 @@ fn get_latest_wifi_version() -> std::io::Result<u16> {
     } else if filter_iw_list("VHT Capabilities")? {
         // 802.11ac
         Ok(5)
-    } else if filter_iw_list(" HT Capabilities")? {
+    } else if filter_iw_list(" HT Capabilities")?
+        || filter_iw_list("HT20")?
+        || filter_iw_list("HT TX/RX MCS")?
+    {
         // 802.11n
         Ok(4)
     } else if filter_iw_list("54.0 Mbps")? {
