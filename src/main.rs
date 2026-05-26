@@ -5,8 +5,7 @@ use aa_proxy_rs::button::button_handler;
 use aa_proxy_rs::config::SharedConfig;
 use aa_proxy_rs::config::SharedConfigJson;
 use aa_proxy_rs::config::WifiConfig;
-use aa_proxy_rs::config::{Action, AppConfig};
-use aa_proxy_rs::config::{DEFAULT_WLAN_ADDR, TCP_SERVER_PORT};
+use aa_proxy_rs::config::{Action, AppConfig, TCP_SERVER_PORT};
 use aa_proxy_rs::crash;
 use aa_proxy_rs::device_info;
 use aa_proxy_rs::ev::BatteryData;
@@ -103,7 +102,7 @@ struct Args {
 }
 
 fn init_wifi_config(cfg: &AppConfig) -> Result<WifiConfig> {
-    let mut ip_addr = String::from(DEFAULT_WLAN_ADDR);
+    let mut ip_addr = format!("{}.1", cfg.wlan_subnet);
 
     // Get UP interface and IP
     for ifa in netif::up()? {

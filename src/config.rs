@@ -22,7 +22,6 @@ macro_rules! base_config_dir {
     };
 }
 pub const BASE_CONFIG_DIR: &str = base_config_dir!();
-pub const DEFAULT_WLAN_ADDR: &str = "10.0.0.1";
 pub const TCP_SERVER_PORT: i32 = 5288;
 pub const TCP_DHU_PORT: i32 = 5277;
 
