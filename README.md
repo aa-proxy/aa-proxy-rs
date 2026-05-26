@@ -15,12 +15,15 @@ The project initially focused on supporting the Raspberry Pi, but has since grow
 ## Features
 - **Reliable and safe** – written in [Rust](https://www.rust-lang.org/), minimizing memory-related bugs and crashes
 - **High performance** – uses modern [io_uring](https://kernel.dk/io_uring.pdf) kernel API for efficient I/O handling
+- [Companion app](https://aa-proxy.github.io/docs/companion-app)
+- **Dual I/O backend** – modern `tokio` backend alongside optional `io_uring` support for compatibility with older Linux kernels
 - **Automatic reconnection** – attempts to recover Android Auto connection in all failure scenarios
 - **Transfer monitoring** – displays bandwidth usage and real-time transfer statistics
 - **[Embedded web interface](#embedded-web-interface)** – lightweight UI for status and control
 - **Stall detection** – detects and handles stalled data transfers
 - **[MITM (Man-in-the-Middle) mode](#mitm-mode)** – supports advanced tweaks and modifications:
   - DPI change
+  - **[Google Maps EV Routing](#google-maps-ev-routing)** – allows EV-specific navigation features
   - Remove tap restriction
   - Disable media sink
   - Disable TTS sink
@@ -28,12 +31,23 @@ The project initially focused on supporting the Raspberry Pi, but has since grow
   - Enable developer mode
   - Detects user-initiated `Disconnect` on phone and prevents auto-reconnect
   - `Waze` workaround for LHT (Left-Hand Traffic) countries
+  - **Per-vehicle SDR UI override profiles** – patch AA UI margins and content insets for specific head units and phone combinations
   - **Media stream inspection** – tap decrypted AA video/audio stream via TCP (`media_dump_base_port`) for use in VLC, mpv, etc.
+  - **Injected display support** – define auxiliary/cluster displays with custom FPS, DPI, touchscreen support, and startup actions
+  - **Media tap registry & reverse bridge** – dynamically expose media streams to [companion app](https://aa-proxy.github.io/docs/companion-app) via reverse TCP bridge
+  - **Album art injection** – override album artwork from static images, uploads, or live injected display frames
   - **Event injection** – key event injection via `/inject_event` and rotary controller support via `/inject_rotary`
-  - **WASM scripting** – write hooks that modify AA packets on the fly via `wasmtime`; scripts can call the local REST API and push events over WebSocket (disabled on ARMv6 / RPi Zero W)
+  - **WASM scripting** – write hooks that modify AA packets on the fly via `wasmtime`
+    - Persistent script state and lifecycle hooks
+    - Configurable resource limits and hooks directory
+    - Web UI integration for per-script configuration
+    - Scripts can call the local REST API and push events over WebSocket
+    - Disabled on ARMv6 / RPi Zero W
+  - **BT SCO/eSCO call audio bridge** – routes phone call audio through Android Auto media/microphone channels with echo control and resampling
+  - **Vendor Extension Channel (VEC)** – packet-level extension channel integrated with REST, WebSocket, and WASM hooks
   - **Speed & odometry** – speed data collection (`/speed` endpoint), odometer injection (`/odometer`), and tire pressure injection (`/tire-pressure`) via REST API
   - **Media button interception** – short press re-injects a clean click; long press triggers a configurable script (`hu_button_handler`)
-- **[Google Maps EV Routing](#google-maps-ev-routing)** – allows EV-specific navigation features
+  - **Packet debug mode** – fine-grained packet inspection with protobuf decoding, filtering, and payload truncation
 - **Wired USB phone mode** – works without the Bluetooth handshake or Wi-Fi pairing
 - **[Support for Google's Desktop Head Unit (DHU)](#connecting-to-desktop-head-unit-dhu)** – ideal for debugging and development
 - **OTA updates** – SWUpdate over-the-air update support for all Raspberry Pi and AAWireless boards, including TCP reverse bridge for companion app updates
