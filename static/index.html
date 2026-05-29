@@ -146,7 +146,10 @@
 
             <div>
               <p><strong>D-Pad</strong></p>
-              <div class="dpad-grid" title="Use scroll wheel or drag corners to send rotary events">
+              <div
+                class="dpad-grid"
+                title="Use scroll wheel or drag corners to send rotary events"
+              >
                 <span><span>↻</span></span>
                 <button type="button" onclick="sendKeyTap(19, 'DPAD_UP')">
                   ▲
@@ -321,27 +324,25 @@
           let angle = 0;
           let pointerId = null;
           let visual = null;
-          
+
           function onPointerMove(event) {
-            if(event.pointerId !== pointerId)
-              return;
-            
+            if (event.pointerId !== pointerId) return;
+
             var rect = dpad.getBoundingClientRect();
             var x = event.clientX - rect.left - rect.width / 2;
             var y = event.clientY - rect.top - rect.height / 2;
             var newAngle = Math.atan2(y, x);
-            var delta = ((newAngle - angle) / 2 / Math.PI * STEPS_PER_ROTATION) ^ 0;  // rounds towards 0
-            if(delta > STEPS_PER_ROTATION / 2)
-              delta -= STEPS_PER_ROTATION;
-            if(delta < -STEPS_PER_ROTATION / 2)
-              delta += STEPS_PER_ROTATION;
-            
-            if(delta != 0) {
+            var delta =
+              (((newAngle - angle) / 2 / Math.PI) * STEPS_PER_ROTATION) ^ 0; // rounds towards 0
+            if (delta > STEPS_PER_ROTATION / 2) delta -= STEPS_PER_ROTATION;
+            if (delta < -STEPS_PER_ROTATION / 2) delta += STEPS_PER_ROTATION;
+
+            if (delta != 0) {
               angle = newAngle;
               sendRotary(delta);
               visual.style.transform = `rotate(${angle}rad)`;
             }
-            
+
             event.preventDefault();
             return false;
           }
@@ -349,39 +350,44 @@
             dpad.releasePointerCapture(event.pointerId);
             dpad.style.cursor = "";
             pointerId = null;
-            if(visual) {
+            if (visual) {
               visual.parentNode.removeChild(visual);
               visual = null;
             }
           }
-          
-          dpad.addEventListener("pointerdown", event => {
-            if(event.target.nodeName.toLowerCase() == "button")
-              return;
-            
-            if(pointerId === null) {
-              var rect = dpad.getBoundingClientRect();
-              var x = event.clientX - rect.left - rect.width / 2;
-              var y = event.clientY - rect.top - rect.height / 2;
-              angle = Math.atan2(y, x);
-              
-              pointerId = event.pointerId;
-              dpad.setPointerCapture(pointerId);
-              dpad.style.cursor = "grabbing";
-              window.addEventListener("pointermove", onPointerMove, {passive: false});
-              if(!visual) {
-                visual = dpad.appendChild(document.createElement("div"));
-                visual.className = "rotary-visual";
-                visual.style.transform = `rotate(${angle}rad)`;
+
+          dpad.addEventListener(
+            "pointerdown",
+            (event) => {
+              if (event.target.nodeName.toLowerCase() == "button") return;
+
+              if (pointerId === null) {
+                var rect = dpad.getBoundingClientRect();
+                var x = event.clientX - rect.left - rect.width / 2;
+                var y = event.clientY - rect.top - rect.height / 2;
+                angle = Math.atan2(y, x);
+
+                pointerId = event.pointerId;
+                dpad.setPointerCapture(pointerId);
+                dpad.style.cursor = "grabbing";
+                window.addEventListener("pointermove", onPointerMove, {
+                  passive: false,
+                });
+                if (!visual) {
+                  visual = dpad.appendChild(document.createElement("div"));
+                  visual.className = "rotary-visual";
+                  visual.style.transform = `rotate(${angle}rad)`;
+                }
               }
-            }
-            
-            event.preventDefault();
-          }, {passive: false});
+
+              event.preventDefault();
+            },
+            { passive: false },
+          );
           dpad.addEventListener("pointercancel", onPointerUp);
           dpad.addEventListener("pointerup", onPointerUp);
-          
-          dpad.addEventListener("wheel", event => {
+
+          dpad.addEventListener("wheel", (event) => {
             let wheelDelta = event.deltaX != 0 ? event.deltaX : event.deltaY;
             let delta = wheelDelta > 0 ? 1 : -1;
             sendRotary(delta);
