@@ -702,6 +702,14 @@ input[type="checkbox"]:not(.multi-select-dropdown input):checked::after {
     gap: 0.35rem;
     grid-template-columns: repeat(2, minmax(0, 1fr));
 }
+.wide-grid-3 {
+    display: grid;
+    gap: 0.35rem;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.controller-drawer-body .wide-grid-3 button {
+    font-size: 0.9rem;
+}
 
 /* Small accent-coloured group label above each keypad / dpad / wide
    grid. Replaces the default <p><strong>…</strong></p> look. */
