@@ -97,8 +97,8 @@
         },
         "bt_wireless_poc_mode": {
           "typ": "string",
-          "description": "EXPERIMENTAL PoC mode: bridge = relay phone<->HU RFCOMM using one adapter; probe = connect to HU and emulate only the Wi-Fi bootstrap frames.",
-          "values": ["bridge", "probe"],
+          "description": "EXPERIMENTAL PoC mode: bridge = relay phone<->HU RFCOMM using one adapter; probe = connect to HU and emulate only the Wi-Fi bootstrap frames; car-wifi-mitm = delay/modify BT Wi-Fi bootstrap, join car Wi-Fi, and raw-relay TCP.",
+          "values": ["bridge", "probe", "car-wifi-mitm"],
           "advanced": true
         },
         "bt_wireless_poc_hu_mac": {
@@ -116,6 +116,30 @@
         "bt_wireless_poc_tcp_probe": {
           "typ": "boolean",
           "description": "EXPERIMENTAL PoC probe mode: after WifiStartRequest, try a TCP connection to the HU AA endpoint before sending WifiConnectStatus.",
+          "advanced": true,
+          "requires": "bt_wireless_poc"
+        },
+        "bt_wireless_poc_car_wifi_join_cmd": {
+          "typ": "string",
+          "description": "EXPERIMENTAL PoC car-wifi-mitm: optional shell command template for joining the HU Wi-Fi. Placeholders: {iface}, {ssid}, {bssid}, {key}, {security}. Non-empty custom command overrides automatic nmcli/wpa_cli join.",
+          "advanced": true,
+          "requires": "bt_wireless_poc"
+        },
+        "bt_wireless_poc_car_wifi_auto_join": {
+          "typ": "boolean",
+          "description": "EXPERIMENTAL PoC car-wifi-mitm: if true and no custom command is configured, try to join HU Wi-Fi automatically using nmcli first, then wpa_cli.",
+          "advanced": true,
+          "requires": "bt_wireless_poc"
+        },
+        "bt_wireless_poc_rewrite_ip": {
+          "typ": "string",
+          "description": "EXPERIMENTAL PoC car-wifi-mitm: IP address to place in the phone-facing WifiStartRequest. Empty means auto-detect using route/interface IPv4.",
+          "advanced": true,
+          "requires": "bt_wireless_poc"
+        },
+        "bt_wireless_poc_proxy_listen_port": {
+          "typ": "integer",
+          "description": "EXPERIMENTAL PoC car-wifi-mitm: local TCP port where aa-proxy listens for the phone, default 5288.",
           "advanced": true,
           "requires": "bt_wireless_poc"
         }

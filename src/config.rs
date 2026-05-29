@@ -355,12 +355,25 @@ pub struct AppConfig {
     /// bridge = accept the phone AA RFCOMM connection, connect to the HU RFCOMM
     /// endpoint from the same adapter, and relay/log both directions.
     /// probe = connect to the HU RFCOMM endpoint and emulate only the BT Wi-Fi bootstrap.
+    /// car-wifi-mitm = delay/modify BT Wi-Fi bootstrap, join car Wi-Fi, and raw-relay TCP.
     pub bt_wireless_poc: bool,
     pub bt_wireless_poc_mode: String,
     pub bt_wireless_poc_hu_mac: String,
     #[serde(default, deserialize_with = "empty_string_as_none")]
     pub bt_wireless_poc_hu_channel: Option<u8>,
     pub bt_wireless_poc_tcp_probe: bool,
+    /// car-wifi-mitm mode: optional shell command template used to join the HU Wi-Fi.
+    /// Placeholders are shell-quoted: {iface}, {ssid}, {bssid}, {key}, {security}.
+    /// Non-empty custom command overrides automatic nmcli/wpa_cli join.
+    pub bt_wireless_poc_car_wifi_join_cmd: String,
+    /// car-wifi-mitm mode: if true and no custom command is configured, try to join
+    /// the HU Wi-Fi automatically from Rust using nmcli first, then wpa_cli.
+    pub bt_wireless_poc_car_wifi_auto_join: bool,
+    /// car-wifi-mitm mode: IP address to place in the phone-facing WifiStartRequest.
+    /// Empty means auto-detect using `ip route get <hu_ip>` / interface IPv4.
+    pub bt_wireless_poc_rewrite_ip: String,
+    /// car-wifi-mitm mode: local TCP port where aa-proxy listens for the phone.
+    pub bt_wireless_poc_proxy_listen_port: u16,
     pub debug: bool,
     /// Enable packet debug output independently from global debug logging.
     /// When enabled, pkt_debug lines are emitted at INFO level so `debug = false` can be kept.
@@ -736,6 +749,10 @@ impl Default for AppConfig {
             bt_wireless_poc_hu_mac: String::new(),
             bt_wireless_poc_hu_channel: None,
             bt_wireless_poc_tcp_probe: true,
+            bt_wireless_poc_car_wifi_join_cmd: String::new(),
+            bt_wireless_poc_car_wifi_auto_join: false,
+            bt_wireless_poc_rewrite_ip: String::new(),
+            bt_wireless_poc_proxy_listen_port: 5288,
             debug: false,
             pkt_debug: false,
             hexdump_level: HexdumpLevel::Disabled,
@@ -1011,6 +1028,13 @@ impl AppConfig {
         doc["bt_wireless_poc_hu_channel"] =
             value(self.bt_wireless_poc_hu_channel.unwrap_or(0) as i64);
         doc["bt_wireless_poc_tcp_probe"] = value(self.bt_wireless_poc_tcp_probe);
+        doc["bt_wireless_poc_car_wifi_join_cmd"] =
+            value(self.bt_wireless_poc_car_wifi_join_cmd.clone());
+        doc["bt_wireless_poc_car_wifi_auto_join"] =
+            value(self.bt_wireless_poc_car_wifi_auto_join);
+        doc["bt_wireless_poc_rewrite_ip"] = value(self.bt_wireless_poc_rewrite_ip.clone());
+        doc["bt_wireless_poc_proxy_listen_port"] =
+            value(self.bt_wireless_poc_proxy_listen_port as i64);
         doc["debug"] = value(self.debug);
         doc["pkt_debug"] = value(self.pkt_debug);
         doc["hexdump_level"] = value(format!("{:?}", self.hexdump_level));

