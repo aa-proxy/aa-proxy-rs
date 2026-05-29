@@ -89,6 +89,35 @@
           "typ": "boolean",
           "description": "EXPERIMENTAL: Maintain persistent Bluetooth connection to enable faster reconnection with MD",
           "advanced": true
+        },
+        "bt_wireless_poc": {
+          "typ": "boolean",
+          "description": "EXPERIMENTAL PoC: enable AA Wireless Bluetooth RFCOMM bridge/probe against a real wireless-capable HU. Disabled by default.",
+          "advanced": true
+        },
+        "bt_wireless_poc_mode": {
+          "typ": "string",
+          "description": "EXPERIMENTAL PoC mode: bridge = relay phone<->HU RFCOMM using one adapter; probe = connect to HU and emulate only the Wi-Fi bootstrap frames.",
+          "values": ["bridge", "probe"],
+          "advanced": true
+        },
+        "bt_wireless_poc_hu_mac": {
+          "typ": "string",
+          "description": "EXPERIMENTAL PoC: Bluetooth MAC address of the wireless-capable head unit.",
+          "advanced": true,
+          "requires": "bt_wireless_poc"
+        },
+        "bt_wireless_poc_hu_channel": {
+          "typ": "integer",
+          "description": "EXPERIMENTAL PoC: RFCOMM channel for HU AA Wireless profile. Leave empty or use 0 for BlueZ SDP/ConnectProfile auto-discovery; set a positive value to force manual RFCOMM.",
+          "advanced": true,
+          "requires": "bt_wireless_poc"
+        },
+        "bt_wireless_poc_tcp_probe": {
+          "typ": "boolean",
+          "description": "EXPERIMENTAL PoC probe mode: after WifiStartRequest, try a TCP connection to the HU AA endpoint before sending WifiConnectStatus.",
+          "advanced": true,
+          "requires": "bt_wireless_poc"
         }
       }
     },

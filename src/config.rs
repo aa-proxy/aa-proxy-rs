@@ -351,6 +351,16 @@ pub struct AppConfig {
     pub advertise: bool,
     pub enable_btle: bool,
     pub dongle_mode: bool,
+    /// Experimental AA Wireless Bluetooth PoC. Disabled by default.
+    /// bridge = accept the phone AA RFCOMM connection, connect to the HU RFCOMM
+    /// endpoint from the same adapter, and relay/log both directions.
+    /// probe = connect to the HU RFCOMM endpoint and emulate only the BT Wi-Fi bootstrap.
+    pub bt_wireless_poc: bool,
+    pub bt_wireless_poc_mode: String,
+    pub bt_wireless_poc_hu_mac: String,
+    #[serde(default, deserialize_with = "empty_string_as_none")]
+    pub bt_wireless_poc_hu_channel: Option<u8>,
+    pub bt_wireless_poc_tcp_probe: bool,
     pub debug: bool,
     /// Enable packet debug output independently from global debug logging.
     /// When enabled, pkt_debug lines are emitted at INFO level so `debug = false` can be kept.
@@ -721,6 +731,11 @@ impl Default for AppConfig {
             advertise: true,
             enable_btle: true,
             dongle_mode: false,
+            bt_wireless_poc: false,
+            bt_wireless_poc_mode: "bridge".to_string(),
+            bt_wireless_poc_hu_mac: String::new(),
+            bt_wireless_poc_hu_channel: None,
+            bt_wireless_poc_tcp_probe: true,
             debug: false,
             pkt_debug: false,
             hexdump_level: HexdumpLevel::Disabled,
@@ -990,6 +1005,12 @@ impl AppConfig {
         doc["advertise"] = value(self.advertise);
         doc["enable_btle"] = value(self.enable_btle);
         doc["dongle_mode"] = value(self.dongle_mode);
+        doc["bt_wireless_poc"] = value(self.bt_wireless_poc);
+        doc["bt_wireless_poc_mode"] = value(self.bt_wireless_poc_mode.clone());
+        doc["bt_wireless_poc_hu_mac"] = value(self.bt_wireless_poc_hu_mac.clone());
+        doc["bt_wireless_poc_hu_channel"] =
+            value(self.bt_wireless_poc_hu_channel.unwrap_or(0) as i64);
+        doc["bt_wireless_poc_tcp_probe"] = value(self.bt_wireless_poc_tcp_probe);
         doc["debug"] = value(self.debug);
         doc["pkt_debug"] = value(self.pkt_debug);
         doc["hexdump_level"] = value(format!("{:?}", self.hexdump_level));
