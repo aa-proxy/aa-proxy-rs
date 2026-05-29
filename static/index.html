@@ -320,6 +320,7 @@
         document.querySelectorAll(".dpad-grid").forEach((dpad) => {
           let angle = 0;
           let pointerId = null;
+          let visual = null;
           
           function onPointerMove(event) {
             if(event.pointerId !== pointerId)
@@ -338,6 +339,7 @@
             if(delta != 0) {
               angle = newAngle;
               sendRotary(delta);
+              visual.style.transform = `rotate(${angle}rad)`;
             }
             
             event.preventDefault();
@@ -347,9 +349,16 @@
             dpad.releasePointerCapture(event.pointerId);
             dpad.style.cursor = "";
             pointerId = null;
+            if(visual) {
+              visual.parentNode.removeChild(visual);
+              visual = null;
+            }
           }
           
           dpad.addEventListener("pointerdown", event => {
+            if(event.target.nodeName.toLowerCase() == "button")
+              return;
+            
             if(pointerId === null) {
               var rect = dpad.getBoundingClientRect();
               var x = event.clientX - rect.left - rect.width / 2;
@@ -360,6 +369,11 @@
               dpad.setPointerCapture(pointerId);
               dpad.style.cursor = "grabbing";
               window.addEventListener("pointermove", onPointerMove, {passive: false});
+              if(!visual) {
+                visual = dpad.appendChild(document.createElement("div"));
+                visual.className = "rotary-visual";
+                visual.style.transform = `rotate(${angle}rad)`;
+              }
             }
             
             event.preventDefault();

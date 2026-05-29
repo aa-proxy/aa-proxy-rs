@@ -687,6 +687,19 @@ input[type="checkbox"]:not(.multi-select-dropdown input):checked::after {
     justify-items: stretch;
     aspect-ratio: 1;
     cursor: grab;
+    position: relative;
+}
+.dpad-grid > .rotary-visual {
+    pointer-events: none;
+    touch-action: none;
+    position: absolute;
+    left: -5%;
+    top: -5%;
+    width: 110%;
+    height: 110%;
+    background: radial-gradient(circle at 75% 50%, rgba(18, 31, 58, 0.99) 0%, rgba(10, 12, 18, 0.99) 30%);
+    border-radius: 50%;
+    border: 1px solid rgba(20, 184, 166, 0.2);
 }
 
 /* All dpad buttons stretch to fill their grid cell so the arrow keys
