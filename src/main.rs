@@ -443,8 +443,25 @@ async fn tokio_main(
             NAME
         );
     } else {
+        let poc_mode = cfg.bt_wireless_poc_mode.trim().to_ascii_lowercase();
+        let bt_poc_probe_only = cfg.bt_wireless_poc && poc_mode == "probe";
+        let register_aa_wireless_profile = !bt_poc_probe_only;
+        if bt_poc_probe_only {
+            info!(
+                "{} 🧪 bt_wireless_poc probe mode: skipping local AA Wireless server profile registration to avoid UUID collision",
+                NAME
+            );
+        }
+
         loop {
-            match bluetooth::init(cfg.btalias.clone(), cfg.advertise, cfg.dongle_mode).await {
+            match bluetooth::init(
+                cfg.btalias.clone(),
+                cfg.advertise,
+                cfg.dongle_mode,
+                register_aa_wireless_profile,
+            )
+            .await
+            {
                 Ok(result) => {
                     bluetooth = Some(result);
                     break;
@@ -487,6 +504,42 @@ async fn tokio_main(
         if aa_server_tcp_enabled {
             // Direct MD TCP mode does not use the Bluetooth/Wi-Fi AA handshake.
             // io_loop will connect to aa_server_tcp_addr after the HU/DHU side is ready.
+        } else if cfg.bt_wireless_poc {
+            if let Some(ref mut bluetooth) = bluetooth {
+                let poc_mode = cfg.bt_wireless_poc_mode.trim().to_ascii_lowercase();
+                let result = if poc_mode == "probe" {
+                    bluetooth
+                        .aa_wireless_probe_poc(
+                            cfg.bt_wireless_poc_hu_mac.clone(),
+                            cfg.bt_wireless_poc_hu_channel,
+                            cfg.bt_wireless_poc_tcp_probe,
+                        )
+                        .await
+                } else {
+                    bluetooth
+                        .aa_wireless_bridge_poc(
+                            cfg.connect.clone(),
+                            cfg.bt_wireless_poc_hu_mac.clone(),
+                            cfg.bt_wireless_poc_hu_channel,
+                            Duration::from_secs(cfg.bt_timeout_secs.into()),
+                            cfg.action_requested == Some(Action::Stop),
+                        )
+                        .await
+                };
+
+                if let Err(e) = result {
+                    error!("{} bt_wireless_poc error: {}", NAME, e);
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    continue;
+                }
+            } else {
+                warn!(
+                    "{} bt_wireless_poc requested but Bluetooth was not initialized; restart after clearing aa_server_tcp_addr",
+                    NAME
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                continue;
+            }
         } else if let Some(ref wifi_conf) = wifi_config {
             if !usb_connected.load(Ordering::Relaxed)
                 && (!(cfg.quick_reconnect && profile_connected.load(Ordering::Relaxed))

@@ -9,7 +9,7 @@ use crate::web::AppState;
 use anyhow::anyhow;
 use backon::{ExponentialBuilder, Retryable};
 use bluer::{
-    rfcomm::{Profile, ProfileHandle, Role, Stream},
+    rfcomm::{Profile, ProfileHandle, ReqError, Role, SocketAddr, Stream},
     Adapter, Address, Uuid,
 };
 use futures::StreamExt;
@@ -18,8 +18,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::AsyncReadExt;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::sync::broadcast::Receiver as BroadcastReceiver;
 use tokio::sync::broadcast::Sender as BroadcastSender;
 use tokio::sync::Notify;
@@ -59,9 +59,205 @@ enum MessageId {
     WifiStartResponse = 7,
 }
 
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u16)]
+#[allow(unused)]
+enum PocMessageId {
+    WifiStartRequest = 1,
+    WifiInfoRequest = 2,
+    WifiInfoResponse = 3,
+    WifiVersionRequest = 4,
+    WifiVersionResponse = 5,
+    WifiConnectStatus = 6,
+    WifiStartResponse = 7,
+}
+
+impl PocMessageId {
+    fn name(id: u16) -> &'static str {
+        match id {
+            1 => "WifiStartRequest",
+            2 => "WifiInfoRequest",
+            3 => "WifiInfoResponse",
+            4 => "WifiVersionRequest",
+            5 => "WifiVersionResponse",
+            6 => "WifiConnectStatus",
+            7 => "WifiStartResponse",
+            _ => "Unknown",
+        }
+    }
+}
+
+struct PocFrameSniffer {
+    direction: &'static str,
+    buf: Vec<u8>,
+}
+
+impl PocFrameSniffer {
+    fn new(direction: &'static str) -> Self {
+        Self {
+            direction,
+            buf: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, chunk: &[u8]) {
+        self.buf.extend_from_slice(chunk);
+        while self.buf.len() >= HEADER_LEN {
+            let len = u16::from_be_bytes([self.buf[0], self.buf[1]]) as usize;
+            if self.buf.len() < HEADER_LEN + len {
+                break;
+            }
+
+            let message_id = u16::from_be_bytes([self.buf[2], self.buf[3]]);
+            let payload = self.buf[HEADER_LEN..HEADER_LEN + len].to_vec();
+            self.log_frame(message_id, &payload);
+            self.buf.drain(..HEADER_LEN + len);
+        }
+
+        if self.buf.len() > 1024 * 1024 {
+            warn!(
+                "{} 🧪 bt-wireless-poc: {} parser buffer exceeded 1 MiB; clearing partial data",
+                NAME, self.direction
+            );
+            self.buf.clear();
+        }
+    }
+
+    fn log_frame(&self, message_id: u16, payload: &[u8]) {
+        info!(
+            "{} 🧪 bt-wireless-poc: {} frame id={} ({}) len={} payload={}",
+            NAME,
+            self.direction,
+            message_id,
+            PocMessageId::name(message_id),
+            payload.len(),
+            if payload.is_empty() {
+                "<empty>".to_string()
+            } else {
+                hex::encode(payload)
+            }
+        );
+
+        match message_id {
+            x if x == PocMessageId::WifiStartRequest as u16 => {
+                match WifiStartRequest::WifiStartRequest::parse_from_bytes(payload) {
+                    Ok(req) => info!(
+                        "{} 🧪 bt-wireless-poc: {} parsed WifiStartRequest ip={} port={}",
+                        NAME,
+                        self.direction,
+                        req.ip_address(),
+                        req.port()
+                    ),
+                    Err(e) => warn!(
+                        "{} 🧪 bt-wireless-poc: {} failed to parse WifiStartRequest: {}",
+                        NAME, self.direction, e
+                    ),
+                }
+            }
+            x if x == PocMessageId::WifiInfoResponse as u16 => {
+                match WifiInfoResponse::WifiInfoResponse::parse_from_bytes(payload) {
+                    Ok(info_msg) => info!(
+                        "{} 🧪 bt-wireless-poc: {} parsed WifiInfoResponse ssid={} bssid={} security={:?} ap_type={:?} key_len={}",
+                        NAME,
+                        self.direction,
+                        info_msg.ssid(),
+                        info_msg.bssid(),
+                        info_msg.security_mode(),
+                        info_msg.access_point_type(),
+                        info_msg.key().len()
+                    ),
+                    Err(e) => warn!(
+                        "{} 🧪 bt-wireless-poc: {} failed to parse WifiInfoResponse: {}",
+                        NAME, self.direction, e
+                    ),
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+struct PocHuConnection {
+    stream: Stream,
+    endpoint: String,
+    _client_profile_session: Option<bluer::Session>,
+    _client_profile_handle: Option<ProfileHandle>,
+}
+
+async fn relay_with_poc_logging<R, W>(
+    mut reader: R,
+    mut writer: W,
+    direction: &'static str,
+) -> Result<u64>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    let mut sniffer = PocFrameSniffer::new(direction);
+    let mut total = 0u64;
+    let mut buf = vec![0u8; 4096];
+
+    loop {
+        let n = reader.read(&mut buf).await?;
+        if n == 0 {
+            info!(
+                "{} 🧪 bt-wireless-poc: {} EOF after {} bytes",
+                NAME, direction, total
+            );
+            let _ = writer.shutdown().await;
+            return Ok(total);
+        }
+
+        let chunk = &buf[..n];
+        sniffer.push(chunk);
+        writer.write_all(chunk).await?;
+        total += n as u64;
+    }
+}
+
+async fn read_poc_frame(stream: &mut Stream, direction: &'static str) -> Result<(u16, Vec<u8>)> {
+    let mut header = [0u8; HEADER_LEN];
+    stream.read_exact(&mut header).await?;
+    let len = u16::from_be_bytes([header[0], header[1]]) as usize;
+    let message_id = u16::from_be_bytes([header[2], header[3]]);
+    let mut payload = vec![0u8; len];
+    if len > 0 {
+        stream.read_exact(&mut payload).await?;
+    }
+
+    let mut full = header.to_vec();
+    full.extend_from_slice(&payload);
+    let mut sniffer = PocFrameSniffer::new(direction);
+    sniffer.push(&full);
+    Ok((message_id, payload))
+}
+
+async fn send_poc_frame(
+    stream: &mut Stream,
+    direction: &'static str,
+    message_id: PocMessageId,
+    payload: &[u8],
+) -> Result<()> {
+    let mut packet = Vec::with_capacity(HEADER_LEN + payload.len());
+    packet.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+    packet.extend_from_slice(&(message_id as u16).to_be_bytes());
+    packet.extend_from_slice(payload);
+
+    let mut sniffer = PocFrameSniffer::new(direction);
+    sniffer.push(&packet);
+    stream.write_all(&packet).await?;
+    Ok(())
+}
+
+fn success_status_payload() -> &'static [u8] {
+    // MessageStatus::OK encoded as proto2 field #1 varint 0.
+    &[0x08, 0x00]
+}
+
 pub struct Bluetooth {
     adapter: Adapter,
-    handle_aa: ProfileHandle,
+    handle_aa: Option<ProfileHandle>,
     btle_handle: Option<bluer::gatt::local::ApplicationHandle>,
     adv_handle: Option<bluer::adv::AdvertisementHandle>,
     current_index: usize,
@@ -73,6 +269,7 @@ pub async fn init(
     btalias: Option<String>,
     advertise: bool,
     dongle_mode: bool,
+    register_aa_wireless_profile: bool,
 ) -> Result<Bluetooth> {
     let session = bluer::Session::new().await?;
     let adapter = session.default_adapter().await?;
@@ -102,18 +299,29 @@ pub async fn init(
         adapter.set_discoverable_timeout(0).await?;
     }
 
-    // AA Wireless profile
-    let profile = Profile {
-        uuid: AAWG_PROFILE_UUID,
-        name: Some("AA Wireless".to_string()),
-        channel: Some(8),
-        role: Some(Role::Server),
-        require_authentication: Some(false),
-        require_authorization: Some(false),
-        ..Default::default()
+    // AA Wireless profile. Probe-only PoC acts as a Bluetooth client toward an HU/fake-HU,
+    // so it must not also register the same UUID as a local server profile; BlueZ allows only
+    // one local registration for a UUID and would otherwise fail later with "UUID already registered".
+    let handle_aa = if register_aa_wireless_profile {
+        let profile = Profile {
+            uuid: AAWG_PROFILE_UUID,
+            name: Some("AA Wireless".to_string()),
+            channel: Some(8),
+            role: Some(Role::Server),
+            require_authentication: Some(false),
+            require_authorization: Some(false),
+            ..Default::default()
+        };
+        let handle_aa = session.register_profile(profile).await?;
+        info!("{} 📱 AA Wireless Profile: registered", NAME);
+        Some(handle_aa)
+    } else {
+        info!(
+            "{} 📱 AA Wireless Profile: not registered locally because bt_wireless_poc probe mode will use client Profile registration",
+            NAME
+        );
+        None
     };
-    let handle_aa = session.register_profile(profile).await?;
-    info!("{} 📱 AA Wireless Profile: registered", NAME);
 
     Ok(Bluetooth {
         adapter,
@@ -494,7 +702,11 @@ impl Bluetooth {
             }
         }
 
-        let req = timeout(bt_timeout, self.handle_aa.next())
+        let handle_aa = self
+            .handle_aa
+            .as_mut()
+            .ok_or("AA Wireless local server profile is not registered in this mode")?;
+        let req = timeout(bt_timeout, handle_aa.next())
             .await?
             .expect("received no connect request");
         info!(
@@ -630,6 +842,361 @@ impl Bluetooth {
             tokio::time::sleep(Duration::from_millis(300)).await;
             info!("{} 🎧 Headset Profile (HSP): unregistered", NAME);
         }
+    }
+
+    async fn connect_hu_aa_wireless_poc(
+        &self,
+        hu_mac: &str,
+        hu_channel: Option<u8>,
+    ) -> Result<PocHuConnection> {
+        if hu_mac.trim().is_empty() {
+            return Err("bt_wireless_poc_hu_mac must be set".into());
+        }
+
+        let hu_addr: Address = hu_mac.trim().parse()?;
+
+        if let Some(channel) = hu_channel.filter(|channel| *channel > 0) {
+            let hu_socket = SocketAddr::new(hu_addr, channel);
+            info!(
+                "{} 🧪 bt-wireless-poc: connecting to HU RFCOMM {} (manual channel)",
+                NAME, hu_socket
+            );
+            let stream = timeout(Duration::from_secs(15), Stream::connect(hu_socket)).await??;
+            return Ok(PocHuConnection {
+                stream,
+                endpoint: format!("RFCOMM {}", hu_socket),
+                _client_profile_session: None,
+                _client_profile_handle: None,
+            });
+        }
+
+        info!(
+            "{} 🧪 bt-wireless-poc: HU RFCOMM channel is empty/0; using BlueZ ConnectProfile + SDP auto-discovery for {}",
+            NAME, hu_addr
+        );
+
+        let session = bluer::Session::new().await?;
+        let profile = Profile {
+            uuid: AAWG_PROFILE_UUID,
+            name: Some("AA Wireless Client PoC".to_string()),
+            role: Some(Role::Client),
+            require_authentication: Some(false),
+            require_authorization: Some(false),
+            auto_connect: Some(false),
+            ..Default::default()
+        };
+        let mut handle = session.register_profile(profile).await?;
+
+        let device = self.adapter.device(hu_addr)?;
+        match device.uuids().await {
+            Ok(Some(uuids)) if uuids.contains(&AAWG_PROFILE_UUID) => {
+                info!(
+                    "{} 🧪 bt-wireless-poc: HU {} advertises AA Wireless UUID {}; asking BlueZ to connect profile",
+                    NAME, hu_addr, AAWG_PROFILE_UUID
+                );
+            }
+            Ok(Some(uuids)) => {
+                warn!(
+                    "{} 🧪 bt-wireless-poc: HU {} UUID list does not include AA Wireless UUID {}; trying ConnectProfile anyway. UUIDs={:?}",
+                    NAME, hu_addr, AAWG_PROFILE_UUID, uuids
+                );
+            }
+            Ok(None) => {
+                warn!(
+                    "{} 🧪 bt-wireless-poc: HU {} UUID list is not available; trying ConnectProfile anyway",
+                    NAME, hu_addr
+                );
+            }
+            Err(e) => {
+                warn!(
+                    "{} 🧪 bt-wireless-poc: failed to read HU {} UUIDs: {}; trying ConnectProfile anyway",
+                    NAME, hu_addr, e
+                );
+            }
+        }
+
+        let connect_fut = device.connect_profile(&AAWG_PROFILE_UUID);
+        tokio::pin!(connect_fut);
+        let mut connect_done = false;
+        let mut deadline = Box::pin(tokio::time::sleep(Duration::from_secs(20)));
+
+        loop {
+            tokio::select! {
+                _ = &mut deadline => {
+                    return Err(format!(
+                        "timed out waiting for BlueZ AA Wireless ConnectProfile/NewConnection from HU {}",
+                        hu_addr
+                    ).into());
+                }
+                res = &mut connect_fut, if !connect_done => {
+                    connect_done = true;
+                    match res {
+                        Ok(()) => {
+                            info!(
+                                "{} 🧪 bt-wireless-poc: BlueZ ConnectProfile returned OK for HU {}; waiting for NewConnection",
+                                NAME, hu_addr
+                            );
+                        }
+                        Err(e) => {
+                            return Err(format!(
+                                "BlueZ ConnectProfile failed for HU {} / UUID {}: {}",
+                                hu_addr, AAWG_PROFILE_UUID, e
+                            ).into());
+                        }
+                    }
+                }
+                req = handle.next() => {
+                    let Some(req) = req else {
+                        return Err("BlueZ AA Wireless client profile closed before connection".into());
+                    };
+
+                    let device_addr = req.device();
+                    if device_addr != hu_addr {
+                        warn!(
+                            "{} 🧪 bt-wireless-poc: rejecting unexpected AA Wireless client-profile connection from {}; wanted {}",
+                            NAME, device_addr, hu_addr
+                        );
+                        req.reject(ReqError::Rejected);
+                        continue;
+                    }
+
+                    let stream = req.accept()?;
+                    if !connect_done {
+                        match timeout(Duration::from_secs(2), &mut connect_fut).await {
+                            Ok(Ok(())) => {
+                                info!(
+                                    "{} 🧪 bt-wireless-poc: BlueZ ConnectProfile completed after accepting HU {}",
+                                    NAME, hu_addr
+                                );
+                            }
+                            Ok(Err(e)) => {
+                                warn!(
+                                    "{} 🧪 bt-wireless-poc: ConnectProfile returned error after HU {} was accepted: {}",
+                                    NAME, hu_addr, e
+                                );
+                            }
+                            Err(_) => {
+                                debug!(
+                                    "{} 🧪 bt-wireless-poc: ConnectProfile still pending after accepting HU {}; keeping RFCOMM stream",
+                                    NAME, hu_addr
+                                );
+                            }
+                        }
+                    }
+                    info!(
+                        "{} 🧪 bt-wireless-poc: BlueZ accepted HU {} via AA Wireless SDP/ConnectProfile",
+                        NAME, hu_addr
+                    );
+                    return Ok(PocHuConnection {
+                        stream,
+                        endpoint: format!("{} via BlueZ SDP/ConnectProfile", hu_addr),
+                        _client_profile_session: Some(session),
+                        _client_profile_handle: Some(handle),
+                    });
+                }
+            }
+        }
+    }
+
+    pub async fn aa_wireless_bridge_poc(
+        &mut self,
+        connect: BluetoothAddressList,
+        hu_mac: String,
+        hu_channel: Option<u8>,
+        bt_timeout: Duration,
+        stopped: bool,
+    ) -> Result<()> {
+        if hu_mac.trim().is_empty() {
+            return Err("bt_wireless_poc_hu_mac must be set for bridge mode".into());
+        }
+
+        let hu_endpoint_hint = match hu_channel.filter(|channel| *channel > 0) {
+            Some(channel) => format!("{} RFCOMM channel {}", hu_mac.trim(), channel),
+            None => format!("{} AA Wireless SDP auto-discovery", hu_mac.trim()),
+        };
+
+        info!(
+            "{} 🧪 bt-wireless-poc bridge: waiting for phone AA RFCOMM, then connecting to HU {}",
+            NAME, hu_endpoint_hint
+        );
+
+        let (phone_addr, phone_stream) = self
+            .get_aa_profile_connection(connect, bt_timeout, stopped)
+            .await?;
+
+        info!(
+            "{} 🧪 bt-wireless-poc bridge: phone connected from {}; connecting to HU {}",
+            NAME, phone_addr, hu_endpoint_hint
+        );
+
+        let hu_conn = self.connect_hu_aa_wireless_poc(hu_mac.trim(), hu_channel).await?;
+        let hu_endpoint = hu_conn.endpoint.clone();
+        info!(
+            "{} 🧪 bt-wireless-poc bridge: connected to HU {}; relaying raw AA Wireless BT frames both ways",
+            NAME, hu_endpoint
+        );
+
+        let PocHuConnection {
+            stream: hu_stream,
+            endpoint: _,
+            _client_profile_session: hu_client_profile_session,
+            _client_profile_handle: hu_client_profile_handle,
+        } = hu_conn;
+        let _hu_client_profile_guard = (hu_client_profile_session, hu_client_profile_handle);
+
+        let (phone_read, phone_write) = phone_stream.into_split();
+        let (hu_read, hu_write) = hu_stream.into_split();
+
+        let mut phone_to_hu = tokio::spawn(relay_with_poc_logging(
+            phone_read,
+            hu_write,
+            "PHONE -> HU",
+        ));
+        let mut hu_to_phone = tokio::spawn(relay_with_poc_logging(
+            hu_read,
+            phone_write,
+            "HU -> PHONE",
+        ));
+
+        tokio::select! {
+            res = &mut phone_to_hu => {
+                match res {
+                    Ok(Ok(bytes)) => info!("{} 🧪 bt-wireless-poc bridge: PHONE -> HU ended after {} bytes", NAME, bytes),
+                    Ok(Err(e)) => warn!("{} 🧪 bt-wireless-poc bridge: PHONE -> HU error: {}", NAME, e),
+                    Err(e) => warn!("{} 🧪 bt-wireless-poc bridge: PHONE -> HU task error: {}", NAME, e),
+                }
+                hu_to_phone.abort();
+            }
+            res = &mut hu_to_phone => {
+                match res {
+                    Ok(Ok(bytes)) => info!("{} 🧪 bt-wireless-poc bridge: HU -> PHONE ended after {} bytes", NAME, bytes),
+                    Ok(Err(e)) => warn!("{} 🧪 bt-wireless-poc bridge: HU -> PHONE error: {}", NAME, e),
+                    Err(e) => warn!("{} 🧪 bt-wireless-poc bridge: HU -> PHONE task error: {}", NAME, e),
+                }
+                phone_to_hu.abort();
+            }
+        }
+
+        info!("{} 🧪 bt-wireless-poc bridge: finished", NAME);
+        Ok(())
+    }
+
+    pub async fn aa_wireless_probe_poc(
+        &mut self,
+        hu_mac: String,
+        hu_channel: Option<u8>,
+        tcp_probe: bool,
+    ) -> Result<()> {
+        if hu_mac.trim().is_empty() {
+            return Err("bt_wireless_poc_hu_mac must be set for probe mode".into());
+        }
+
+        let hu_conn = self.connect_hu_aa_wireless_poc(hu_mac.trim(), hu_channel).await?;
+        let hu_endpoint = hu_conn.endpoint.clone();
+        let PocHuConnection {
+            stream: mut stream,
+            endpoint: _,
+            _client_profile_session: hu_client_profile_session,
+            _client_profile_handle: hu_client_profile_handle,
+        } = hu_conn;
+        let _hu_client_profile_guard = (hu_client_profile_session, hu_client_profile_handle);
+
+        info!(
+            "{} 🧪 bt-wireless-poc probe: connected to HU {}; waiting for WifiStartRequest",
+            NAME, hu_endpoint
+        );
+
+        let (message_id, payload) = read_poc_frame(&mut stream, "HU -> POC").await?;
+        if message_id != PocMessageId::WifiStartRequest as u16 {
+            warn!(
+                "{} 🧪 bt-wireless-poc probe: first HU frame was {}, expected WifiStartRequest; continuing anyway",
+                NAME, message_id
+            );
+        }
+
+        let mut target_ip = String::new();
+        let mut target_port = 0i32;
+        if message_id == PocMessageId::WifiStartRequest as u16 {
+            if let Ok(req) = WifiStartRequest::WifiStartRequest::parse_from_bytes(&payload) {
+                target_ip = req.ip_address().to_string();
+                target_port = req.port();
+            }
+        }
+
+        send_poc_frame(
+            &mut stream,
+            "POC -> HU",
+            PocMessageId::WifiInfoRequest,
+            &[],
+        )
+        .await?;
+
+        let (message_id, _payload) = read_poc_frame(&mut stream, "HU -> POC").await?;
+        if message_id != PocMessageId::WifiInfoResponse as u16 {
+            warn!(
+                "{} 🧪 bt-wireless-poc probe: second HU frame was {}, expected WifiInfoResponse",
+                NAME, message_id
+            );
+        }
+
+        send_poc_frame(
+            &mut stream,
+            "POC -> HU",
+            PocMessageId::WifiStartResponse,
+            success_status_payload(),
+        )
+        .await?;
+
+        if tcp_probe && !target_ip.is_empty() && target_port > 0 {
+            let addr = format!("{}:{}", target_ip, target_port);
+            info!(
+                "{} 🧪 bt-wireless-poc probe: trying TCP probe to HU AA endpoint {}",
+                NAME, addr
+            );
+            match timeout(Duration::from_secs(5), TcpStream::connect(addr.as_str())).await {
+                Ok(Ok(_tcp)) => info!(
+                    "{} 🧪 bt-wireless-poc probe: TCP probe connected to {}",
+                    NAME, addr
+                ),
+                Ok(Err(e)) => warn!(
+                    "{} 🧪 bt-wireless-poc probe: TCP probe failed to {}: {}",
+                    NAME, addr, e
+                ),
+                Err(e) => warn!(
+                    "{} 🧪 bt-wireless-poc probe: TCP probe timed out to {}: {}",
+                    NAME, addr, e
+                ),
+            }
+        }
+
+        send_poc_frame(
+            &mut stream,
+            "POC -> HU",
+            PocMessageId::WifiConnectStatus,
+            success_status_payload(),
+        )
+        .await?;
+
+        info!(
+            "{} 🧪 bt-wireless-poc probe: bootstrap frames sent; keeping RFCOMM open until HU closes or 30s idle timeout",
+            NAME
+        );
+
+        loop {
+            match timeout(Duration::from_secs(30), read_poc_frame(&mut stream, "HU -> POC")).await {
+                Ok(Ok((_id, _payload))) => continue,
+                Ok(Err(e)) => {
+                    info!("{} 🧪 bt-wireless-poc probe: RFCOMM ended: {}", NAME, e);
+                    break;
+                }
+                Err(_) => {
+                    info!("{} 🧪 bt-wireless-poc probe: idle timeout; closing", NAME);
+                    break;
+                }
+            }
+        }
+
+        Ok(())
     }
 
     pub async fn aa_handshake(
