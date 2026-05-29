@@ -685,12 +685,15 @@ input[type="checkbox"]:not(.multi-select-dropdown input):checked::after {
     gap: 0.35rem;
     grid-template-columns: repeat(3, minmax(0, 1fr));
     justify-items: stretch;
+    aspect-ratio: 1;
+    cursor: grab;
 }
 
 /* All dpad buttons stretch to fill their grid cell so the arrow keys
    match the width of the phone-keypad buttons next to them. */
 .dpad-grid > button {
     width: 100%;
+    cursor: pointer;
 }
 
 .dpad-center {
@@ -755,7 +758,14 @@ input[type="checkbox"]:not(.multi-select-dropdown input):checked::after {
 
 /* Empty spacers in the dpad grid shouldn't take button visual space. */
 .dpad-grid > span {
+    display: flex;
+    
+    /* for rotary input */
+    touch-action: none;
+}
+.dpad-grid > span > span{
     display: block;
+    margin: auto;
 }
 
 @media (min-width: 900px) {
