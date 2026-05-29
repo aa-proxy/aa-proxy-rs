@@ -190,9 +190,21 @@ struct PocHuConnection {
 pub struct CarWifiMitmPocOptions {
     pub hu_mac: String,
     pub hu_channel: Option<u8>,
+    /// Legacy/default interface. Used as the STA interface when
+    /// bt_wireless_poc_car_wifi_sta_iface is empty.
     pub iface: String,
     pub join_cmd: String,
     pub auto_join: bool,
+    /// If true, keep the existing aa-proxy AP interface up and create/use a
+    /// separate managed STA interface for the car Wi-Fi. Requires the Wi-Fi
+    /// chipset to support concurrent AP+managed mode on the same channel.
+    pub keep_ap: bool,
+    /// Managed STA interface used to join the HU/car Wi-Fi. Example: wlan0
+    /// for takeover mode, sta0 for keep_ap mode.
+    pub sta_iface: String,
+    /// Existing AP interface to keep when keep_ap=true. Used to discover the
+    /// phy for creating sta_iface. Example: wlan0.
+    pub ap_iface: String,
     pub rewrite_ip: String,
     pub listen_port: u16,
     pub bt_timeout: Duration,
@@ -502,36 +514,337 @@ async fn run_wpa_cli_wifi_join(
     Ok(())
 }
 
-async fn run_car_wifi_join(
-    custom_template: &str,
-    auto_join: bool,
+
+async fn iface_exists(iface: &str) -> bool {
+    if iface.trim().is_empty() {
+        return false;
+    }
+    matches!(
+        timeout(
+            Duration::from_secs(2),
+            Command::new("ip").args(["link", "show", "dev", iface.trim()]).output(),
+        )
+        .await,
+        Ok(Ok(output)) if output.status.success()
+    )
+}
+
+async fn run_shell_for_wifi(label: &str, command: &str, timeout_secs: u64) -> Result<()> {
+    debug!(
+        "{} 🧪 bt-wireless-poc car-wifi-mitm: running {}: {}",
+        NAME, label, command
+    );
+    let output = timeout(
+        Duration::from_secs(timeout_secs),
+        Command::new("/bin/sh").arg("-c").arg(command).output(),
+    )
+    .await??;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!(
+            "{} failed status={} stdout={} stderr={}",
+            label,
+            output.status,
+            stdout.trim(),
+            stderr.trim()
+        )
+        .into())
+    }
+}
+
+async fn iface_ipv4(iface: &str) -> Option<String> {
+    let output = timeout(
+        Duration::from_secs(3),
+        Command::new("ip")
+            .args(["-4", "addr", "show", "dev", iface.trim()])
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let tokens: Vec<&str> = stdout.split_whitespace().collect();
+    for pair in tokens.windows(2) {
+        if pair[0] == "inet" {
+            return Some(pair[1].split('/').next().unwrap_or(pair[1]).to_string());
+        }
+    }
+    None
+}
+
+async fn wait_for_wifi_ready(iface: &str, ssid: &str, timeout_duration: Duration) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < timeout_duration {
+        if current_iw_ssid(iface).await.as_deref() == Some(ssid) {
+            info!(
+                "{} 🧪 bt-wireless-poc car-wifi-mitm: iface {} is associated to ssid={}",
+                NAME, iface, ssid
+            );
+            return true;
+        }
+        if let Some(ip) = iface_ipv4(iface).await {
+            info!(
+                "{} 🧪 bt-wireless-poc car-wifi-mitm: iface {} has IPv4 {} after Wi-Fi join",
+                NAME, iface, ip
+            );
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    false
+}
+
+fn wpa_supplicant_config(info_msg: &WifiInfoResponse::WifiInfoResponse) -> String {
+    let ssid = info_msg.ssid();
+    let key = info_msg.key();
+    if key.is_empty() || info_msg.security_mode() == SecurityMode::OPEN {
+        format!(
+            "network={{\n    ssid={}\n    key_mgmt=NONE\n}}\n",
+            wpa_quote(ssid)
+        )
+    } else {
+        format!(
+            "network={{\n    ssid={}\n    psk={}\n    key_mgmt=WPA-PSK\n}}\n",
+            wpa_quote(ssid),
+            wpa_quote(key)
+        )
+    }
+}
+
+async fn prepare_sta_iface_takeover(iface: &str) -> Result<String> {
+    let iface = iface.trim();
+    if iface.is_empty() {
+        return Err("car Wi-Fi takeover needs a non-empty STA interface".into());
+    }
+
+    info!(
+        "{} 🧪 bt-wireless-poc car-wifi-mitm: takeover mode; stopping AP helpers and switching {} to managed mode",
+        NAME, iface
+    );
+    let _ = run_shell_for_wifi(
+        "stop AP helpers",
+        "killall hostapd dnsmasq udhcpd 2>/dev/null || true",
+        5,
+    )
+    .await;
+    let _ = run_shell_for_wifi(
+        "stop old wpa_supplicant",
+        &format!("killall wpa_supplicant 2>/dev/null || true"),
+        5,
+    )
+    .await;
+    run_shell_for_wifi(
+        "switch iface to managed",
+        &format!(
+            "ip link set {i} down && iw dev {i} set type managed && ip link set {i} up",
+            i = shell_quote(iface)
+        ),
+        10,
+    )
+    .await?;
+    Ok(iface.to_string())
+}
+
+async fn phy_for_iface(iface: &str) -> Option<String> {
+    let iface = iface.trim();
+    if iface.is_empty() {
+        return None;
+    }
+    let output = timeout(
+        Duration::from_secs(3),
+        Command::new("iw").args(["dev", iface, "info"]).output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        let line = line.trim();
+        if let Some(wiphy) = line.strip_prefix("wiphy") {
+            let wiphy = wiphy.trim();
+            if !wiphy.is_empty() {
+                return Some(format!("phy{}", wiphy));
+            }
+        }
+    }
+    None
+}
+
+async fn prepare_sta_iface_keep_ap(sta_iface: &str, ap_iface: &str) -> Result<String> {
+    let sta_iface = sta_iface.trim();
+    if sta_iface.is_empty() {
+        return Err("car Wi-Fi keep_ap mode needs bt_wireless_poc_car_wifi_sta_iface".into());
+    }
+    if iface_exists(sta_iface).await {
+        info!(
+            "{} 🧪 bt-wireless-poc car-wifi-mitm: keep_ap mode; reusing existing STA iface {}",
+            NAME, sta_iface
+        );
+        let _ = run_shell_for_wifi(
+            "bring STA iface up",
+            &format!("ip link set {} up", shell_quote(sta_iface)),
+            5,
+        )
+        .await;
+        return Ok(sta_iface.to_string());
+    }
+
+    let phy = phy_for_iface(ap_iface).await.unwrap_or_else(|| "phy0".to_string());
+    info!(
+        "{} 🧪 bt-wireless-poc car-wifi-mitm: keep_ap mode; creating managed STA iface {} on {} while AP iface {} stays up",
+        NAME, sta_iface, phy, ap_iface
+    );
+    run_shell_for_wifi(
+        "create STA iface",
+        &format!(
+            "iw phy {} interface add {} type managed && ip link set {} up",
+            shell_quote(&phy),
+            shell_quote(sta_iface),
+            shell_quote(sta_iface)
+        ),
+        10,
+    )
+    .await?;
+    Ok(sta_iface.to_string())
+}
+
+async fn run_wpa_supplicant_wifi_join(
     iface: &str,
     info_msg: &WifiInfoResponse::WifiInfoResponse,
 ) -> Result<()> {
-    let ssid = info_msg.ssid().trim();
     let iface = iface.trim();
+    if iface.is_empty() {
+        return Err("wpa_supplicant auto join needs a non-empty interface".into());
+    }
+    let conf_path = format!("/tmp/aa-proxy-car-wifi-{}.conf", iface.replace('/', "_"));
+    tokio::fs::write(&conf_path, wpa_supplicant_config(info_msg)).await?;
+
+    info!(
+        "{} 🧪 bt-wireless-poc car-wifi-mitm: auto Wi-Fi join using wpa_supplicant iface={} ssid={} bssid={} key_len={}",
+        NAME,
+        iface,
+        info_msg.ssid(),
+        info_msg.bssid(),
+        info_msg.key().len()
+    );
+
+    let _ = run_shell_for_wifi(
+        "stop old iface wpa_supplicant",
+        &format!(
+            "pidof wpa_supplicant >/dev/null 2>&1 && killall wpa_supplicant 2>/dev/null || true"
+        ),
+        5,
+    )
+    .await;
+
+    let output = timeout(
+        Duration::from_secs(15),
+        Command::new("wpa_supplicant")
+            .args(["-B", "-i", iface, "-c", conf_path.as_str(), "-D", "nl80211"])
+            .output(),
+    )
+    .await??;
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "wpa_supplicant failed status={} stdout={} stderr={}",
+            output.status,
+            stdout.trim(),
+            stderr.trim()
+        )
+        .into());
+    }
+
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    if command_available("udhcpc").await {
+        let output = timeout(
+            Duration::from_secs(35),
+            Command::new("udhcpc")
+                .args(["-i", iface, "-q", "-n", "-t", "6"])
+                .output(),
+        )
+        .await??;
+        if !output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!(
+                "{} 🧪 bt-wireless-poc car-wifi-mitm: udhcpc did not return success status={} stdout={} stderr={}",
+                NAME,
+                output.status,
+                stdout.trim(),
+                stderr.trim()
+            );
+        }
+    } else {
+        warn!(
+            "{} 🧪 bt-wireless-poc car-wifi-mitm: udhcpc not available; assuming interface already has an IP or DHCP is managed elsewhere",
+            NAME
+        );
+    }
+
+    Ok(())
+}
+
+async fn run_car_wifi_join(
+    custom_template: &str,
+    auto_join: bool,
+    base_iface: &str,
+    keep_ap: bool,
+    sta_iface: &str,
+    ap_iface: &str,
+    info_msg: &WifiInfoResponse::WifiInfoResponse,
+) -> Result<String> {
+    let ssid = info_msg.ssid().trim();
+    let base_iface = base_iface.trim();
+    let ap_iface = if ap_iface.trim().is_empty() {
+        base_iface
+    } else {
+        ap_iface.trim()
+    };
+    let requested_sta_iface = if sta_iface.trim().is_empty() {
+        if keep_ap { "sta0" } else { base_iface }
+    } else {
+        sta_iface.trim()
+    };
+
     if ssid.is_empty() {
         return Err("HU WifiInfoResponse did not include an SSID; cannot auto-join Wi-Fi".into());
     }
 
-    if !iface.is_empty() && current_iw_ssid(iface).await.as_deref() == Some(ssid) {
+    if !requested_sta_iface.is_empty()
+        && current_iw_ssid(requested_sta_iface).await.as_deref() == Some(ssid)
+    {
         info!(
             "{} 🧪 bt-wireless-poc car-wifi-mitm: iface {} is already associated to ssid={}",
-            NAME, iface, ssid
+            NAME, requested_sta_iface, ssid
         );
-        return Ok(());
+        return Ok(requested_sta_iface.to_string());
     }
 
     if !custom_template.trim().is_empty() {
-        run_wifi_join_custom_cmd(custom_template, iface, info_msg).await?;
-        if iface.is_empty() || wait_for_wifi_join(iface, ssid, Duration::from_secs(10)).await {
-            return Ok(());
+        run_wifi_join_custom_cmd(custom_template, requested_sta_iface, info_msg).await?;
+        if requested_sta_iface.is_empty()
+            || wait_for_wifi_ready(requested_sta_iface, ssid, Duration::from_secs(15)).await
+        {
+            return Ok(requested_sta_iface.to_string());
         }
         warn!(
-            "{} 🧪 bt-wireless-poc car-wifi-mitm: custom command returned success but iface {} is not associated to ssid={} yet",
-            NAME, iface, ssid
+            "{} 🧪 bt-wireless-poc car-wifi-mitm: custom command returned success but iface {} is not associated/IPv4-ready for ssid={} yet",
+            NAME, requested_sta_iface, ssid
         );
-        return Ok(());
+        return Ok(requested_sta_iface.to_string());
     }
 
     if !auto_join {
@@ -539,17 +852,23 @@ async fn run_car_wifi_join(
             "{} 🧪 bt-wireless-poc car-wifi-mitm: auto Wi-Fi join disabled and no join command configured; assuming SBC is already on car Wi-Fi",
             NAME
         );
-        return Ok(());
+        return Ok(requested_sta_iface.to_string());
     }
+
+    let join_iface = if keep_ap {
+        prepare_sta_iface_keep_ap(requested_sta_iface, ap_iface).await?
+    } else {
+        prepare_sta_iface_takeover(requested_sta_iface).await?
+    };
 
     let mut errors = Vec::new();
     if command_available("nmcli").await {
-        match run_nmcli_wifi_join(iface, info_msg).await {
+        match run_nmcli_wifi_join(&join_iface, info_msg).await {
             Ok(()) => {
-                if iface.is_empty() || wait_for_wifi_join(iface, ssid, Duration::from_secs(20)).await {
-                    return Ok(());
+                if wait_for_wifi_ready(&join_iface, ssid, Duration::from_secs(25)).await {
+                    return Ok(join_iface);
                 }
-                errors.push("nmcli returned success but association was not observed".to_string());
+                errors.push("nmcli returned success but association/IPv4 was not observed".to_string());
             }
             Err(e) => errors.push(format!("nmcli: {}", e)),
         }
@@ -561,12 +880,12 @@ async fn run_car_wifi_join(
     }
 
     if command_available("wpa_cli").await {
-        match run_wpa_cli_wifi_join(iface, info_msg).await {
+        match run_wpa_cli_wifi_join(&join_iface, info_msg).await {
             Ok(()) => {
-                if iface.is_empty() || wait_for_wifi_join(iface, ssid, Duration::from_secs(20)).await {
-                    return Ok(());
+                if wait_for_wifi_ready(&join_iface, ssid, Duration::from_secs(25)).await {
+                    return Ok(join_iface);
                 }
-                errors.push("wpa_cli returned success but association was not observed".to_string());
+                errors.push("wpa_cli returned success but association/IPv4 was not observed".to_string());
             }
             Err(e) => errors.push(format!("wpa_cli: {}", e)),
         }
@@ -577,8 +896,25 @@ async fn run_car_wifi_join(
         );
     }
 
+    if command_available("wpa_supplicant").await {
+        match run_wpa_supplicant_wifi_join(&join_iface, info_msg).await {
+            Ok(()) => {
+                if wait_for_wifi_ready(&join_iface, ssid, Duration::from_secs(25)).await {
+                    return Ok(join_iface);
+                }
+                errors.push("wpa_supplicant returned success but association/IPv4 was not observed".to_string());
+            }
+            Err(e) => errors.push(format!("wpa_supplicant: {}", e)),
+        }
+    } else {
+        debug!(
+            "{} 🧪 bt-wireless-poc car-wifi-mitm: wpa_supplicant not available for auto Wi-Fi join",
+            NAME
+        );
+    }
+
     if errors.is_empty() {
-        Err("auto Wi-Fi join requested but neither nmcli nor wpa_cli was available".into())
+        Err("auto Wi-Fi join requested but nmcli, wpa_cli, and wpa_supplicant were unavailable".into())
     } else {
         Err(format!("auto Wi-Fi join failed: {}", errors.join("; ")).into())
     }
@@ -1228,6 +1564,78 @@ impl Bluetooth {
         Ok(())
     }
 
+
+    async fn register_hsp_trigger_profile(&self, bt_sco: bool) -> Option<bluer::Session> {
+        if self.dongle_mode {
+            return None;
+        }
+
+        let session = match bluer::Session::new().await {
+            Ok(session) => session,
+            Err(e) => {
+                warn!("{} 🎧 Headset Profile (HSP): session error: {}, ignoring", NAME, e);
+                return None;
+            }
+        };
+        let profile = Profile {
+            uuid: HSP_HS_UUID,
+            name: Some("HSP HS".to_string()),
+            require_authentication: Some(false),
+            require_authorization: Some(false),
+            ..Default::default()
+        };
+
+        match session.register_profile(profile).await {
+            Ok(handle) => {
+                info!("{} 🎧 Headset Profile (HSP): registered", NAME);
+                tokio::spawn(async move {
+                    let mut h = handle;
+                    loop {
+                        let req = match h.next().await {
+                            Some(req) => req,
+                            None => {
+                                warn!("{} 🎧 Headset Profile (HSP): no more connect requests", NAME);
+                                break;
+                            }
+                        };
+
+                        let device = req.device().clone();
+                        info!(
+                            "{} 🎧 Headset Profile (HSP): connect from <b>{}</>",
+                            NAME, device
+                        );
+
+                        match req.accept() {
+                            Ok(stream) => {
+                                if bt_sco {
+                                    info!(
+                                        "{} 🎧 Headset Profile (HSP): accepted from <b>{}</>, dropping control stream in SCO mode",
+                                        NAME, device
+                                    );
+                                }
+                                drop(stream);
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "{} 🎧 Headset Profile (HSP): accept error from <b>{}</>: {}",
+                                    NAME, device, e
+                                );
+                            }
+                        }
+                    }
+                });
+                Some(session)
+            }
+            Err(e) => {
+                warn!(
+                    "{} 🎧 Headset Profile (HSP) registering error: {}, ignoring",
+                    NAME, e
+                );
+                None
+            }
+        }
+    }
+
     /// Drop HSP session here - this unregisters the profile from BlueZ.
     /// We do it explicitly with a small delay to give BlueZ time to clean up.
     async fn unregister_hsp(hsp_session: Option<bluer::Session>) {
@@ -1500,6 +1908,13 @@ impl Bluetooth {
             NAME, hu_endpoint_hint
         );
 
+        // Keep the same phone-trigger behavior as the normal AA handshake path.
+        // Without a local HSP HS profile, BlueZ device.connect_profile(HSP_AG) often
+        // fails with br-connection-profile-unavailable and the phone never opens the
+        // AA Wireless RFCOMM profile. The HSP control stream is accepted and dropped,
+        // exactly like the normal path, only to nudge Android into starting wireless AA.
+        let _hsp_session = self.register_hsp_trigger_profile(false).await;
+
         let (phone_addr, mut phone_stream) = self
             .get_aa_profile_connection(connect, options.bt_timeout, options.stopped)
             .await?;
@@ -1565,16 +1980,19 @@ impl Bluetooth {
         }
         let hu_wifi_info = WifiInfoResponse::WifiInfoResponse::parse_from_bytes(&hu_info_payload)?;
 
-        run_car_wifi_join(
+        let join_iface = run_car_wifi_join(
             &options.join_cmd,
             options.auto_join,
             &options.iface,
+            options.keep_ap,
+            &options.sta_iface,
+            &options.ap_iface,
             &hu_wifi_info,
         )
         .await?;
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        let rewrite_ip = discover_rewrite_ip(&hu_tcp_ip, &options.iface, &options.rewrite_ip).await?;
+        let rewrite_ip = discover_rewrite_ip(&hu_tcp_ip, &join_iface, &options.rewrite_ip).await?;
         let listen_addr = format!("0.0.0.0:{}", listen_port);
         let listener = TcpListener::bind(listen_addr.as_str()).await?;
         info!(

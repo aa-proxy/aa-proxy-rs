@@ -367,8 +367,17 @@ pub struct AppConfig {
     /// Non-empty custom command overrides automatic nmcli/wpa_cli join.
     pub bt_wireless_poc_car_wifi_join_cmd: String,
     /// car-wifi-mitm mode: if true and no custom command is configured, try to join
-    /// the HU Wi-Fi automatically from Rust using nmcli first, then wpa_cli.
+    /// the HU Wi-Fi automatically from Rust using nmcli, wpa_cli, or wpa_supplicant/udhcpc.
     pub bt_wireless_poc_car_wifi_auto_join: bool,
+    /// car-wifi-mitm mode: keep the aa-proxy AP up and join the car Wi-Fi with a
+    /// separate managed STA interface. Requires AP+managed support on the same channel.
+    pub bt_wireless_poc_car_wifi_keep_ap: bool,
+    /// car-wifi-mitm mode: managed STA interface used for joining HU/car Wi-Fi.
+    /// Empty falls back to `iface` in takeover mode, or `sta0` in keep_ap mode.
+    pub bt_wireless_poc_car_wifi_sta_iface: String,
+    /// car-wifi-mitm mode: existing AP interface to keep when keep_ap=true.
+    /// Empty falls back to `iface`.
+    pub bt_wireless_poc_car_wifi_ap_iface: String,
     /// car-wifi-mitm mode: IP address to place in the phone-facing WifiStartRequest.
     /// Empty means auto-detect using `ip route get <hu_ip>` / interface IPv4.
     pub bt_wireless_poc_rewrite_ip: String,
@@ -751,6 +760,9 @@ impl Default for AppConfig {
             bt_wireless_poc_tcp_probe: true,
             bt_wireless_poc_car_wifi_join_cmd: String::new(),
             bt_wireless_poc_car_wifi_auto_join: false,
+            bt_wireless_poc_car_wifi_keep_ap: false,
+            bt_wireless_poc_car_wifi_sta_iface: String::new(),
+            bt_wireless_poc_car_wifi_ap_iface: String::new(),
             bt_wireless_poc_rewrite_ip: String::new(),
             bt_wireless_poc_proxy_listen_port: 5288,
             debug: false,
@@ -1032,6 +1044,12 @@ impl AppConfig {
             value(self.bt_wireless_poc_car_wifi_join_cmd.clone());
         doc["bt_wireless_poc_car_wifi_auto_join"] =
             value(self.bt_wireless_poc_car_wifi_auto_join);
+        doc["bt_wireless_poc_car_wifi_keep_ap"] =
+            value(self.bt_wireless_poc_car_wifi_keep_ap);
+        doc["bt_wireless_poc_car_wifi_sta_iface"] =
+            value(self.bt_wireless_poc_car_wifi_sta_iface.clone());
+        doc["bt_wireless_poc_car_wifi_ap_iface"] =
+            value(self.bt_wireless_poc_car_wifi_ap_iface.clone());
         doc["bt_wireless_poc_rewrite_ip"] = value(self.bt_wireless_poc_rewrite_ip.clone());
         doc["bt_wireless_poc_proxy_listen_port"] =
             value(self.bt_wireless_poc_proxy_listen_port as i64);
