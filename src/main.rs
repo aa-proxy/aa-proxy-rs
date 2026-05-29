@@ -515,6 +515,23 @@ async fn tokio_main(
                             cfg.bt_wireless_poc_tcp_probe,
                         )
                         .await
+                } else if poc_mode == "car-wifi-mitm" || poc_mode == "wifi-mitm" {
+                    bluetooth
+                        .aa_wireless_car_wifi_mitm_poc(
+                            cfg.connect.clone(),
+                            bluetooth::CarWifiMitmPocOptions {
+                                hu_mac: cfg.bt_wireless_poc_hu_mac.clone(),
+                                hu_channel: cfg.bt_wireless_poc_hu_channel,
+                                iface: cfg.iface.clone(),
+                                join_cmd: cfg.bt_wireless_poc_car_wifi_join_cmd.clone(),
+                                auto_join: cfg.bt_wireless_poc_car_wifi_auto_join,
+                                rewrite_ip: cfg.bt_wireless_poc_rewrite_ip.clone(),
+                                listen_port: cfg.bt_wireless_poc_proxy_listen_port,
+                                bt_timeout: Duration::from_secs(cfg.bt_timeout_secs.into()),
+                                stopped: cfg.action_requested == Some(Action::Stop),
+                            },
+                        )
+                        .await
                 } else {
                     bluetooth
                         .aa_wireless_bridge_poc(
