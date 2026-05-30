@@ -8,8 +8,9 @@ use crate::web::AppState;
 use anyhow::anyhow;
 use backon::{ExponentialBuilder, Retryable};
 use bluer::{
+    l2cap::{SocketAddr as L2capSocketAddr, Stream as L2capStream},
     rfcomm::{Profile, ProfileHandle, ReqError, Role, SocketAddr, Stream},
-    Adapter, Address, Uuid,
+    Adapter, Address, AddressType, Uuid,
 };
 use futures::StreamExt;
 use simplelog::*;
@@ -39,6 +40,287 @@ const NAME: &str = "<i><bright-black> bluetooth: </>";
 // Just a generic Result type to ease error handling for us. Errors in multithreaded
 // async contexts needs some extra restrictions
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+
+const SDP_PSM: u16 = 0x0001;
+const SDP_PDU_SERVICE_SEARCH_ATTRIBUTE_REQUEST: u8 = 0x06;
+const SDP_PDU_SERVICE_SEARCH_ATTRIBUTE_RESPONSE: u8 = 0x07;
+const SDP_ATTR_PROTOCOL_DESCRIPTOR_LIST: u16 = 0x0004;
+const SDP_UUID_RFCOMM: u16 = 0x0003;
+const SDP_MAX_ATTRIBUTE_BYTES: u16 = 0xffff;
+
+fn sdp_de_sequence_u8(payload: Vec<u8>) -> Result<Vec<u8>> {
+    if payload.len() > u8::MAX as usize {
+        return Err(format!("SDP sequence too long for u8 length: {}", payload.len()).into());
+    }
+    let mut out = Vec::with_capacity(payload.len() + 2);
+    out.push(0x35); // Data Element Sequence, next u8 contains length.
+    out.push(payload.len() as u8);
+    out.extend_from_slice(&payload);
+    Ok(out)
+}
+
+fn sdp_de_uuid128(uuid: Uuid) -> Vec<u8> {
+    let mut out = Vec::with_capacity(17);
+    out.push(0x1c); // UUID, 128-bit.
+    out.extend_from_slice(&uuid.as_u128().to_be_bytes());
+    out
+}
+
+fn sdp_de_uint16(value: u16) -> [u8; 3] {
+    let [hi, lo] = value.to_be_bytes();
+    [0x09, hi, lo] // Unsigned integer, 16-bit.
+}
+
+fn sdp_de_uint32(value: u32) -> [u8; 5] {
+    let bytes = value.to_be_bytes();
+    [0x0a, bytes[0], bytes[1], bytes[2], bytes[3]] // Unsigned integer, 32-bit.
+}
+
+fn build_sdp_service_search_attribute_request(
+    transaction_id: u16,
+    service_uuid: Uuid,
+    continuation_state: &[u8],
+) -> Result<Vec<u8>> {
+    if continuation_state.len() > u8::MAX as usize {
+        return Err(format!("SDP continuation state too long: {}", continuation_state.len()).into());
+    }
+
+    let service_search_pattern = sdp_de_sequence_u8(sdp_de_uuid128(service_uuid))?;
+
+    let attr_range = ((SDP_ATTR_PROTOCOL_DESCRIPTOR_LIST as u32) << 16)
+        | SDP_ATTR_PROTOCOL_DESCRIPTOR_LIST as u32;
+    let attribute_id_list = sdp_de_sequence_u8(sdp_de_uint32(attr_range).to_vec())?;
+
+    let mut params = Vec::new();
+    params.extend_from_slice(&service_search_pattern);
+    params.extend_from_slice(&SDP_MAX_ATTRIBUTE_BYTES.to_be_bytes());
+    params.extend_from_slice(&attribute_id_list);
+    params.push(continuation_state.len() as u8);
+    params.extend_from_slice(continuation_state);
+
+    if params.len() > u16::MAX as usize {
+        return Err(format!("SDP request parameters too long: {}", params.len()).into());
+    }
+
+    let mut pdu = Vec::with_capacity(params.len() + 5);
+    pdu.push(SDP_PDU_SERVICE_SEARCH_ATTRIBUTE_REQUEST);
+    pdu.extend_from_slice(&transaction_id.to_be_bytes());
+    pdu.extend_from_slice(&(params.len() as u16).to_be_bytes());
+    pdu.extend_from_slice(&params);
+    Ok(pdu)
+}
+
+async fn read_sdp_pdu(stream: &mut L2capStream) -> Result<(u8, u16, Vec<u8>)> {
+    let mut header = [0u8; 5];
+    stream.read_exact(&mut header).await?;
+    let pdu_id = header[0];
+    let transaction_id = u16::from_be_bytes([header[1], header[2]]);
+    let param_len = u16::from_be_bytes([header[3], header[4]]) as usize;
+    let mut params = vec![0u8; param_len];
+    stream.read_exact(&mut params).await?;
+    Ok((pdu_id, transaction_id, params))
+}
+
+fn parse_rfcomm_channel_after_uuid16(bytes: &[u8], pos: usize) -> Option<u8> {
+    let tag = *bytes.get(pos)?;
+    match tag {
+        0x08 => {
+            let ch = *bytes.get(pos + 1)?;
+            (1..=30).contains(&ch).then_some(ch)
+        }
+        0x09 => {
+            let value = u16::from_be_bytes([*bytes.get(pos + 1)?, *bytes.get(pos + 2)?]);
+            if (1..=30).contains(&value) {
+                Some(value as u8)
+            } else {
+                None
+            }
+        }
+        0x0a => {
+            let value = u32::from_be_bytes([
+                *bytes.get(pos + 1)?,
+                *bytes.get(pos + 2)?,
+                *bytes.get(pos + 3)?,
+                *bytes.get(pos + 4)?,
+            ]);
+            if (1..=30).contains(&value) {
+                Some(value as u8)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn extract_rfcomm_channel_from_sdp_attribute_lists(bytes: &[u8]) -> Option<u8> {
+    // Minimal parser for the ProtocolDescriptorList we requested. In SDP data,
+    // RFCOMM is normally encoded as UUID16 0x0003 (`19 00 03`) followed by an
+    // unsigned integer data element containing the RFCOMM channel.
+    let pattern = [0x19, 0x00, 0x03];
+    bytes
+        .windows(pattern.len())
+        .enumerate()
+        .find_map(|(idx, window)| {
+            if window == pattern {
+                parse_rfcomm_channel_after_uuid16(bytes, idx + pattern.len())
+            } else {
+                None
+            }
+        })
+}
+
+async fn discover_rfcomm_channel_via_internal_sdp_once(hu_addr: Address, settle_delay: Duration) -> Result<u8> {
+    let sdp_addr = L2capSocketAddr::new(hu_addr, AddressType::BrEdr, SDP_PSM);
+    info!(
+        "{} 🧪 bt-wireless-poc: internal SDP discovery: connecting to HU {} L2CAP PSM 0x{:04x}",
+        NAME, hu_addr, SDP_PSM
+    );
+
+    let mut stream = timeout(Duration::from_secs(10), L2capStream::connect(sdp_addr)).await??;
+    info!(
+        "{} 🧪 bt-wireless-poc: internal SDP discovery: L2CAP connect returned; settling for {:?} before first SDP write",
+        NAME, settle_delay
+    );
+    tokio::time::sleep(settle_delay).await;
+
+    let mut continuation_state = Vec::new();
+    let mut attribute_lists = Vec::new();
+
+    for transaction_id in 1u16..=8 {
+        let request = build_sdp_service_search_attribute_request(
+            transaction_id,
+            AAWG_PROFILE_UUID,
+            &continuation_state,
+        )?;
+        debug!(
+            "{} 🧪 bt-wireless-poc: internal SDP discovery: TX tid={} bytes={}",
+            NAME,
+            transaction_id,
+            hex::encode(&request)
+        );
+        stream.write_all(&request).await?;
+        stream.flush().await?;
+
+        let (pdu_id, response_tid, params) = timeout(Duration::from_secs(10), read_sdp_pdu(&mut stream)).await??;
+        debug!(
+            "{} 🧪 bt-wireless-poc: internal SDP discovery: RX pdu=0x{:02x} tid={} len={} bytes={}",
+            NAME,
+            pdu_id,
+            response_tid,
+            params.len(),
+            hex::encode(&params)
+        );
+
+        if response_tid != transaction_id {
+            warn!(
+                "{} 🧪 bt-wireless-poc: internal SDP discovery: response transaction id {} != request {}",
+                NAME, response_tid, transaction_id
+            );
+        }
+        if pdu_id != SDP_PDU_SERVICE_SEARCH_ATTRIBUTE_RESPONSE {
+            return Err(format!(
+                "unexpected SDP PDU 0x{:02x}; expected ServiceSearchAttributeResponse 0x{:02x}",
+                pdu_id, SDP_PDU_SERVICE_SEARCH_ATTRIBUTE_RESPONSE
+            ).into());
+        }
+        if params.len() < 3 {
+            return Err(format!("short SDP ServiceSearchAttributeResponse: {} bytes", params.len()).into());
+        }
+
+        let attr_count = u16::from_be_bytes([params[0], params[1]]) as usize;
+        if params.len() < 2 + attr_count + 1 {
+            return Err(format!(
+                "truncated SDP response: attr_count={} total_params={}",
+                attr_count,
+                params.len()
+            ).into());
+        }
+
+        attribute_lists.extend_from_slice(&params[2..2 + attr_count]);
+        let cont_len_pos = 2 + attr_count;
+        let cont_len = params[cont_len_pos] as usize;
+        if params.len() < cont_len_pos + 1 + cont_len {
+            return Err(format!(
+                "truncated SDP continuation state: cont_len={} total_params={}",
+                cont_len,
+                params.len()
+            ).into());
+        }
+        continuation_state = params[cont_len_pos + 1..cont_len_pos + 1 + cont_len].to_vec();
+        if continuation_state.is_empty() {
+            break;
+        }
+        debug!(
+            "{} 🧪 bt-wireless-poc: internal SDP discovery: continuing with state={}",
+            NAME,
+            hex::encode(&continuation_state)
+        );
+    }
+
+    if attribute_lists.is_empty() {
+        return Err(format!(
+            "HU {} returned no SDP attributes for AA Wireless UUID {}",
+            hu_addr, AAWG_PROFILE_UUID
+        ).into());
+    }
+
+    if let Some(channel) = extract_rfcomm_channel_from_sdp_attribute_lists(&attribute_lists) {
+        info!(
+            "{} 🧪 bt-wireless-poc: internal SDP discovery: HU {} AA Wireless RFCOMM channel={}",
+            NAME, hu_addr, channel
+        );
+        return Ok(channel);
+    }
+
+    Err(format!(
+        "could not find RFCOMM channel in HU {} SDP ProtocolDescriptorList for AA Wireless UUID {}; attrs={}",
+        hu_addr,
+        AAWG_PROFILE_UUID,
+        hex::encode(&attribute_lists)
+    ).into())
+}
+async fn discover_rfcomm_channel_via_internal_sdp(hu_addr: Address) -> Result<u8> {
+    // bluer's classic L2CAP connect may return before the underlying socket is
+    // immediately writable on some kernels/adapters. When we write too early,
+    // write_all/read_exact can fail with ENOTCONN (os error 107). Keep this
+    // retry wrapper local to SDP probing so normal RFCOMM traffic is untouched.
+    let delays = [
+        Duration::from_millis(1500),
+        Duration::from_millis(2200),
+        Duration::from_millis(3000),
+    ];
+    let mut last_error = String::new();
+
+    for (idx, delay) in delays.iter().copied().enumerate() {
+        let attempt = idx + 1;
+        match discover_rfcomm_channel_via_internal_sdp_once(hu_addr, delay).await {
+            Ok(channel) => return Ok(channel),
+            Err(err) => {
+                last_error = err.to_string();
+                warn!(
+                    "{} 🧪 bt-wireless-poc: internal SDP discovery attempt {}/{} failed after settle {:?}: {}",
+                    NAME,
+                    attempt,
+                    delays.len(),
+                    delay,
+                    last_error
+                );
+                tokio::time::sleep(Duration::from_millis(350)).await;
+            }
+        }
+    }
+
+    Err(format!(
+        "internal SDP discovery failed for HU {} after {} attempts; last error: {}",
+        hu_addr,
+        delays.len(),
+        last_error
+    )
+    .into())
+}
+
 
 pub const AAWG_PROFILE_UUID: Uuid = Uuid::from_u128(0x4de17a0052cb11e6bdf40800200c9a66);
 pub const BTLE_PROFILE_UUID: Uuid = Uuid::from_u128(0x9b3f6c10a4d2418ea2b90700300de8f4);
@@ -1656,148 +1938,32 @@ impl Bluetooth {
         }
 
         let hu_addr: Address = hu_mac.trim().parse()?;
-
-        if let Some(channel) = hu_channel.filter(|channel| *channel > 0) {
-            let hu_socket = SocketAddr::new(hu_addr, channel);
+        let channel = if let Some(channel) = hu_channel.filter(|channel| *channel > 0) {
             info!(
-                "{} 🧪 bt-wireless-poc: connecting to HU RFCOMM {} (manual channel)",
-                NAME, hu_socket
+                "{} 🧪 bt-wireless-poc: using configured HU RFCOMM channel {} for {}",
+                NAME, channel, hu_addr
             );
-            let stream = timeout(Duration::from_secs(15), Stream::connect(hu_socket)).await??;
-            return Ok(PocHuConnection {
-                stream,
-                endpoint: format!("RFCOMM {}", hu_socket),
-                _client_profile_session: None,
-                _client_profile_handle: None,
-            });
-        }
-
-        info!(
-            "{} 🧪 bt-wireless-poc: HU RFCOMM channel is empty/0; using BlueZ ConnectProfile + SDP auto-discovery for {}",
-            NAME, hu_addr
-        );
-
-        let session = bluer::Session::new().await?;
-        let profile = Profile {
-            uuid: AAWG_PROFILE_UUID,
-            name: Some("AA Wireless Client PoC".to_string()),
-            role: Some(Role::Client),
-            require_authentication: Some(false),
-            require_authorization: Some(false),
-            auto_connect: Some(false),
-            ..Default::default()
+            channel
+        } else {
+            info!(
+                "{} 🧪 bt-wireless-poc: HU RFCOMM channel is empty/0; using internal SDP discovery + raw RFCOMM for {}",
+                NAME, hu_addr
+            );
+            discover_rfcomm_channel_via_internal_sdp(hu_addr).await?
         };
-        let mut handle = session.register_profile(profile).await?;
 
-        let device = self.adapter.device(hu_addr)?;
-        match device.uuids().await {
-            Ok(Some(uuids)) if uuids.contains(&AAWG_PROFILE_UUID) => {
-                info!(
-                    "{} 🧪 bt-wireless-poc: HU {} advertises AA Wireless UUID {}; asking BlueZ to connect profile",
-                    NAME, hu_addr, AAWG_PROFILE_UUID
-                );
-            }
-            Ok(Some(uuids)) => {
-                warn!(
-                    "{} 🧪 bt-wireless-poc: HU {} UUID list does not include AA Wireless UUID {}; trying ConnectProfile anyway. UUIDs={:?}",
-                    NAME, hu_addr, AAWG_PROFILE_UUID, uuids
-                );
-            }
-            Ok(None) => {
-                warn!(
-                    "{} 🧪 bt-wireless-poc: HU {} UUID list is not available; trying ConnectProfile anyway",
-                    NAME, hu_addr
-                );
-            }
-            Err(e) => {
-                warn!(
-                    "{} 🧪 bt-wireless-poc: failed to read HU {} UUIDs: {}; trying ConnectProfile anyway",
-                    NAME, hu_addr, e
-                );
-            }
-        }
-
-        let connect_fut = device.connect_profile(&AAWG_PROFILE_UUID);
-        tokio::pin!(connect_fut);
-        let mut connect_done = false;
-        let mut deadline = Box::pin(tokio::time::sleep(Duration::from_secs(20)));
-
-        loop {
-            tokio::select! {
-                _ = &mut deadline => {
-                    return Err(format!(
-                        "timed out waiting for BlueZ AA Wireless ConnectProfile/NewConnection from HU {}",
-                        hu_addr
-                    ).into());
-                }
-                res = &mut connect_fut, if !connect_done => {
-                    connect_done = true;
-                    match res {
-                        Ok(()) => {
-                            info!(
-                                "{} 🧪 bt-wireless-poc: BlueZ ConnectProfile returned OK for HU {}; waiting for NewConnection",
-                                NAME, hu_addr
-                            );
-                        }
-                        Err(e) => {
-                            return Err(format!(
-                                "BlueZ ConnectProfile failed for HU {} / UUID {}: {}",
-                                hu_addr, AAWG_PROFILE_UUID, e
-                            ).into());
-                        }
-                    }
-                }
-                req = handle.next() => {
-                    let Some(req) = req else {
-                        return Err("BlueZ AA Wireless client profile closed before connection".into());
-                    };
-
-                    let device_addr = req.device();
-                    if device_addr != hu_addr {
-                        warn!(
-                            "{} 🧪 bt-wireless-poc: rejecting unexpected AA Wireless client-profile connection from {}; wanted {}",
-                            NAME, device_addr, hu_addr
-                        );
-                        req.reject(ReqError::Rejected);
-                        continue;
-                    }
-
-                    let stream = req.accept()?;
-                    if !connect_done {
-                        match timeout(Duration::from_secs(2), &mut connect_fut).await {
-                            Ok(Ok(())) => {
-                                info!(
-                                    "{} 🧪 bt-wireless-poc: BlueZ ConnectProfile completed after accepting HU {}",
-                                    NAME, hu_addr
-                                );
-                            }
-                            Ok(Err(e)) => {
-                                warn!(
-                                    "{} 🧪 bt-wireless-poc: ConnectProfile returned error after HU {} was accepted: {}",
-                                    NAME, hu_addr, e
-                                );
-                            }
-                            Err(_) => {
-                                debug!(
-                                    "{} 🧪 bt-wireless-poc: ConnectProfile still pending after accepting HU {}; keeping RFCOMM stream",
-                                    NAME, hu_addr
-                                );
-                            }
-                        }
-                    }
-                    info!(
-                        "{} 🧪 bt-wireless-poc: BlueZ accepted HU {} via AA Wireless SDP/ConnectProfile",
-                        NAME, hu_addr
-                    );
-                    return Ok(PocHuConnection {
-                        stream,
-                        endpoint: format!("{} via BlueZ SDP/ConnectProfile", hu_addr),
-                        _client_profile_session: Some(session),
-                        _client_profile_handle: Some(handle),
-                    });
-                }
-            }
-        }
+        let hu_socket = SocketAddr::new(hu_addr, channel);
+        info!(
+            "{} 🧪 bt-wireless-poc: connecting to HU RFCOMM {} without registering a second AA Wireless UUID profile",
+            NAME, hu_socket
+        );
+        let stream = timeout(Duration::from_secs(15), Stream::connect(hu_socket)).await??;
+        Ok(PocHuConnection {
+            stream,
+            endpoint: format!("RFCOMM {}", hu_socket),
+            _client_profile_session: None,
+            _client_profile_handle: None,
+        })
     }
 
     pub async fn aa_wireless_bridge_poc(
