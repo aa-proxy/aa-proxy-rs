@@ -74,6 +74,8 @@ struct DisplayProfile {
     touch_height: i32,
     input_touchscreen: bool,
     input_source: bool,
+    content_insets: Option<crate::sdr_ui::SdrUiInsets>,
+    stable_content_insets: Option<crate::sdr_ui::SdrUiInsets>,
 }
 
 fn injected_display_label(display_type: DisplayType) -> &'static str {
@@ -117,6 +119,8 @@ fn profile_from_config(profile: &InjectDisplayProfile, display_id: u32) -> Displ
         touch_height: profile.touch_height,
         input_touchscreen: profile.input_touchscreen,
         input_source: profile.input_source,
+        content_insets: profile.content_insets.clone(),
+        stable_content_insets: profile.stable_content_insets.clone(),
     }
 }
 
@@ -167,8 +171,39 @@ fn create_media_sink_service(id: i32, profile: DisplayProfile) -> Service {
 
     let mut ui_config = UiConfig::new();
     ui_config.margins = Some(margins).into();
-    ui_config.content_insets = Some(Insets::new()).into();
-    ui_config.stable_content_insets = Some(Insets::new()).into();
+    let mut content_insets = Insets::new();
+    if let Some(insets) = &profile.content_insets {
+        if let Some(v) = insets.top {
+            content_insets.set_top(v);
+        }
+        if let Some(v) = insets.bottom {
+            content_insets.set_bottom(v);
+        }
+        if let Some(v) = insets.left {
+            content_insets.set_left(v);
+        }
+        if let Some(v) = insets.right {
+            content_insets.set_right(v);
+        }
+    }
+    ui_config.content_insets = Some(content_insets).into();
+
+    let mut stable_insets = Insets::new();
+    if let Some(insets) = &profile.stable_content_insets {
+        if let Some(v) = insets.top {
+            stable_insets.set_top(v);
+        }
+        if let Some(v) = insets.bottom {
+            stable_insets.set_bottom(v);
+        }
+        if let Some(v) = insets.left {
+            stable_insets.set_left(v);
+        }
+        if let Some(v) = insets.right {
+            stable_insets.set_right(v);
+        }
+    }
+    ui_config.stable_content_insets = Some(stable_insets).into();
     ui_config.set_ui_theme(UiTheme::UI_THEME_AUTOMATIC);
 
     let mut video_cfg = VideoConfiguration::new();
