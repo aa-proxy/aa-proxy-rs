@@ -351,38 +351,51 @@ pub struct AppConfig {
     pub advertise: bool,
     pub enable_btle: bool,
     pub dongle_mode: bool,
-    /// Experimental AA Wireless Bluetooth PoC. Disabled by default.
+    /// Experimental AA Wireless Bluetooth Proxy. Disabled by default.
     /// bridge = accept the phone AA RFCOMM connection, connect to the HU RFCOMM
     /// endpoint from the same adapter, and relay/log both directions.
     /// probe = connect to the HU RFCOMM endpoint and emulate only the BT Wi-Fi bootstrap.
     /// car-wifi-mitm = delay/modify BT Wi-Fi bootstrap, join car Wi-Fi, and raw-relay TCP.
-    pub bt_wireless_poc: bool,
-    pub bt_wireless_poc_mode: String,
-    pub bt_wireless_poc_hu_mac: String,
-    #[serde(default, deserialize_with = "empty_string_as_none")]
-    pub bt_wireless_poc_hu_channel: Option<u8>,
-    pub bt_wireless_poc_tcp_probe: bool,
+    #[serde(alias = "bt_wireless_poc")]
+    pub bt_wireless_proxy: bool,
+    #[serde(alias = "bt_wireless_poc_mode")]
+    pub bt_wireless_proxy_mode: String,
+    #[serde(alias = "bt_wireless_poc_hu_mac")]
+    pub bt_wireless_proxy_hu_mac: String,
+    /// When HU is not paired/trusted, keep the adapter pairable/discoverable for this many seconds.
+    pub bt_wireless_proxy_pairing_window_secs: u64,
+    #[serde(default, alias = "bt_wireless_poc_hu_channel", deserialize_with = "empty_string_as_none")]
+    pub bt_wireless_proxy_hu_channel: Option<u8>,
+    #[serde(alias = "bt_wireless_poc_tcp_probe")]
+    pub bt_wireless_proxy_tcp_probe: bool,
     /// car-wifi-mitm mode: optional shell command template used to join the HU Wi-Fi.
     /// Placeholders are shell-quoted: {iface}, {ssid}, {bssid}, {key}, {security}.
     /// Non-empty custom command overrides automatic nmcli/wpa_cli join.
-    pub bt_wireless_poc_car_wifi_join_cmd: String,
+    #[serde(alias = "bt_wireless_poc_car_wifi_join_cmd")]
+    pub bt_wireless_proxy_car_wifi_join_cmd: String,
     /// car-wifi-mitm mode: if true and no custom command is configured, try to join
     /// the HU Wi-Fi automatically from Rust using nmcli, wpa_cli, or wpa_supplicant/udhcpc.
-    pub bt_wireless_poc_car_wifi_auto_join: bool,
+    #[serde(alias = "bt_wireless_poc_car_wifi_auto_join")]
+    pub bt_wireless_proxy_car_wifi_auto_join: bool,
     /// car-wifi-mitm mode: keep the aa-proxy AP up and join the car Wi-Fi with a
     /// separate managed STA interface. Requires AP+managed support on the same channel.
-    pub bt_wireless_poc_car_wifi_keep_ap: bool,
+    #[serde(alias = "bt_wireless_poc_car_wifi_keep_ap")]
+    pub bt_wireless_proxy_car_wifi_keep_ap: bool,
     /// car-wifi-mitm mode: managed STA interface used for joining HU/car Wi-Fi.
     /// Empty falls back to `iface` in takeover mode, or `sta0` in keep_ap mode.
-    pub bt_wireless_poc_car_wifi_sta_iface: String,
+    #[serde(alias = "bt_wireless_poc_car_wifi_sta_iface")]
+    pub bt_wireless_proxy_car_wifi_sta_iface: String,
     /// car-wifi-mitm mode: existing AP interface to keep when keep_ap=true.
     /// Empty falls back to `iface`.
-    pub bt_wireless_poc_car_wifi_ap_iface: String,
+    #[serde(alias = "bt_wireless_poc_car_wifi_ap_iface")]
+    pub bt_wireless_proxy_car_wifi_ap_iface: String,
     /// car-wifi-mitm mode: IP address to place in the phone-facing WifiStartRequest.
     /// Empty means auto-detect using `ip route get <hu_ip>` / interface IPv4.
-    pub bt_wireless_poc_rewrite_ip: String,
+    #[serde(alias = "bt_wireless_poc_rewrite_ip")]
+    pub bt_wireless_proxy_rewrite_ip: String,
     /// car-wifi-mitm mode: local TCP port where aa-proxy listens for the phone.
-    pub bt_wireless_poc_proxy_listen_port: u16,
+    #[serde(alias = "bt_wireless_poc_proxy_listen_port")]
+    pub bt_wireless_proxy_listen_port: u16,
     pub debug: bool,
     /// Enable packet debug output independently from global debug logging.
     /// When enabled, pkt_debug lines are emitted at INFO level so `debug = false` can be kept.
@@ -753,18 +766,19 @@ impl Default for AppConfig {
             advertise: true,
             enable_btle: true,
             dongle_mode: false,
-            bt_wireless_poc: false,
-            bt_wireless_poc_mode: "bridge".to_string(),
-            bt_wireless_poc_hu_mac: String::new(),
-            bt_wireless_poc_hu_channel: None,
-            bt_wireless_poc_tcp_probe: true,
-            bt_wireless_poc_car_wifi_join_cmd: String::new(),
-            bt_wireless_poc_car_wifi_auto_join: false,
-            bt_wireless_poc_car_wifi_keep_ap: false,
-            bt_wireless_poc_car_wifi_sta_iface: String::new(),
-            bt_wireless_poc_car_wifi_ap_iface: String::new(),
-            bt_wireless_poc_rewrite_ip: String::new(),
-            bt_wireless_poc_proxy_listen_port: 5288,
+            bt_wireless_proxy: false,
+            bt_wireless_proxy_mode: "bridge".to_string(),
+            bt_wireless_proxy_hu_mac: String::new(),
+            bt_wireless_proxy_pairing_window_secs: 120,
+            bt_wireless_proxy_hu_channel: None,
+            bt_wireless_proxy_tcp_probe: true,
+            bt_wireless_proxy_car_wifi_join_cmd: String::new(),
+            bt_wireless_proxy_car_wifi_auto_join: false,
+            bt_wireless_proxy_car_wifi_keep_ap: false,
+            bt_wireless_proxy_car_wifi_sta_iface: String::new(),
+            bt_wireless_proxy_car_wifi_ap_iface: String::new(),
+            bt_wireless_proxy_rewrite_ip: String::new(),
+            bt_wireless_proxy_listen_port: 5288,
             debug: false,
             pkt_debug: false,
             hexdump_level: HexdumpLevel::Disabled,
@@ -1034,25 +1048,27 @@ impl AppConfig {
         doc["advertise"] = value(self.advertise);
         doc["enable_btle"] = value(self.enable_btle);
         doc["dongle_mode"] = value(self.dongle_mode);
-        doc["bt_wireless_poc"] = value(self.bt_wireless_poc);
-        doc["bt_wireless_poc_mode"] = value(self.bt_wireless_poc_mode.clone());
-        doc["bt_wireless_poc_hu_mac"] = value(self.bt_wireless_poc_hu_mac.clone());
-        doc["bt_wireless_poc_hu_channel"] =
-            value(self.bt_wireless_poc_hu_channel.unwrap_or(0) as i64);
-        doc["bt_wireless_poc_tcp_probe"] = value(self.bt_wireless_poc_tcp_probe);
-        doc["bt_wireless_poc_car_wifi_join_cmd"] =
-            value(self.bt_wireless_poc_car_wifi_join_cmd.clone());
-        doc["bt_wireless_poc_car_wifi_auto_join"] =
-            value(self.bt_wireless_poc_car_wifi_auto_join);
-        doc["bt_wireless_poc_car_wifi_keep_ap"] =
-            value(self.bt_wireless_poc_car_wifi_keep_ap);
-        doc["bt_wireless_poc_car_wifi_sta_iface"] =
-            value(self.bt_wireless_poc_car_wifi_sta_iface.clone());
-        doc["bt_wireless_poc_car_wifi_ap_iface"] =
-            value(self.bt_wireless_poc_car_wifi_ap_iface.clone());
-        doc["bt_wireless_poc_rewrite_ip"] = value(self.bt_wireless_poc_rewrite_ip.clone());
-        doc["bt_wireless_poc_proxy_listen_port"] =
-            value(self.bt_wireless_poc_proxy_listen_port as i64);
+        doc["bt_wireless_proxy"] = value(self.bt_wireless_proxy);
+        doc["bt_wireless_proxy_mode"] = value(self.bt_wireless_proxy_mode.clone());
+        doc["bt_wireless_proxy_hu_mac"] = value(self.bt_wireless_proxy_hu_mac.clone());
+        doc["bt_wireless_proxy_pairing_window_secs"] =
+            value(self.bt_wireless_proxy_pairing_window_secs as i64);
+        doc["bt_wireless_proxy_hu_channel"] =
+            value(self.bt_wireless_proxy_hu_channel.unwrap_or(0) as i64);
+        doc["bt_wireless_proxy_tcp_probe"] = value(self.bt_wireless_proxy_tcp_probe);
+        doc["bt_wireless_proxy_car_wifi_join_cmd"] =
+            value(self.bt_wireless_proxy_car_wifi_join_cmd.clone());
+        doc["bt_wireless_proxy_car_wifi_auto_join"] =
+            value(self.bt_wireless_proxy_car_wifi_auto_join);
+        doc["bt_wireless_proxy_car_wifi_keep_ap"] =
+            value(self.bt_wireless_proxy_car_wifi_keep_ap);
+        doc["bt_wireless_proxy_car_wifi_sta_iface"] =
+            value(self.bt_wireless_proxy_car_wifi_sta_iface.clone());
+        doc["bt_wireless_proxy_car_wifi_ap_iface"] =
+            value(self.bt_wireless_proxy_car_wifi_ap_iface.clone());
+        doc["bt_wireless_proxy_rewrite_ip"] = value(self.bt_wireless_proxy_rewrite_ip.clone());
+        doc["bt_wireless_proxy_listen_port"] =
+            value(self.bt_wireless_proxy_listen_port as i64);
         doc["debug"] = value(self.debug);
         doc["pkt_debug"] = value(self.pkt_debug);
         doc["hexdump_level"] = value(format!("{:?}", self.hexdump_level));

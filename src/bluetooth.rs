@@ -8,11 +8,16 @@ use crate::web::AppState;
 use anyhow::anyhow;
 use backon::{ExponentialBuilder, Retryable};
 use bluer::{
+    agent::{
+        Agent, AgentHandle, AuthorizeService, DisplayPasskey, DisplayPinCode,
+        ReqError as AgentReqError, ReqResult as AgentReqResult, RequestAuthorization,
+        RequestConfirmation, RequestPasskey, RequestPinCode,
+    },
     l2cap::{SocketAddr as L2capSocketAddr, Stream as L2capStream},
-    rfcomm::{Profile, ProfileHandle, ReqError, Role, SocketAddr, Stream},
-    Adapter, Address, AddressType, Uuid,
+    rfcomm::{Profile, ProfileHandle, Role, SocketAddr, Stream},
+    Adapter, Address, AddressType, Session, Uuid,
 };
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use simplelog::*;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -174,13 +179,13 @@ fn extract_rfcomm_channel_from_sdp_attribute_lists(bytes: &[u8]) -> Option<u8> {
 async fn discover_rfcomm_channel_via_internal_sdp_once(hu_addr: Address, settle_delay: Duration) -> Result<u8> {
     let sdp_addr = L2capSocketAddr::new(hu_addr, AddressType::BrEdr, SDP_PSM);
     info!(
-        "{} 🧪 bt-wireless-poc: internal SDP discovery: connecting to HU {} L2CAP PSM 0x{:04x}",
+        "{} 🧪 bt-wireless-proxy: internal SDP discovery: connecting to HU {} L2CAP PSM 0x{:04x}",
         NAME, hu_addr, SDP_PSM
     );
 
     let mut stream = timeout(Duration::from_secs(10), L2capStream::connect(sdp_addr)).await??;
     info!(
-        "{} 🧪 bt-wireless-poc: internal SDP discovery: L2CAP connect returned; settling for {:?} before first SDP write",
+        "{} 🧪 bt-wireless-proxy: internal SDP discovery: L2CAP connect returned; settling for {:?} before first SDP write",
         NAME, settle_delay
     );
     tokio::time::sleep(settle_delay).await;
@@ -195,7 +200,7 @@ async fn discover_rfcomm_channel_via_internal_sdp_once(hu_addr: Address, settle_
             &continuation_state,
         )?;
         debug!(
-            "{} 🧪 bt-wireless-poc: internal SDP discovery: TX tid={} bytes={}",
+            "{} 🧪 bt-wireless-proxy: internal SDP discovery: TX tid={} bytes={}",
             NAME,
             transaction_id,
             hex::encode(&request)
@@ -205,7 +210,7 @@ async fn discover_rfcomm_channel_via_internal_sdp_once(hu_addr: Address, settle_
 
         let (pdu_id, response_tid, params) = timeout(Duration::from_secs(10), read_sdp_pdu(&mut stream)).await??;
         debug!(
-            "{} 🧪 bt-wireless-poc: internal SDP discovery: RX pdu=0x{:02x} tid={} len={} bytes={}",
+            "{} 🧪 bt-wireless-proxy: internal SDP discovery: RX pdu=0x{:02x} tid={} len={} bytes={}",
             NAME,
             pdu_id,
             response_tid,
@@ -215,7 +220,7 @@ async fn discover_rfcomm_channel_via_internal_sdp_once(hu_addr: Address, settle_
 
         if response_tid != transaction_id {
             warn!(
-                "{} 🧪 bt-wireless-poc: internal SDP discovery: response transaction id {} != request {}",
+                "{} 🧪 bt-wireless-proxy: internal SDP discovery: response transaction id {} != request {}",
                 NAME, response_tid, transaction_id
             );
         }
@@ -253,7 +258,7 @@ async fn discover_rfcomm_channel_via_internal_sdp_once(hu_addr: Address, settle_
             break;
         }
         debug!(
-            "{} 🧪 bt-wireless-poc: internal SDP discovery: continuing with state={}",
+            "{} 🧪 bt-wireless-proxy: internal SDP discovery: continuing with state={}",
             NAME,
             hex::encode(&continuation_state)
         );
@@ -268,7 +273,7 @@ async fn discover_rfcomm_channel_via_internal_sdp_once(hu_addr: Address, settle_
 
     if let Some(channel) = extract_rfcomm_channel_from_sdp_attribute_lists(&attribute_lists) {
         info!(
-            "{} 🧪 bt-wireless-poc: internal SDP discovery: HU {} AA Wireless RFCOMM channel={}",
+            "{} 🧪 bt-wireless-proxy: internal SDP discovery: HU {} AA Wireless RFCOMM channel={}",
             NAME, hu_addr, channel
         );
         return Ok(channel);
@@ -300,7 +305,7 @@ async fn discover_rfcomm_channel_via_internal_sdp(hu_addr: Address) -> Result<u8
             Err(err) => {
                 last_error = err.to_string();
                 warn!(
-                    "{} 🧪 bt-wireless-poc: internal SDP discovery attempt {}/{} failed after settle {:?}: {}",
+                    "{} 🧪 bt-wireless-proxy: internal SDP discovery attempt {}/{} failed after settle {:?}: {}",
                     NAME,
                     attempt,
                     delays.len(),
@@ -345,7 +350,7 @@ enum MessageId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
 #[allow(unused)]
-enum PocMessageId {
+enum ProxyMessageId {
     WifiStartRequest = 1,
     WifiInfoRequest = 2,
     WifiInfoResponse = 3,
@@ -355,7 +360,7 @@ enum PocMessageId {
     WifiStartResponse = 7,
 }
 
-impl PocMessageId {
+impl ProxyMessageId {
     fn name(id: u16) -> &'static str {
         match id {
             1 => "WifiStartRequest",
@@ -370,12 +375,12 @@ impl PocMessageId {
     }
 }
 
-struct PocFrameSniffer {
+struct ProxyFrameSniffer {
     direction: &'static str,
     buf: Vec<u8>,
 }
 
-impl PocFrameSniffer {
+impl ProxyFrameSniffer {
     fn new(direction: &'static str) -> Self {
         Self {
             direction,
@@ -399,7 +404,7 @@ impl PocFrameSniffer {
 
         if self.buf.len() > 1024 * 1024 {
             warn!(
-                "{} 🧪 bt-wireless-poc: {} parser buffer exceeded 1 MiB; clearing partial data",
+                "{} 🧪 bt-wireless-proxy: {} parser buffer exceeded 1 MiB; clearing partial data",
                 NAME, self.direction
             );
             self.buf.clear();
@@ -408,11 +413,11 @@ impl PocFrameSniffer {
 
     fn log_frame(&self, message_id: u16, payload: &[u8]) {
         info!(
-            "{} 🧪 bt-wireless-poc: {} frame id={} ({}) len={} payload={}",
+            "{} 🧪 bt-wireless-proxy: {} frame id={} ({}) len={} payload={}",
             NAME,
             self.direction,
             message_id,
-            PocMessageId::name(message_id),
+            ProxyMessageId::name(message_id),
             payload.len(),
             if payload.is_empty() {
                 "<empty>".to_string()
@@ -422,25 +427,25 @@ impl PocFrameSniffer {
         );
 
         match message_id {
-            x if x == PocMessageId::WifiStartRequest as u16 => {
+            x if x == ProxyMessageId::WifiStartRequest as u16 => {
                 match WifiStartRequest::WifiStartRequest::parse_from_bytes(payload) {
                     Ok(req) => info!(
-                        "{} 🧪 bt-wireless-poc: {} parsed WifiStartRequest ip={} port={}",
+                        "{} 🧪 bt-wireless-proxy: {} parsed WifiStartRequest ip={} port={}",
                         NAME,
                         self.direction,
                         req.ip_address(),
                         req.port()
                     ),
                     Err(e) => warn!(
-                        "{} 🧪 bt-wireless-poc: {} failed to parse WifiStartRequest: {}",
+                        "{} 🧪 bt-wireless-proxy: {} failed to parse WifiStartRequest: {}",
                         NAME, self.direction, e
                     ),
                 }
             }
-            x if x == PocMessageId::WifiInfoResponse as u16 => {
+            x if x == ProxyMessageId::WifiInfoResponse as u16 => {
                 match WifiInfoResponse::WifiInfoResponse::parse_from_bytes(payload) {
                     Ok(info_msg) => info!(
-                        "{} 🧪 bt-wireless-poc: {} parsed WifiInfoResponse ssid={} bssid={} security={:?} ap_type={:?} key_len={}",
+                        "{} 🧪 bt-wireless-proxy: {} parsed WifiInfoResponse ssid={} bssid={} security={:?} ap_type={:?} key_len={}",
                         NAME,
                         self.direction,
                         info_msg.ssid(),
@@ -450,7 +455,7 @@ impl PocFrameSniffer {
                         info_msg.key().len()
                     ),
                     Err(e) => warn!(
-                        "{} 🧪 bt-wireless-poc: {} failed to parse WifiInfoResponse: {}",
+                        "{} 🧪 bt-wireless-proxy: {} failed to parse WifiInfoResponse: {}",
                         NAME, self.direction, e
                     ),
                 }
@@ -460,7 +465,7 @@ impl PocFrameSniffer {
     }
 }
 
-struct PocHuConnection {
+struct ProxyHuConnection {
     stream: Stream,
     endpoint: String,
     _client_profile_session: Option<bluer::Session>,
@@ -468,11 +473,11 @@ struct PocHuConnection {
 }
 
 #[derive(Debug, Clone)]
-pub struct CarWifiMitmPocOptions {
+pub struct CarWifiMitmProxyOptions {
     pub hu_mac: String,
     pub hu_channel: Option<u8>,
     /// Legacy/default interface. Used as the STA interface when
-    /// bt_wireless_poc_car_wifi_sta_iface is empty.
+    /// bt_wireless_proxy_car_wifi_sta_iface is empty.
     pub iface: String,
     pub join_cmd: String,
     pub auto_join: bool,
@@ -492,7 +497,7 @@ pub struct CarWifiMitmPocOptions {
     pub stopped: bool,
 }
 
-async fn relay_with_poc_logging<R, W>(
+async fn relay_with_proxy_logging<R, W>(
     mut reader: R,
     mut writer: W,
     direction: &'static str,
@@ -501,7 +506,7 @@ where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
-    let mut sniffer = PocFrameSniffer::new(direction);
+    let mut sniffer = ProxyFrameSniffer::new(direction);
     let mut total = 0u64;
     let mut buf = vec![0u8; 4096];
 
@@ -509,7 +514,7 @@ where
         let n = reader.read(&mut buf).await?;
         if n == 0 {
             info!(
-                "{} 🧪 bt-wireless-poc: {} EOF after {} bytes",
+                "{} 🧪 bt-wireless-proxy: {} EOF after {} bytes",
                 NAME, direction, total
             );
             let _ = writer.shutdown().await;
@@ -523,7 +528,7 @@ where
     }
 }
 
-async fn read_poc_frame(stream: &mut Stream, direction: &'static str) -> Result<(u16, Vec<u8>)> {
+async fn read_proxy_frame(stream: &mut Stream, direction: &'static str) -> Result<(u16, Vec<u8>)> {
     let mut header = [0u8; HEADER_LEN];
     stream.read_exact(&mut header).await?;
     let len = u16::from_be_bytes([header[0], header[1]]) as usize;
@@ -535,12 +540,12 @@ async fn read_poc_frame(stream: &mut Stream, direction: &'static str) -> Result<
 
     let mut full = header.to_vec();
     full.extend_from_slice(&payload);
-    let mut sniffer = PocFrameSniffer::new(direction);
+    let mut sniffer = ProxyFrameSniffer::new(direction);
     sniffer.push(&full);
     Ok((message_id, payload))
 }
 
-async fn send_poc_frame_raw(
+async fn send_proxy_frame_raw(
     stream: &mut Stream,
     direction: &'static str,
     message_id: u16,
@@ -551,19 +556,19 @@ async fn send_poc_frame_raw(
     packet.extend_from_slice(&message_id.to_be_bytes());
     packet.extend_from_slice(payload);
 
-    let mut sniffer = PocFrameSniffer::new(direction);
+    let mut sniffer = ProxyFrameSniffer::new(direction);
     sniffer.push(&packet);
     stream.write_all(&packet).await?;
     Ok(())
 }
 
-async fn send_poc_frame(
+async fn send_proxy_frame(
     stream: &mut Stream,
     direction: &'static str,
-    message_id: PocMessageId,
+    message_id: ProxyMessageId,
     payload: &[u8],
 ) -> Result<()> {
-    send_poc_frame_raw(stream, direction, message_id as u16, payload).await
+    send_proxy_frame_raw(stream, direction, message_id as u16, payload).await
 }
 
 fn success_status_payload() -> &'static [u8] {
@@ -576,7 +581,7 @@ async fn read_hu_wifi_start_with_prebootstrap_passthrough(
     phone_stream: &mut Stream,
 ) -> Result<Vec<u8>> {
     // Some HUs start the AA Wireless RFCOMM bootstrap with a version exchange
-    // before WifiStartRequest. The original PoC expected WifiStartRequest as
+    // before WifiStartRequest. The original Proxy expected WifiStartRequest as
     // the first frame, which worked with our fake HU but stalls on version-first
     // implementations. Keep HU-initiated pre-bootstrap frames flowing until the
     // real WifiStartRequest arrives; then stop and let the MITM rewrite path take
@@ -585,10 +590,10 @@ async fn read_hu_wifi_start_with_prebootstrap_passthrough(
     let mut forwarded_frames = 0usize;
 
     loop {
-        let (hu_id, hu_payload) = read_poc_frame(hu_stream, "HU -> POC pre-bootstrap").await?;
-        if hu_id == PocMessageId::WifiStartRequest as u16 {
+        let (hu_id, hu_payload) = read_proxy_frame(hu_stream, "HU -> POC pre-bootstrap").await?;
+        if hu_id == ProxyMessageId::WifiStartRequest as u16 {
             info!(
-                "{} 🧪 bt-wireless-poc car-wifi-mitm: captured HU WifiStartRequest after forwarding {} pre-bootstrap frame(s)",
+                "{} 🧪 bt-wireless-proxy car-wifi-mitm: captured HU WifiStartRequest after forwarding {} pre-bootstrap frame(s)",
                 NAME, forwarded_frames
             );
             return Ok(hu_payload);
@@ -596,12 +601,12 @@ async fn read_hu_wifi_start_with_prebootstrap_passthrough(
 
         forwarded_frames += 1;
         info!(
-            "{} 🧪 bt-wireless-poc car-wifi-mitm: forwarding HU pre-bootstrap frame id={} ({}) to phone while waiting for WifiStartRequest",
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: forwarding HU pre-bootstrap frame id={} ({}) to phone while waiting for WifiStartRequest",
             NAME,
             hu_id,
-            PocMessageId::name(hu_id)
+            ProxyMessageId::name(hu_id)
         );
-        send_poc_frame_raw(
+        send_proxy_frame_raw(
             phone_stream,
             "POC -> PHONE pre-bootstrap",
             hu_id,
@@ -609,27 +614,27 @@ async fn read_hu_wifi_start_with_prebootstrap_passthrough(
         )
         .await?;
 
-        if hu_id == PocMessageId::WifiVersionRequest as u16 {
+        if hu_id == ProxyMessageId::WifiVersionRequest as u16 {
             info!(
-                "{} 🧪 bt-wireless-poc car-wifi-mitm: waiting for PHONE WifiVersionResponse to forward back to HU",
+                "{} 🧪 bt-wireless-proxy car-wifi-mitm: waiting for PHONE WifiVersionResponse to forward back to HU",
                 NAME
             );
             let (phone_id, phone_payload) = timeout(
                 Duration::from_secs(10),
-                read_poc_frame(phone_stream, "PHONE -> POC pre-bootstrap"),
+                read_proxy_frame(phone_stream, "PHONE -> POC pre-bootstrap"),
             )
             .await??;
 
-            if phone_id != PocMessageId::WifiVersionResponse as u16 {
+            if phone_id != ProxyMessageId::WifiVersionResponse as u16 {
                 warn!(
-                    "{} 🧪 bt-wireless-poc car-wifi-mitm: expected PHONE WifiVersionResponse during pre-bootstrap, got {} ({})",
+                    "{} 🧪 bt-wireless-proxy car-wifi-mitm: expected PHONE WifiVersionResponse during pre-bootstrap, got {} ({})",
                     NAME,
                     phone_id,
-                    PocMessageId::name(phone_id)
+                    ProxyMessageId::name(phone_id)
                 );
             }
 
-            send_poc_frame_raw(
+            send_proxy_frame_raw(
                 hu_stream,
                 "POC -> HU pre-bootstrap",
                 phone_id,
@@ -677,7 +682,7 @@ async fn run_wifi_join_custom_cmd(
 ) -> Result<()> {
     let rendered = render_wifi_join_cmd(template.trim(), iface, info_msg);
     info!(
-        "{} 🧪 bt-wireless-poc car-wifi-mitm: running configured Wi-Fi join command for ssid={} bssid={} iface={} key_len={}",
+        "{} 🧪 bt-wireless-proxy car-wifi-mitm: running configured Wi-Fi join command for ssid={} bssid={} iface={} key_len={}",
         NAME,
         info_msg.ssid(),
         info_msg.bssid(),
@@ -693,7 +698,7 @@ async fn run_wifi_join_custom_cmd(
 
     if output.status.success() {
         info!(
-            "{} 🧪 bt-wireless-poc car-wifi-mitm: Wi-Fi join command completed successfully",
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: Wi-Fi join command completed successfully",
             NAME
         );
         Ok(())
@@ -737,7 +742,7 @@ async fn wait_for_wifi_join(iface: &str, ssid: &str, timeout_duration: Duration)
     while start.elapsed() < timeout_duration {
         if current_iw_ssid(iface).await.as_deref() == Some(ssid) {
             info!(
-                "{} 🧪 bt-wireless-poc car-wifi-mitm: iface {} is associated to ssid={}",
+                "{} 🧪 bt-wireless-proxy car-wifi-mitm: iface {} is associated to ssid={}",
                 NAME, iface, ssid
             );
             return true;
@@ -768,7 +773,7 @@ async fn run_nmcli_wifi_join(
     }
 
     info!(
-        "{} 🧪 bt-wireless-poc car-wifi-mitm: auto Wi-Fi join using nmcli ssid={} bssid={} iface={} key_len={}",
+        "{} 🧪 bt-wireless-proxy car-wifi-mitm: auto Wi-Fi join using nmcli ssid={} bssid={} iface={} key_len={}",
         NAME,
         ssid,
         bssid,
@@ -832,7 +837,7 @@ async fn run_wpa_cli_wifi_join(
     let bssid = info_msg.bssid();
 
     info!(
-        "{} 🧪 bt-wireless-poc car-wifi-mitm: auto Wi-Fi join using wpa_cli ssid={} bssid={} iface={} key_len={}",
+        "{} 🧪 bt-wireless-proxy car-wifi-mitm: auto Wi-Fi join using wpa_cli ssid={} bssid={} iface={} key_len={}",
         NAME,
         ssid,
         bssid,
@@ -851,7 +856,7 @@ async fn run_wpa_cli_wifi_join(
         // Best-effort. Some wpa_supplicant builds reject bssid for generated networks.
         if let Err(e) = wpa_cli_output(iface, &["set_network", &net_id, "bssid", bssid.trim()]).await {
             warn!(
-                "{} 🧪 bt-wireless-poc car-wifi-mitm: wpa_cli could not pin bssid {}: {}",
+                "{} 🧪 bt-wireless-proxy car-wifi-mitm: wpa_cli could not pin bssid {}: {}",
                 NAME, bssid, e
             );
         }
@@ -887,7 +892,7 @@ async fn iface_exists(iface: &str) -> bool {
 
 async fn run_shell_for_wifi(label: &str, command: &str, timeout_secs: u64) -> Result<()> {
     debug!(
-        "{} 🧪 bt-wireless-poc car-wifi-mitm: running {}: {}",
+        "{} 🧪 bt-wireless-proxy car-wifi-mitm: running {}: {}",
         NAME, label, command
     );
     let output = timeout(
@@ -940,14 +945,14 @@ async fn wait_for_wifi_ready(iface: &str, ssid: &str, timeout_duration: Duration
     while start.elapsed() < timeout_duration {
         if current_iw_ssid(iface).await.as_deref() == Some(ssid) {
             info!(
-                "{} 🧪 bt-wireless-poc car-wifi-mitm: iface {} is associated to ssid={}",
+                "{} 🧪 bt-wireless-proxy car-wifi-mitm: iface {} is associated to ssid={}",
                 NAME, iface, ssid
             );
             return true;
         }
         if let Some(ip) = iface_ipv4(iface).await {
             info!(
-                "{} 🧪 bt-wireless-poc car-wifi-mitm: iface {} has IPv4 {} after Wi-Fi join",
+                "{} 🧪 bt-wireless-proxy car-wifi-mitm: iface {} has IPv4 {} after Wi-Fi join",
                 NAME, iface, ip
             );
             return true;
@@ -981,7 +986,7 @@ async fn prepare_sta_iface_takeover(iface: &str) -> Result<String> {
     }
 
     info!(
-        "{} 🧪 bt-wireless-poc car-wifi-mitm: takeover mode; stopping AP helpers and switching {} to managed mode",
+        "{} 🧪 bt-wireless-proxy car-wifi-mitm: takeover mode; stopping AP helpers and switching {} to managed mode",
         NAME, iface
     );
     let _ = run_shell_for_wifi(
@@ -1039,11 +1044,11 @@ async fn phy_for_iface(iface: &str) -> Option<String> {
 async fn prepare_sta_iface_keep_ap(sta_iface: &str, ap_iface: &str) -> Result<String> {
     let sta_iface = sta_iface.trim();
     if sta_iface.is_empty() {
-        return Err("car Wi-Fi keep_ap mode needs bt_wireless_poc_car_wifi_sta_iface".into());
+        return Err("car Wi-Fi keep_ap mode needs bt_wireless_proxy_car_wifi_sta_iface".into());
     }
     if iface_exists(sta_iface).await {
         info!(
-            "{} 🧪 bt-wireless-poc car-wifi-mitm: keep_ap mode; reusing existing STA iface {}",
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: keep_ap mode; reusing existing STA iface {}",
             NAME, sta_iface
         );
         let _ = run_shell_for_wifi(
@@ -1057,7 +1062,7 @@ async fn prepare_sta_iface_keep_ap(sta_iface: &str, ap_iface: &str) -> Result<St
 
     let phy = phy_for_iface(ap_iface).await.unwrap_or_else(|| "phy0".to_string());
     info!(
-        "{} 🧪 bt-wireless-poc car-wifi-mitm: keep_ap mode; creating managed STA iface {} on {} while AP iface {} stays up",
+        "{} 🧪 bt-wireless-proxy car-wifi-mitm: keep_ap mode; creating managed STA iface {} on {} while AP iface {} stays up",
         NAME, sta_iface, phy, ap_iface
     );
     run_shell_for_wifi(
@@ -1086,7 +1091,7 @@ async fn run_wpa_supplicant_wifi_join(
     tokio::fs::write(&conf_path, wpa_supplicant_config(info_msg)).await?;
 
     info!(
-        "{} 🧪 bt-wireless-poc car-wifi-mitm: auto Wi-Fi join using wpa_supplicant iface={} ssid={} bssid={} key_len={}",
+        "{} 🧪 bt-wireless-proxy car-wifi-mitm: auto Wi-Fi join using wpa_supplicant iface={} ssid={} bssid={} key_len={}",
         NAME,
         iface,
         info_msg.ssid(),
@@ -1136,7 +1141,7 @@ async fn run_wpa_supplicant_wifi_join(
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             warn!(
-                "{} 🧪 bt-wireless-poc car-wifi-mitm: udhcpc did not return success status={} stdout={} stderr={}",
+                "{} 🧪 bt-wireless-proxy car-wifi-mitm: udhcpc did not return success status={} stdout={} stderr={}",
                 NAME,
                 output.status,
                 stdout.trim(),
@@ -1145,7 +1150,7 @@ async fn run_wpa_supplicant_wifi_join(
         }
     } else {
         warn!(
-            "{} 🧪 bt-wireless-poc car-wifi-mitm: udhcpc not available; assuming interface already has an IP or DHCP is managed elsewhere",
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: udhcpc not available; assuming interface already has an IP or DHCP is managed elsewhere",
             NAME
         );
     }
@@ -1183,7 +1188,7 @@ async fn run_car_wifi_join(
         && current_iw_ssid(requested_sta_iface).await.as_deref() == Some(ssid)
     {
         info!(
-            "{} 🧪 bt-wireless-poc car-wifi-mitm: iface {} is already associated to ssid={}",
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: iface {} is already associated to ssid={}",
             NAME, requested_sta_iface, ssid
         );
         return Ok(requested_sta_iface.to_string());
@@ -1197,7 +1202,7 @@ async fn run_car_wifi_join(
             return Ok(requested_sta_iface.to_string());
         }
         warn!(
-            "{} 🧪 bt-wireless-poc car-wifi-mitm: custom command returned success but iface {} is not associated/IPv4-ready for ssid={} yet",
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: custom command returned success but iface {} is not associated/IPv4-ready for ssid={} yet",
             NAME, requested_sta_iface, ssid
         );
         return Ok(requested_sta_iface.to_string());
@@ -1205,7 +1210,7 @@ async fn run_car_wifi_join(
 
     if !auto_join {
         info!(
-            "{} 🧪 bt-wireless-poc car-wifi-mitm: auto Wi-Fi join disabled and no join command configured; assuming SBC is already on car Wi-Fi",
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: auto Wi-Fi join disabled and no join command configured; assuming SBC is already on car Wi-Fi",
             NAME
         );
         return Ok(requested_sta_iface.to_string());
@@ -1230,7 +1235,7 @@ async fn run_car_wifi_join(
         }
     } else {
         debug!(
-            "{} 🧪 bt-wireless-poc car-wifi-mitm: nmcli not available for auto Wi-Fi join",
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: nmcli not available for auto Wi-Fi join",
             NAME
         );
     }
@@ -1247,7 +1252,7 @@ async fn run_car_wifi_join(
         }
     } else {
         debug!(
-            "{} 🧪 bt-wireless-poc car-wifi-mitm: wpa_cli not available for auto Wi-Fi join",
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: wpa_cli not available for auto Wi-Fi join",
             NAME
         );
     }
@@ -1264,7 +1269,7 @@ async fn run_car_wifi_join(
         }
     } else {
         debug!(
-            "{} 🧪 bt-wireless-poc car-wifi-mitm: wpa_supplicant not available for auto Wi-Fi join",
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: wpa_supplicant not available for auto Wi-Fi join",
             NAME
         );
     }
@@ -1280,7 +1285,7 @@ async fn discover_rewrite_ip(target_ip: &str, iface: &str, override_ip: &str) ->
     let override_ip = override_ip.trim();
     if !override_ip.is_empty() {
         info!(
-            "{} 🧪 bt-wireless-poc car-wifi-mitm: using configured rewrite IP {}",
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: using configured rewrite IP {}",
             NAME, override_ip
         );
         return Ok(override_ip.to_string());
@@ -1300,14 +1305,14 @@ async fn discover_rewrite_ip(target_ip: &str, iface: &str, override_ip: &str) ->
             for pair in tokens.windows(2) {
                 if pair[0] == "src" {
                     info!(
-                        "{} 🧪 bt-wireless-poc car-wifi-mitm: discovered rewrite IP {} via route to HU {}",
+                        "{} 🧪 bt-wireless-proxy car-wifi-mitm: discovered rewrite IP {} via route to HU {}",
                         NAME, pair[1], target_ip
                     );
                     return Ok(pair[1].to_string());
                 }
             }
             debug!(
-                "{} 🧪 bt-wireless-poc car-wifi-mitm: ip route get output had no src: {}",
+                "{} 🧪 bt-wireless-proxy car-wifi-mitm: ip route get output had no src: {}",
                 NAME,
                 stdout.trim()
             );
@@ -1330,7 +1335,7 @@ async fn discover_rewrite_ip(target_ip: &str, iface: &str, override_ip: &str) ->
                 if pair[0] == "inet" {
                     let ip = pair[1].split('/').next().unwrap_or(pair[1]);
                     info!(
-                        "{} 🧪 bt-wireless-poc car-wifi-mitm: discovered rewrite IP {} from iface {}",
+                        "{} 🧪 bt-wireless-proxy car-wifi-mitm: discovered rewrite IP {} from iface {}",
                         NAME, ip, iface
                     );
                     return Ok(ip.to_string());
@@ -1339,14 +1344,16 @@ async fn discover_rewrite_ip(target_ip: &str, iface: &str, override_ip: &str) ->
         }
     }
 
-    Err("could not discover local rewrite IP; set bt_wireless_poc_rewrite_ip".into())
+    Err("could not discover local rewrite IP; set bt_wireless_proxy_rewrite_ip".into())
 }
 
 pub struct Bluetooth {
+    session: Session,
     adapter: Adapter,
     handle_aa: Option<ProfileHandle>,
     btle_handle: Option<bluer::gatt::local::ApplicationHandle>,
     adv_handle: Option<bluer::adv::AdvertisementHandle>,
+    hu_pairing_agent: Option<AgentHandle>,
     current_index: usize,
     dongle_mode: bool,
 }
@@ -1386,7 +1393,7 @@ pub async fn init(
         adapter.set_discoverable_timeout(0).await?;
     }
 
-    // AA Wireless profile. Probe-only PoC acts as a Bluetooth client toward an HU/fake-HU,
+    // AA Wireless profile. Probe-only Proxy acts as a Bluetooth client toward an HU/fake-HU,
     // so it must not also register the same UUID as a local server profile; BlueZ allows only
     // one local registration for a UUID and would otherwise fail later with "UUID already registered".
     let handle_aa = if register_aa_wireless_profile {
@@ -1404,17 +1411,19 @@ pub async fn init(
         Some(handle_aa)
     } else {
         info!(
-            "{} 📱 AA Wireless Profile: not registered locally because bt_wireless_poc probe mode will use client Profile registration",
+            "{} 📱 AA Wireless Profile: not registered locally because bt_wireless_proxy probe mode will use client Profile registration",
             NAME
         );
         None
     };
 
     Ok(Bluetooth {
+        session,
         adapter,
         handle_aa,
         btle_handle: None,
         adv_handle: None,
+        hu_pairing_agent: None,
         current_index: 0,
         dongle_mode,
     })
@@ -1577,7 +1586,293 @@ async fn read_message(
     Ok(HEADER_LEN + len)
 }
 
+
+fn auto_accept_only_configured_hu(device: Address, allowed_hu: Address, action: &str) -> AgentReqResult<()> {
+    if device == allowed_hu {
+        info!(
+            "{} 🧲 bt-wireless-proxy pairing: auto-accepting {} from configured HU {}",
+            NAME, action, device
+        );
+        Ok(())
+    } else {
+        warn!(
+            "{} 🧲 bt-wireless-proxy pairing: rejecting {} from {}; configured HU is {}",
+            NAME, action, device, allowed_hu
+        );
+        Err(AgentReqError::Rejected)
+    }
+}
+
+async fn trust_hu_after_pairing(
+    session: Session,
+    adapter_name: String,
+    device_addr: Address,
+) -> AgentReqResult<()> {
+    match session.adapter(&adapter_name) {
+        Ok(adapter) => match adapter.device(device_addr) {
+            Ok(device) => match device.set_trusted(true).await {
+                Ok(()) => info!(
+                    "{} 🧲 bt-wireless-proxy pairing: trusted HU {} on adapter {}",
+                    NAME, device_addr, adapter_name
+                ),
+                Err(e) => warn!(
+                    "{} 🧲 bt-wireless-proxy pairing: failed to trust HU {} on adapter {}: {}",
+                    NAME, device_addr, adapter_name, e
+                ),
+            },
+            Err(e) => warn!(
+                "{} 🧲 bt-wireless-proxy pairing: failed to open device {} on adapter {}: {}",
+                NAME, device_addr, adapter_name, e
+            ),
+        },
+        Err(e) => warn!(
+            "{} 🧲 bt-wireless-proxy pairing: failed to open adapter {} while trusting {}: {}",
+            NAME, adapter_name, device_addr, e
+        ),
+    }
+    Ok(())
+}
+
+async fn hu_request_pin_code(req: RequestPinCode, allowed_hu: Address) -> AgentReqResult<String> {
+    auto_accept_only_configured_hu(req.device, allowed_hu, "legacy PIN-code request")?;
+    info!(
+        "{} 🧲 bt-wireless-proxy pairing: replying with fallback PIN 0000 for HU {}",
+        NAME, req.device
+    );
+    Ok("0000".to_string())
+}
+
+async fn hu_display_pin_code(req: DisplayPinCode, allowed_hu: Address) -> AgentReqResult<()> {
+    auto_accept_only_configured_hu(req.device, allowed_hu, "display PIN-code request")?;
+    info!(
+        "{} 🧲 bt-wireless-proxy pairing: HU {} PIN-code display requested: {}",
+        NAME, req.device, req.pincode
+    );
+    Ok(())
+}
+
+async fn hu_request_passkey(req: RequestPasskey, allowed_hu: Address) -> AgentReqResult<u32> {
+    auto_accept_only_configured_hu(req.device, allowed_hu, "passkey request")?;
+    info!(
+        "{} 🧲 bt-wireless-proxy pairing: replying with fallback passkey 000000 for HU {}",
+        NAME, req.device
+    );
+    Ok(0)
+}
+
+async fn hu_display_passkey(req: DisplayPasskey, allowed_hu: Address) -> AgentReqResult<()> {
+    auto_accept_only_configured_hu(req.device, allowed_hu, "display passkey request")?;
+    info!(
+        "{} 🧲 bt-wireless-proxy pairing: HU {} passkey display requested: {:06} entered={}",
+        NAME, req.device, req.passkey, req.entered
+    );
+    Ok(())
+}
+
+async fn hu_request_confirmation(
+    req: RequestConfirmation,
+    session: Session,
+    allowed_hu: Address,
+) -> AgentReqResult<()> {
+    auto_accept_only_configured_hu(req.device, allowed_hu, "numeric confirmation")?;
+    info!(
+        "{} 🧲 bt-wireless-proxy pairing: confirming passkey {:06} for HU {}",
+        NAME, req.passkey, req.device
+    );
+    trust_hu_after_pairing(session, req.adapter.clone(), req.device).await
+}
+
+async fn hu_request_authorization(
+    req: RequestAuthorization,
+    session: Session,
+    allowed_hu: Address,
+) -> AgentReqResult<()> {
+    auto_accept_only_configured_hu(req.device, allowed_hu, "pairing authorization")?;
+    trust_hu_after_pairing(session, req.adapter.clone(), req.device).await
+}
+
+async fn hu_authorize_service(req: AuthorizeService, allowed_hu: Address) -> AgentReqResult<()> {
+    auto_accept_only_configured_hu(req.device, allowed_hu, "service authorization")?;
+    info!(
+        "{} 🧲 bt-wireless-proxy pairing: authorizing service {} for HU {}",
+        NAME, req.service, req.device
+    );
+    Ok(())
+}
+
 impl Bluetooth {
+    pub async fn set_adapter_pairable_discoverable(
+        &self,
+        pairable: bool,
+        discoverable: bool,
+        timeout_secs: u32,
+    ) -> Result<()> {
+        self.adapter.set_pairable_timeout(timeout_secs).await?;
+        self.adapter.set_discoverable_timeout(timeout_secs).await?;
+        self.adapter.set_pairable(pairable).await?;
+        self.adapter.set_discoverable(discoverable).await?;
+        Ok(())
+    }
+
+    async fn register_hu_pairing_agent(&mut self, hu_addr: Address) -> Result<()> {
+        if self.hu_pairing_agent.is_some() {
+            return Ok(());
+        }
+
+        let session_for_confirmation = self.session.clone();
+        let session_for_authorization = self.session.clone();
+        let allowed_for_pin = hu_addr.clone();
+        let allowed_for_display_pin = hu_addr.clone();
+        let allowed_for_passkey = hu_addr.clone();
+        let allowed_for_display_passkey = hu_addr.clone();
+        let allowed_for_confirmation = hu_addr.clone();
+        let allowed_for_authorization = hu_addr.clone();
+        let allowed_for_service = hu_addr.clone();
+        let agent = Agent {
+            request_default: true,
+            request_pin_code: Some(Box::new(move |req| {
+                hu_request_pin_code(req, allowed_for_pin.clone()).boxed()
+            })),
+            display_pin_code: Some(Box::new(move |req| {
+                hu_display_pin_code(req, allowed_for_display_pin.clone()).boxed()
+            })),
+            request_passkey: Some(Box::new(move |req| {
+                hu_request_passkey(req, allowed_for_passkey.clone()).boxed()
+            })),
+            display_passkey: Some(Box::new(move |req| {
+                hu_display_passkey(req, allowed_for_display_passkey.clone()).boxed()
+            })),
+            request_confirmation: Some(Box::new(move |req| {
+                hu_request_confirmation(
+                    req,
+                    session_for_confirmation.clone(),
+                    allowed_for_confirmation.clone(),
+                )
+                .boxed()
+            })),
+            request_authorization: Some(Box::new(move |req| {
+                hu_request_authorization(
+                    req,
+                    session_for_authorization.clone(),
+                    allowed_for_authorization.clone(),
+                )
+                .boxed()
+            })),
+            authorize_service: Some(Box::new(move |req| {
+                hu_authorize_service(req, allowed_for_service.clone()).boxed()
+            })),
+            ..Default::default()
+        };
+
+        let handle = self.session.register_agent(agent).await?;
+        self.hu_pairing_agent = Some(handle);
+        info!(
+            "{} 🧲 bt-wireless-proxy pairing: registered BlueZ agent for configured HU {} only",
+            NAME, hu_addr
+        );
+        Ok(())
+    }
+
+    async fn cleanup_hu_pairing_window(&mut self) {
+        if let Err(e) = self
+            .set_adapter_pairable_discoverable(false, false, 0)
+            .await
+        {
+            warn!(
+                "{} 🧲 bt-wireless-proxy pairing: failed to disable pairable/discoverable after window: {}",
+                NAME, e
+            );
+        }
+        if self.hu_pairing_agent.take().is_some() {
+            info!(
+                "{} 🧲 bt-wireless-proxy pairing: unregistered temporary HU pairing agent",
+                NAME
+            );
+        }
+    }
+
+    pub async fn ensure_hu_pairing_agent(
+        &mut self,
+        hu_mac: &str,
+        pairing_window_secs: u64,
+    ) -> Result<()> {
+        let hu_mac = hu_mac.trim();
+        if hu_mac.is_empty() {
+            return Ok(());
+        }
+
+        let hu_addr: Address = hu_mac.parse()?;
+        let already_ready = match self.adapter.device(hu_addr) {
+            Ok(device) => {
+                let paired = device.is_paired().await.unwrap_or(false);
+                let trusted = device.is_trusted().await.unwrap_or(false);
+                if paired && !trusted {
+                    info!(
+                        "{} 🧲 bt-wireless-proxy pairing: HU {} is paired but not trusted; trusting now",
+                        NAME, hu_addr
+                    );
+                    if let Err(e) = device.set_trusted(true).await {
+                        warn!(
+                            "{} 🧲 bt-wireless-proxy pairing: failed to trust paired HU {}: {}",
+                            NAME, hu_addr, e
+                        );
+                    }
+                }
+                paired && (trusted || device.is_trusted().await.unwrap_or(false))
+            }
+            Err(_) => false,
+        };
+
+        if already_ready {
+            info!(
+                "{} 🧲 bt-wireless-proxy pairing: HU {} is already paired and trusted; skipping pairing window",
+                NAME, hu_addr
+            );
+            return Ok(());
+        }
+
+        let window_secs = pairing_window_secs.max(10) as u32;
+        self.register_hu_pairing_agent(hu_addr).await?;
+        self.set_adapter_pairable_discoverable(true, true, window_secs)
+            .await?;
+        info!(
+            "{} 🧲 bt-wireless-proxy pairing: HU {} is not paired/trusted; adapter is pairable/discoverable for {}s before USB/phone flow",
+            NAME, hu_addr, window_secs
+        );
+
+        let started = Instant::now();
+        loop {
+            if let Ok(device) = self.adapter.device(hu_addr) {
+                let paired = device.is_paired().await.unwrap_or(false);
+                if paired {
+                    match device.set_trusted(true).await {
+                        Ok(()) => info!(
+                            "{} 🧲 bt-wireless-proxy pairing: HU {} paired and trusted",
+                            NAME, hu_addr
+                        ),
+                        Err(e) => warn!(
+                            "{} 🧲 bt-wireless-proxy pairing: HU {} paired but trust failed: {}",
+                            NAME, hu_addr, e
+                        ),
+                    }
+                    self.cleanup_hu_pairing_window().await;
+                    return Ok(());
+                }
+            }
+
+            if started.elapsed() >= Duration::from_secs(window_secs as u64) {
+                self.cleanup_hu_pairing_window().await;
+                return Err(format!(
+                    "timed out waiting {}s for HU {} pairing; select aa-proxy on the HU and pair again",
+                    window_secs, hu_addr
+                )
+                .into());
+            }
+
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+
     pub async fn start_ble(&mut self, state: AppState, enable_btle: bool) -> Result<()> {
         // --- Start BLE GATT server first ---
         if enable_btle {
@@ -2003,25 +2298,25 @@ impl Bluetooth {
         }
     }
 
-    async fn connect_hu_aa_wireless_poc(
+    async fn connect_hu_aa_wireless_proxy(
         &self,
         hu_mac: &str,
         hu_channel: Option<u8>,
-    ) -> Result<PocHuConnection> {
+    ) -> Result<ProxyHuConnection> {
         if hu_mac.trim().is_empty() {
-            return Err("bt_wireless_poc_hu_mac must be set".into());
+            return Err("bt_wireless_proxy_hu_mac must be set".into());
         }
 
         let hu_addr: Address = hu_mac.trim().parse()?;
         let channel = if let Some(channel) = hu_channel.filter(|channel| *channel > 0) {
             info!(
-                "{} 🧪 bt-wireless-poc: using configured HU RFCOMM channel {} for {}",
+                "{} 🧪 bt-wireless-proxy: using configured HU RFCOMM channel {} for {}",
                 NAME, channel, hu_addr
             );
             channel
         } else {
             info!(
-                "{} 🧪 bt-wireless-poc: HU RFCOMM channel is empty/0; using internal SDP discovery + raw RFCOMM for {}",
+                "{} 🧪 bt-wireless-proxy: HU RFCOMM channel is empty/0; using internal SDP discovery + raw RFCOMM for {}",
                 NAME, hu_addr
             );
             discover_rfcomm_channel_via_internal_sdp(hu_addr).await?
@@ -2029,11 +2324,11 @@ impl Bluetooth {
 
         let hu_socket = SocketAddr::new(hu_addr, channel);
         info!(
-            "{} 🧪 bt-wireless-poc: connecting to HU RFCOMM {} without registering a second AA Wireless UUID profile",
+            "{} 🧪 bt-wireless-proxy: connecting to HU RFCOMM {} without registering a second AA Wireless UUID profile",
             NAME, hu_socket
         );
         let stream = timeout(Duration::from_secs(15), Stream::connect(hu_socket)).await??;
-        Ok(PocHuConnection {
+        Ok(ProxyHuConnection {
             stream,
             endpoint: format!("RFCOMM {}", hu_socket),
             _client_profile_session: None,
@@ -2041,7 +2336,7 @@ impl Bluetooth {
         })
     }
 
-    pub async fn aa_wireless_bridge_poc(
+    pub async fn aa_wireless_bridge_proxy(
         &mut self,
         connect: BluetoothAddressList,
         hu_mac: String,
@@ -2050,7 +2345,7 @@ impl Bluetooth {
         stopped: bool,
     ) -> Result<()> {
         if hu_mac.trim().is_empty() {
-            return Err("bt_wireless_poc_hu_mac must be set for bridge mode".into());
+            return Err("bt_wireless_proxy_hu_mac must be set for bridge mode".into());
         }
 
         let hu_endpoint_hint = match hu_channel.filter(|channel| *channel > 0) {
@@ -2059,7 +2354,7 @@ impl Bluetooth {
         };
 
         info!(
-            "{} 🧪 bt-wireless-poc bridge: waiting for phone AA RFCOMM, then connecting to HU {}",
+            "{} 🧪 bt-wireless-proxy bridge: waiting for phone AA RFCOMM, then connecting to HU {}",
             NAME, hu_endpoint_hint
         );
 
@@ -2068,18 +2363,18 @@ impl Bluetooth {
             .await?;
 
         info!(
-            "{} 🧪 bt-wireless-poc bridge: phone connected from {}; connecting to HU {}",
+            "{} 🧪 bt-wireless-proxy bridge: phone connected from {}; connecting to HU {}",
             NAME, phone_addr, hu_endpoint_hint
         );
 
-        let hu_conn = self.connect_hu_aa_wireless_poc(hu_mac.trim(), hu_channel).await?;
+        let hu_conn = self.connect_hu_aa_wireless_proxy(hu_mac.trim(), hu_channel).await?;
         let hu_endpoint = hu_conn.endpoint.clone();
         info!(
-            "{} 🧪 bt-wireless-poc bridge: connected to HU {}; relaying raw AA Wireless BT frames both ways",
+            "{} 🧪 bt-wireless-proxy bridge: connected to HU {}; relaying raw AA Wireless BT frames both ways",
             NAME, hu_endpoint
         );
 
-        let PocHuConnection {
+        let ProxyHuConnection {
             stream: hu_stream,
             endpoint: _,
             _client_profile_session: hu_client_profile_session,
@@ -2090,12 +2385,12 @@ impl Bluetooth {
         let (phone_read, phone_write) = phone_stream.into_split();
         let (hu_read, hu_write) = hu_stream.into_split();
 
-        let mut phone_to_hu = tokio::spawn(relay_with_poc_logging(
+        let mut phone_to_hu = tokio::spawn(relay_with_proxy_logging(
             phone_read,
             hu_write,
             "PHONE -> HU",
         ));
-        let mut hu_to_phone = tokio::spawn(relay_with_poc_logging(
+        let mut hu_to_phone = tokio::spawn(relay_with_proxy_logging(
             hu_read,
             phone_write,
             "HU -> PHONE",
@@ -2104,33 +2399,33 @@ impl Bluetooth {
         tokio::select! {
             res = &mut phone_to_hu => {
                 match res {
-                    Ok(Ok(bytes)) => info!("{} 🧪 bt-wireless-poc bridge: PHONE -> HU ended after {} bytes", NAME, bytes),
-                    Ok(Err(e)) => warn!("{} 🧪 bt-wireless-poc bridge: PHONE -> HU error: {}", NAME, e),
-                    Err(e) => warn!("{} 🧪 bt-wireless-poc bridge: PHONE -> HU task error: {}", NAME, e),
+                    Ok(Ok(bytes)) => info!("{} 🧪 bt-wireless-proxy bridge: PHONE -> HU ended after {} bytes", NAME, bytes),
+                    Ok(Err(e)) => warn!("{} 🧪 bt-wireless-proxy bridge: PHONE -> HU error: {}", NAME, e),
+                    Err(e) => warn!("{} 🧪 bt-wireless-proxy bridge: PHONE -> HU task error: {}", NAME, e),
                 }
                 hu_to_phone.abort();
             }
             res = &mut hu_to_phone => {
                 match res {
-                    Ok(Ok(bytes)) => info!("{} 🧪 bt-wireless-poc bridge: HU -> PHONE ended after {} bytes", NAME, bytes),
-                    Ok(Err(e)) => warn!("{} 🧪 bt-wireless-poc bridge: HU -> PHONE error: {}", NAME, e),
-                    Err(e) => warn!("{} 🧪 bt-wireless-poc bridge: HU -> PHONE task error: {}", NAME, e),
+                    Ok(Ok(bytes)) => info!("{} 🧪 bt-wireless-proxy bridge: HU -> PHONE ended after {} bytes", NAME, bytes),
+                    Ok(Err(e)) => warn!("{} 🧪 bt-wireless-proxy bridge: HU -> PHONE error: {}", NAME, e),
+                    Err(e) => warn!("{} 🧪 bt-wireless-proxy bridge: HU -> PHONE task error: {}", NAME, e),
                 }
                 phone_to_hu.abort();
             }
         }
 
-        info!("{} 🧪 bt-wireless-poc bridge: finished", NAME);
+        info!("{} 🧪 bt-wireless-proxy bridge: finished", NAME);
         Ok(())
     }
 
-    pub async fn aa_wireless_car_wifi_mitm_poc(
+    pub async fn aa_wireless_car_wifi_mitm_proxy(
         &mut self,
         connect: BluetoothAddressList,
-        options: CarWifiMitmPocOptions,
+        options: CarWifiMitmProxyOptions,
     ) -> Result<()> {
         if options.hu_mac.trim().is_empty() {
-            return Err("bt_wireless_poc_hu_mac must be set for car-wifi-mitm mode".into());
+            return Err("bt_wireless_proxy_hu_mac must be set for car-wifi-mitm mode".into());
         }
 
         let listen_port = if options.listen_port == 0 {
@@ -2144,7 +2439,7 @@ impl Bluetooth {
         };
 
         info!(
-            "{} 🧪 bt-wireless-poc car-wifi-mitm: waiting for phone AA RFCOMM, then connecting to HU {}",
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: waiting for phone AA RFCOMM, then connecting to HU {}",
             NAME, hu_endpoint_hint
         );
 
@@ -2160,15 +2455,15 @@ impl Bluetooth {
             .await?;
 
         info!(
-            "{} 🧪 bt-wireless-poc car-wifi-mitm: phone connected from {}; connecting to HU {}",
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: phone connected from {}; connecting to HU {}",
             NAME, phone_addr, hu_endpoint_hint
         );
 
         let hu_conn = self
-            .connect_hu_aa_wireless_poc(options.hu_mac.trim(), options.hu_channel)
+            .connect_hu_aa_wireless_proxy(options.hu_mac.trim(), options.hu_channel)
             .await?;
         let hu_endpoint = hu_conn.endpoint.clone();
-        let PocHuConnection {
+        let ProxyHuConnection {
             stream: mut hu_stream,
             endpoint: _,
             _client_profile_session: hu_client_profile_session,
@@ -2177,7 +2472,7 @@ impl Bluetooth {
         let _hu_client_profile_guard = (hu_client_profile_session, hu_client_profile_handle);
 
         info!(
-            "{} 🧪 bt-wireless-poc car-wifi-mitm: connected to HU {}; starting delayed bootstrap MITM; waiting up to 10s for HU bootstrap frame",
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: connected to HU {}; starting delayed bootstrap MITM; waiting up to 10s for HU bootstrap frame",
             NAME, hu_endpoint
         );
 
@@ -2207,20 +2502,20 @@ impl Bluetooth {
             .into());
         }
 
-        send_poc_frame(
+        send_proxy_frame(
             &mut hu_stream,
             "POC -> HU",
-            PocMessageId::WifiInfoRequest,
+            ProxyMessageId::WifiInfoRequest,
             &[],
         )
         .await?;
 
-        let (hu_info_id, hu_info_payload) = read_poc_frame(&mut hu_stream, "HU -> POC").await?;
-        if hu_info_id != PocMessageId::WifiInfoResponse as u16 {
+        let (hu_info_id, hu_info_payload) = read_proxy_frame(&mut hu_stream, "HU -> POC").await?;
+        if hu_info_id != ProxyMessageId::WifiInfoResponse as u16 {
             return Err(format!(
                 "expected HU WifiInfoResponse as second frame, got {} ({})",
                 hu_info_id,
-                PocMessageId::name(hu_info_id)
+                ProxyMessageId::name(hu_info_id)
             )
             .into());
         }
@@ -2242,7 +2537,7 @@ impl Bluetooth {
         let listen_addr = format!("0.0.0.0:{}", listen_port);
         let listener = TcpListener::bind(listen_addr.as_str()).await?;
         info!(
-            "{} 🧪 bt-wireless-poc car-wifi-mitm: MD TCP listener bound at {}; phone will receive {}:{} instead of HU {}:{}",
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: MD TCP listener bound at {}; phone will receive {}:{} instead of HU {}:{}",
             NAME, listen_addr, rewrite_ip, listen_port, hu_tcp_ip, hu_tcp_port
         );
 
@@ -2250,48 +2545,48 @@ impl Bluetooth {
         phone_start_req.set_ip_address(rewrite_ip.clone());
         phone_start_req.set_port(listen_port as i32);
         let phone_start_payload = phone_start_req.write_to_bytes()?;
-        send_poc_frame(
+        send_proxy_frame(
             &mut phone_stream,
             "POC -> PHONE",
-            PocMessageId::WifiStartRequest,
+            ProxyMessageId::WifiStartRequest,
             &phone_start_payload,
         )
         .await?;
 
         let (phone_info_req_id, _phone_info_req_payload) =
-            read_poc_frame(&mut phone_stream, "PHONE -> POC").await?;
-        if phone_info_req_id != PocMessageId::WifiInfoRequest as u16 {
+            read_proxy_frame(&mut phone_stream, "PHONE -> POC").await?;
+        if phone_info_req_id != ProxyMessageId::WifiInfoRequest as u16 {
             warn!(
-                "{} 🧪 bt-wireless-poc car-wifi-mitm: expected PHONE WifiInfoRequest, got {} ({})",
+                "{} 🧪 bt-wireless-proxy car-wifi-mitm: expected PHONE WifiInfoRequest, got {} ({})",
                 NAME,
                 phone_info_req_id,
-                PocMessageId::name(phone_info_req_id)
+                ProxyMessageId::name(phone_info_req_id)
             );
         }
         debug!(
-            "{} 🧪 bt-wireless-poc car-wifi-mitm: consumed PHONE WifiInfoRequest locally; forwarding cached HU WifiInfoResponse to phone",
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: consumed PHONE WifiInfoRequest locally; forwarding cached HU WifiInfoResponse to phone",
             NAME
         );
 
-        send_poc_frame(
+        send_proxy_frame(
             &mut phone_stream,
             "POC -> PHONE",
-            PocMessageId::WifiInfoResponse,
+            ProxyMessageId::WifiInfoResponse,
             &hu_info_payload,
         )
         .await?;
 
         let (phone_start_resp_id, phone_start_resp_payload) =
-            read_poc_frame(&mut phone_stream, "PHONE -> POC").await?;
-        if phone_start_resp_id != PocMessageId::WifiStartResponse as u16 {
+            read_proxy_frame(&mut phone_stream, "PHONE -> POC").await?;
+        if phone_start_resp_id != ProxyMessageId::WifiStartResponse as u16 {
             warn!(
-                "{} 🧪 bt-wireless-poc car-wifi-mitm: expected PHONE WifiStartResponse, got {} ({})",
+                "{} 🧪 bt-wireless-proxy car-wifi-mitm: expected PHONE WifiStartResponse, got {} ({})",
                 NAME,
                 phone_start_resp_id,
-                PocMessageId::name(phone_start_resp_id)
+                ProxyMessageId::name(phone_start_resp_id)
             );
         }
-        send_poc_frame_raw(
+        send_proxy_frame_raw(
             &mut hu_stream,
             "POC -> HU",
             phone_start_resp_id,
@@ -2301,7 +2596,7 @@ impl Bluetooth {
 
         let hu_tcp_addr = format!("{}:{}", hu_tcp_ip, hu_tcp_port);
         info!(
-            "{} 🧪 bt-wireless-poc car-wifi-mitm: waiting for phone TCP and connecting HU TCP {}",
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: waiting for phone TCP and connecting HU TCP {}",
             NAME, hu_tcp_addr
         );
 
@@ -2320,7 +2615,7 @@ impl Bluetooth {
         phone_tcp.set_nodelay(true)?;
         hu_tcp.set_nodelay(true)?;
         info!(
-            "{} 🧪 bt-wireless-poc car-wifi-mitm: phone TCP {} connected; HU TCP {} connected",
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: phone TCP {} connected; HU TCP {} connected",
             NAME, phone_tcp_addr, hu_tcp_addr
         );
 
@@ -2329,20 +2624,20 @@ impl Bluetooth {
         let rfcomm_status_task = tokio::spawn(async move {
             match timeout(
                 Duration::from_secs(20),
-                read_poc_frame(&mut phone_rfcomm, "PHONE -> POC"),
+                read_proxy_frame(&mut phone_rfcomm, "PHONE -> POC"),
             )
             .await
             {
                 Ok(Ok((phone_status_id, phone_status_payload))) => {
-                    if phone_status_id != PocMessageId::WifiConnectStatus as u16 {
+                    if phone_status_id != ProxyMessageId::WifiConnectStatus as u16 {
                         warn!(
-                            "{} 🧪 bt-wireless-poc car-wifi-mitm: expected PHONE WifiConnectStatus, got {} ({})",
+                            "{} 🧪 bt-wireless-proxy car-wifi-mitm: expected PHONE WifiConnectStatus, got {} ({})",
                             NAME,
                             phone_status_id,
-                            PocMessageId::name(phone_status_id)
+                            ProxyMessageId::name(phone_status_id)
                         );
                     }
-                    send_poc_frame_raw(
+                    send_proxy_frame_raw(
                         &mut hu_rfcomm,
                         "POC -> HU",
                         phone_status_id,
@@ -2352,26 +2647,26 @@ impl Bluetooth {
                 }
                 Ok(Err(e)) => {
                     warn!(
-                        "{} 🧪 bt-wireless-poc car-wifi-mitm: failed reading PHONE WifiConnectStatus: {}; sending success to HU",
+                        "{} 🧪 bt-wireless-proxy car-wifi-mitm: failed reading PHONE WifiConnectStatus: {}; sending success to HU",
                         NAME, e
                     );
-                    send_poc_frame(
+                    send_proxy_frame(
                         &mut hu_rfcomm,
                         "POC -> HU",
-                        PocMessageId::WifiConnectStatus,
+                        ProxyMessageId::WifiConnectStatus,
                         success_status_payload(),
                     )
                     .await?;
                 }
                 Err(_) => {
                     warn!(
-                        "{} 🧪 bt-wireless-poc car-wifi-mitm: timed out waiting for PHONE WifiConnectStatus; sending success to HU",
+                        "{} 🧪 bt-wireless-proxy car-wifi-mitm: timed out waiting for PHONE WifiConnectStatus; sending success to HU",
                         NAME
                     );
-                    send_poc_frame(
+                    send_proxy_frame(
                         &mut hu_rfcomm,
                         "POC -> HU",
-                        PocMessageId::WifiConnectStatus,
+                        ProxyMessageId::WifiConnectStatus,
                         success_status_payload(),
                     )
                     .await?;
@@ -2381,7 +2676,7 @@ impl Bluetooth {
         });
 
         info!(
-            "{} 🧪 bt-wireless-poc car-wifi-mitm: starting raw AA TCP relay phone<->HU",
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: starting raw AA TCP relay phone<->HU",
             NAME
         );
         let (phone_to_hu, hu_to_phone) = copy_bidirectional(&mut phone_tcp, &mut hu_tcp).await?;
@@ -2389,12 +2684,12 @@ impl Bluetooth {
             rfcomm_status_task.abort();
         } else if let Ok(Err(e)) = rfcomm_status_task.await {
             warn!(
-                "{} 🧪 bt-wireless-poc car-wifi-mitm: RFCOMM status forward task failed: {}",
+                "{} 🧪 bt-wireless-proxy car-wifi-mitm: RFCOMM status forward task failed: {}",
                 NAME, e
             );
         }
         info!(
-            "{} 🧪 bt-wireless-poc car-wifi-mitm: TCP relay ended phone->HU={} bytes HU->phone={} bytes",
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: TCP relay ended phone->HU={} bytes HU->phone={} bytes",
             NAME, phone_to_hu, hu_to_phone
         );
 
@@ -2402,19 +2697,19 @@ impl Bluetooth {
     }
 
 
-    pub async fn aa_wireless_probe_poc(
+    pub async fn aa_wireless_probe_proxy(
         &mut self,
         hu_mac: String,
         hu_channel: Option<u8>,
         tcp_probe: bool,
     ) -> Result<()> {
         if hu_mac.trim().is_empty() {
-            return Err("bt_wireless_poc_hu_mac must be set for probe mode".into());
+            return Err("bt_wireless_proxy_hu_mac must be set for probe mode".into());
         }
 
-        let hu_conn = self.connect_hu_aa_wireless_poc(hu_mac.trim(), hu_channel).await?;
+        let hu_conn = self.connect_hu_aa_wireless_proxy(hu_mac.trim(), hu_channel).await?;
         let hu_endpoint = hu_conn.endpoint.clone();
-        let PocHuConnection {
+        let ProxyHuConnection {
             stream: mut stream,
             endpoint: _,
             _client_profile_session: hu_client_profile_session,
@@ -2423,47 +2718,47 @@ impl Bluetooth {
         let _hu_client_profile_guard = (hu_client_profile_session, hu_client_profile_handle);
 
         info!(
-            "{} 🧪 bt-wireless-poc probe: connected to HU {}; waiting for WifiStartRequest",
+            "{} 🧪 bt-wireless-proxy probe: connected to HU {}; waiting for WifiStartRequest",
             NAME, hu_endpoint
         );
 
-        let (message_id, payload) = read_poc_frame(&mut stream, "HU -> POC").await?;
-        if message_id != PocMessageId::WifiStartRequest as u16 {
+        let (message_id, payload) = read_proxy_frame(&mut stream, "HU -> POC").await?;
+        if message_id != ProxyMessageId::WifiStartRequest as u16 {
             warn!(
-                "{} 🧪 bt-wireless-poc probe: first HU frame was {}, expected WifiStartRequest; continuing anyway",
+                "{} 🧪 bt-wireless-proxy probe: first HU frame was {}, expected WifiStartRequest; continuing anyway",
                 NAME, message_id
             );
         }
 
         let mut target_ip = String::new();
         let mut target_port = 0i32;
-        if message_id == PocMessageId::WifiStartRequest as u16 {
+        if message_id == ProxyMessageId::WifiStartRequest as u16 {
             if let Ok(req) = WifiStartRequest::WifiStartRequest::parse_from_bytes(&payload) {
                 target_ip = req.ip_address().to_string();
                 target_port = req.port();
             }
         }
 
-        send_poc_frame(
+        send_proxy_frame(
             &mut stream,
             "POC -> HU",
-            PocMessageId::WifiInfoRequest,
+            ProxyMessageId::WifiInfoRequest,
             &[],
         )
         .await?;
 
-        let (message_id, _payload) = read_poc_frame(&mut stream, "HU -> POC").await?;
-        if message_id != PocMessageId::WifiInfoResponse as u16 {
+        let (message_id, _payload) = read_proxy_frame(&mut stream, "HU -> POC").await?;
+        if message_id != ProxyMessageId::WifiInfoResponse as u16 {
             warn!(
-                "{} 🧪 bt-wireless-poc probe: second HU frame was {}, expected WifiInfoResponse",
+                "{} 🧪 bt-wireless-proxy probe: second HU frame was {}, expected WifiInfoResponse",
                 NAME, message_id
             );
         }
 
-        send_poc_frame(
+        send_proxy_frame(
             &mut stream,
             "POC -> HU",
-            PocMessageId::WifiStartResponse,
+            ProxyMessageId::WifiStartResponse,
             success_status_payload(),
         )
         .await?;
@@ -2471,47 +2766,47 @@ impl Bluetooth {
         if tcp_probe && !target_ip.is_empty() && target_port > 0 {
             let addr = format!("{}:{}", target_ip, target_port);
             info!(
-                "{} 🧪 bt-wireless-poc probe: trying TCP probe to HU AA endpoint {}",
+                "{} 🧪 bt-wireless-proxy probe: trying TCP probe to HU AA endpoint {}",
                 NAME, addr
             );
             match timeout(Duration::from_secs(5), TcpStream::connect(addr.as_str())).await {
                 Ok(Ok(_tcp)) => info!(
-                    "{} 🧪 bt-wireless-poc probe: TCP probe connected to {}",
+                    "{} 🧪 bt-wireless-proxy probe: TCP probe connected to {}",
                     NAME, addr
                 ),
                 Ok(Err(e)) => warn!(
-                    "{} 🧪 bt-wireless-poc probe: TCP probe failed to {}: {}",
+                    "{} 🧪 bt-wireless-proxy probe: TCP probe failed to {}: {}",
                     NAME, addr, e
                 ),
                 Err(e) => warn!(
-                    "{} 🧪 bt-wireless-poc probe: TCP probe timed out to {}: {}",
+                    "{} 🧪 bt-wireless-proxy probe: TCP probe timed out to {}: {}",
                     NAME, addr, e
                 ),
             }
         }
 
-        send_poc_frame(
+        send_proxy_frame(
             &mut stream,
             "POC -> HU",
-            PocMessageId::WifiConnectStatus,
+            ProxyMessageId::WifiConnectStatus,
             success_status_payload(),
         )
         .await?;
 
         info!(
-            "{} 🧪 bt-wireless-poc probe: bootstrap frames sent; keeping RFCOMM open until HU closes or 30s idle timeout",
+            "{} 🧪 bt-wireless-proxy probe: bootstrap frames sent; keeping RFCOMM open until HU closes or 30s idle timeout",
             NAME
         );
 
         loop {
-            match timeout(Duration::from_secs(30), read_poc_frame(&mut stream, "HU -> POC")).await {
+            match timeout(Duration::from_secs(30), read_proxy_frame(&mut stream, "HU -> POC")).await {
                 Ok(Ok((_id, _payload))) => continue,
                 Ok(Err(e)) => {
-                    info!("{} 🧪 bt-wireless-poc probe: RFCOMM ended: {}", NAME, e);
+                    info!("{} 🧪 bt-wireless-proxy probe: RFCOMM ended: {}", NAME, e);
                     break;
                 }
                 Err(_) => {
-                    info!("{} 🧪 bt-wireless-poc probe: idle timeout; closing", NAME);
+                    info!("{} 🧪 bt-wireless-proxy probe: idle timeout; closing", NAME);
                     break;
                 }
             }
