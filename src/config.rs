@@ -760,10 +760,6 @@ fn get_latest_wifi_version_from(iw_output: &str) -> std::io::Result<u16> {
     }
 }
 
-fn get_latest_wifi_version() -> std::io::Result<u16> {
-    get_latest_wifi_version_from(&iw_list_output()?)
-}
-
 impl Default for AppConfig {
     fn default() -> Self {
         // Run `iw list` once for all WiFi-capability defaults (wifi_version, band, channel).
