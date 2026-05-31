@@ -571,6 +571,81 @@ fn success_status_payload() -> &'static [u8] {
     &[0x08, 0x00]
 }
 
+async fn read_hu_wifi_start_with_prebootstrap_passthrough(
+    hu_stream: &mut Stream,
+    phone_stream: &mut Stream,
+) -> Result<Vec<u8>> {
+    // Some HUs start the AA Wireless RFCOMM bootstrap with a version exchange
+    // before WifiStartRequest. The original PoC expected WifiStartRequest as
+    // the first frame, which worked with our fake HU but stalls on version-first
+    // implementations. Keep HU-initiated pre-bootstrap frames flowing until the
+    // real WifiStartRequest arrives; then stop and let the MITM rewrite path take
+    // over. Avoid a bidirectional select here because read_exact on RFCOMM is not
+    // cancellation-safe if a partial frame has already been consumed.
+    let mut forwarded_frames = 0usize;
+
+    loop {
+        let (hu_id, hu_payload) = read_poc_frame(hu_stream, "HU -> POC pre-bootstrap").await?;
+        if hu_id == PocMessageId::WifiStartRequest as u16 {
+            info!(
+                "{} 🧪 bt-wireless-poc car-wifi-mitm: captured HU WifiStartRequest after forwarding {} pre-bootstrap frame(s)",
+                NAME, forwarded_frames
+            );
+            return Ok(hu_payload);
+        }
+
+        forwarded_frames += 1;
+        info!(
+            "{} 🧪 bt-wireless-poc car-wifi-mitm: forwarding HU pre-bootstrap frame id={} ({}) to phone while waiting for WifiStartRequest",
+            NAME,
+            hu_id,
+            PocMessageId::name(hu_id)
+        );
+        send_poc_frame_raw(
+            phone_stream,
+            "POC -> PHONE pre-bootstrap",
+            hu_id,
+            &hu_payload,
+        )
+        .await?;
+
+        if hu_id == PocMessageId::WifiVersionRequest as u16 {
+            info!(
+                "{} 🧪 bt-wireless-poc car-wifi-mitm: waiting for PHONE WifiVersionResponse to forward back to HU",
+                NAME
+            );
+            let (phone_id, phone_payload) = timeout(
+                Duration::from_secs(10),
+                read_poc_frame(phone_stream, "PHONE -> POC pre-bootstrap"),
+            )
+            .await??;
+
+            if phone_id != PocMessageId::WifiVersionResponse as u16 {
+                warn!(
+                    "{} 🧪 bt-wireless-poc car-wifi-mitm: expected PHONE WifiVersionResponse during pre-bootstrap, got {} ({})",
+                    NAME,
+                    phone_id,
+                    PocMessageId::name(phone_id)
+                );
+            }
+
+            send_poc_frame_raw(
+                hu_stream,
+                "POC -> HU pre-bootstrap",
+                phone_id,
+                &phone_payload,
+            )
+            .await?;
+        }
+
+        if forwarded_frames > 32 {
+            return Err(
+                "too many HU pre-bootstrap frames before WifiStartRequest; aborting car-wifi-mitm"
+                    .into(),
+            );
+        }
+    }
+}
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
@@ -2106,15 +2181,9 @@ impl Bluetooth {
             NAME, hu_endpoint
         );
 
-        let (hu_start_id, hu_start_payload) = read_poc_frame(&mut hu_stream, "HU -> POC").await?;
-        if hu_start_id != PocMessageId::WifiStartRequest as u16 {
-            return Err(format!(
-                "expected HU WifiStartRequest as first frame, got {} ({})",
-                hu_start_id,
-                PocMessageId::name(hu_start_id)
-            )
-            .into());
-        }
+        let hu_start_payload =
+            read_hu_wifi_start_with_prebootstrap_passthrough(&mut hu_stream, &mut phone_stream)
+                .await?;
         let hu_start_req = WifiStartRequest::WifiStartRequest::parse_from_bytes(&hu_start_payload)?;
         let hu_tcp_ip = hu_start_req.ip_address().to_string();
         let hu_tcp_port = hu_start_req.port();
