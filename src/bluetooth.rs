@@ -46,12 +46,10 @@ const NAME: &str = "<i><bright-black> bluetooth: </>";
 // async contexts needs some extra restrictions
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-
 const SDP_PSM: u16 = 0x0001;
 const SDP_PDU_SERVICE_SEARCH_ATTRIBUTE_REQUEST: u8 = 0x06;
 const SDP_PDU_SERVICE_SEARCH_ATTRIBUTE_RESPONSE: u8 = 0x07;
 const SDP_ATTR_PROTOCOL_DESCRIPTOR_LIST: u16 = 0x0004;
-const SDP_UUID_RFCOMM: u16 = 0x0003;
 const SDP_MAX_ATTRIBUTE_BYTES: u16 = 0xffff;
 
 fn sdp_de_sequence_u8(payload: Vec<u8>) -> Result<Vec<u8>> {
@@ -70,11 +68,6 @@ fn sdp_de_uuid128(uuid: Uuid) -> Vec<u8> {
     out.push(0x1c); // UUID, 128-bit.
     out.extend_from_slice(&uuid.as_u128().to_be_bytes());
     out
-}
-
-fn sdp_de_uint16(value: u16) -> [u8; 3] {
-    let [hi, lo] = value.to_be_bytes();
-    [0x09, hi, lo] // Unsigned integer, 16-bit.
 }
 
 fn sdp_de_uint32(value: u32) -> [u8; 5] {
@@ -737,21 +730,6 @@ async fn current_iw_ssid(iface: &str) -> Option<String> {
         }
     }
     None
-}
-
-async fn wait_for_wifi_join(iface: &str, ssid: &str, timeout_duration: Duration) -> bool {
-    let start = Instant::now();
-    while start.elapsed() < timeout_duration {
-        if current_iw_ssid(iface).await.as_deref() == Some(ssid) {
-            info!(
-                "{} 🧪 bt-wireless-proxy car-wifi-mitm: iface {} is associated to ssid={}",
-                NAME, iface, ssid
-            );
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-    false
 }
 
 async fn run_nmcli_wifi_join(
@@ -2950,7 +2928,7 @@ impl Bluetooth {
         let hu_conn = self.connect_hu_aa_wireless_proxy(hu_mac.trim(), hu_channel).await?;
         let hu_endpoint = hu_conn.endpoint.clone();
         let ProxyHuConnection {
-            stream: mut stream,
+            mut stream,
             endpoint: _,
             _client_profile_session: hu_client_profile_session,
             _client_profile_handle: hu_client_profile_handle,
