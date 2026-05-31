@@ -551,6 +551,7 @@ async fn tokio_main(
                                 iface: cfg.iface.clone(),
                                 join_cmd: cfg.bt_wireless_proxy_car_wifi_join_cmd.clone(),
                                 auto_join: cfg.bt_wireless_proxy_car_wifi_auto_join,
+                                join_control: cfg.bt_wireless_proxy_wifi_join_control.clone(),
                                 keep_ap: cfg.bt_wireless_proxy_car_wifi_keep_ap,
                                 sta_iface: cfg.bt_wireless_proxy_car_wifi_sta_iface.clone(),
                                 ap_iface: cfg.bt_wireless_proxy_car_wifi_ap_iface.clone(),

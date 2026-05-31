@@ -60,6 +60,7 @@ dependencies = [
  "uuid",
  "wasmtime",
  "wasmtime-wasi",
+ "wpactrl",
 ]
 
 [[package]]
@@ -4718,6 +4719,16 @@ dependencies = [
  "log",
  "thiserror 1.0.69",
  "wast 35.0.2",
+]
+
+[[package]]
+name = "wpactrl"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8fed3fe9955374a1756e6293c1af743e0c63f1bbfb09b3b7f4db8b3cb2afe028"
+dependencies = [
+ "libc",
+ "log",
 ]
 
 [[package]]

@@ -377,6 +377,12 @@ pub struct AppConfig {
     /// the HU Wi-Fi automatically from Rust using nmcli, wpa_cli, or wpa_supplicant/udhcpc.
     #[serde(alias = "bt_wireless_poc_car_wifi_auto_join")]
     pub bt_wireless_proxy_car_wifi_auto_join: bool,
+    /// car-wifi-mitm mode: automatic Wi-Fi join backend.
+    /// auto/legacy = nmcli -> wpa_cli -> wpa_supplicant fallback chain,
+    /// wpactrl = start/use wpa_supplicant and configure it through its control socket,
+    /// wpa_supplicant/wpa_cli/nmcli = force one backend.
+    #[serde(alias = "bt_wireless_poc_wifi_join_control")]
+    pub bt_wireless_proxy_wifi_join_control: String,
     /// car-wifi-mitm mode: keep the aa-proxy AP up and join the car Wi-Fi with a
     /// separate managed STA interface. Requires AP+managed support on the same channel.
     #[serde(alias = "bt_wireless_poc_car_wifi_keep_ap")]
@@ -774,6 +780,7 @@ impl Default for AppConfig {
             bt_wireless_proxy_tcp_probe: true,
             bt_wireless_proxy_car_wifi_join_cmd: String::new(),
             bt_wireless_proxy_car_wifi_auto_join: false,
+            bt_wireless_proxy_wifi_join_control: "auto".to_string(),
             bt_wireless_proxy_car_wifi_keep_ap: false,
             bt_wireless_proxy_car_wifi_sta_iface: String::new(),
             bt_wireless_proxy_car_wifi_ap_iface: String::new(),
@@ -1060,6 +1067,8 @@ impl AppConfig {
             value(self.bt_wireless_proxy_car_wifi_join_cmd.clone());
         doc["bt_wireless_proxy_car_wifi_auto_join"] =
             value(self.bt_wireless_proxy_car_wifi_auto_join);
+        doc["bt_wireless_proxy_wifi_join_control"] =
+            value(self.bt_wireless_proxy_wifi_join_control.clone());
         doc["bt_wireless_proxy_car_wifi_keep_ap"] =
             value(self.bt_wireless_proxy_car_wifi_keep_ap);
         doc["bt_wireless_proxy_car_wifi_sta_iface"] =

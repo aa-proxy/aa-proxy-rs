@@ -70,6 +70,7 @@ notify = { version = "8", optional = true }
 ureq = "2"
 rust_h264 = "0.4"
 png = "0.17"
+wpactrl = "0.5.1"
 
 [patch.crates-io]
 tokio-uring = { git = "https://github.com/manio/tokio-uring", branch = "musl-riscv" }
