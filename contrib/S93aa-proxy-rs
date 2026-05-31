@@ -13,6 +13,18 @@ RETVAL=0
 
 case "$1" in
 	start)
+		# BusyBox init has no service dependency ordering --
+		# poll until D-Bus socket is ready so aa-proxy-rs can connect on first attempt.
+		echo "Waiting for D-Bus..."
+		DBUS_SOCKET="/var/run/dbus/system_bus_socket"
+		DBUS_WAIT_TRIES=30 # max iterations
+		DBUS_WAIT_INTERVAL=0.1 # seconds per iteration, 3 s total max wait
+		i=0
+		while [ ! -S "$DBUS_SOCKET" ] && [ $i -lt $DBUS_WAIT_TRIES ]; do
+			sleep $DBUS_WAIT_INTERVAL
+			i=$((i + 1))
+		done
+
 		printf "Starting $DAEMON: "
 		start-stop-daemon -S -b -q -m -p "$PIDFILE" -x "/usr/bin/$DAEMON" -- $AA_PROXY_RS_ARGS
 		RETVAL=$?
