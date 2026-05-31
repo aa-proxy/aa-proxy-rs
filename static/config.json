@@ -152,6 +152,13 @@
           "advanced": true,
           "requires": "bt_wireless_proxy"
         },
+        "bt_wireless_proxy_wifi_join_control": {
+          "typ": "select",
+          "description": "EXPERIMENTAL Proxy car-wifi-mitm: automatic Wi-Fi join backend. auto/legacy keeps the old fallback chain. wpactrl starts/uses wpa_supplicant and configures it through its control socket. nmcli, wpa_cli, and wpa_supplicant force a single backend.",
+          "values": ["auto", "legacy", "wpactrl", "wpa_supplicant", "wpa_cli", "nmcli"],
+          "advanced": true,
+          "requires": "bt_wireless_proxy"
+        },
         "bt_wireless_proxy_car_wifi_keep_ap": {
           "typ": "boolean",
           "description": "EXPERIMENTAL Proxy car-wifi-mitm: keep aa-proxy AP up and join HU Wi-Fi through a separate managed STA interface. Requires AP+managed support on the same channel.",

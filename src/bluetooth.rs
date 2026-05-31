@@ -482,6 +482,8 @@ pub struct CarWifiMitmProxyOptions {
     pub iface: String,
     pub join_cmd: String,
     pub auto_join: bool,
+    /// Automatic Wi-Fi join backend: auto/legacy, wpactrl, wpa_supplicant, wpa_cli, nmcli.
+    pub join_control: String,
     /// If true, keep the existing aa-proxy AP interface up and create/use a
     /// separate managed STA interface for the car Wi-Fi. Requires the Wi-Fi
     /// chipset to support concurrent AP+managed mode on the same channel.
@@ -877,6 +879,179 @@ async fn run_wpa_cli_wifi_join(
 }
 
 
+
+fn wpactrl_cmd(client: &mut wpactrl::Client, cmd: &str) -> Result<String> {
+    let response = client
+        .request(cmd)
+        .map_err(|e| format!("wpactrl command {:?} failed: {}", cmd, e))?;
+    let trimmed = response.trim();
+    if trimmed.eq_ignore_ascii_case("FAIL") {
+        Err(format!("wpactrl command {:?} returned FAIL", cmd).into())
+    } else {
+        Ok(response)
+    }
+}
+
+async fn wait_for_wpa_ctrl_socket(iface: &str, timeout_duration: Duration) -> Result<String> {
+    let ctrl_path = format!("/var/run/wpa_supplicant/{}", iface.trim());
+    let start = Instant::now();
+    while start.elapsed() < timeout_duration {
+        if tokio::fs::metadata(&ctrl_path).await.is_ok() {
+            return Ok(ctrl_path);
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    Err(format!(
+        "wpa_supplicant control socket did not appear at {} within {:?}",
+        ctrl_path, timeout_duration
+    )
+    .into())
+}
+
+async fn run_wpactrl_wifi_join(
+    iface: &str,
+    info_msg: &WifiInfoResponse::WifiInfoResponse,
+) -> Result<()> {
+    let iface = iface.trim();
+    if iface.is_empty() {
+        return Err("wpactrl auto join needs a non-empty interface".into());
+    }
+    if !command_available("wpa_supplicant").await {
+        return Err("wpactrl auto join needs wpa_supplicant binary".into());
+    }
+
+    let ssid = info_msg.ssid().to_string();
+    let key = info_msg.key().to_string();
+    let bssid = info_msg.bssid().trim().to_string();
+    let is_open = key.is_empty() || info_msg.security_mode() == SecurityMode::OPEN;
+    let conf_path = format!("/tmp/aa-proxy-car-wifi-{}-wpactrl.conf", iface.replace('/', "_"));
+    tokio::fs::write(&conf_path, wpa_supplicant_config(info_msg)).await?;
+
+    info!(
+        "{} 🧪 bt-wireless-proxy car-wifi-mitm: auto Wi-Fi join using wpactrl+wpa_supplicant iface={} ssid={} bssid={} key_len={}",
+        NAME,
+        iface,
+        ssid,
+        bssid,
+        key.len()
+    );
+
+    let _ = tokio::fs::create_dir_all("/var/run/wpa_supplicant").await;
+    let _ = run_shell_for_wifi(
+        "stop old iface wpa_supplicant",
+        &format!(
+            "pidof wpa_supplicant >/dev/null 2>&1 && killall wpa_supplicant 2>/dev/null || true"
+        ),
+        5,
+    )
+    .await;
+    let _ = tokio::fs::remove_file(format!("/var/run/wpa_supplicant/{}", iface)).await;
+
+    let output = timeout(
+        Duration::from_secs(15),
+        Command::new("wpa_supplicant")
+            .args([
+                "-B",
+                "-i",
+                iface,
+                "-c",
+                conf_path.as_str(),
+                "-D",
+                "nl80211",
+                "-C",
+                "/var/run/wpa_supplicant",
+            ])
+            .output(),
+    )
+    .await??;
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "wpa_supplicant for wpactrl failed status={} stdout={} stderr={}",
+            output.status,
+            stdout.trim(),
+            stderr.trim()
+        )
+        .into());
+    }
+
+    let ctrl_path = wait_for_wpa_ctrl_socket(iface, Duration::from_secs(8)).await?;
+    let ssid_cmd = wpa_quote(&ssid);
+    let key_cmd = wpa_quote(&key);
+    let bssid_cmd = bssid.clone();
+    let ctrl_path_for_blocking = ctrl_path.clone();
+
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let mut client = wpactrl::Client::builder()
+            .ctrl_path(ctrl_path_for_blocking.as_str())
+            .open()
+            .map_err(|e| format!("wpactrl open {} failed: {}", ctrl_path_for_blocking, e))?;
+
+        let pong = wpactrl_cmd(&mut client, "PING")?;
+        if !pong.trim().eq_ignore_ascii_case("PONG") {
+            return Err(format!("wpactrl PING returned unexpected response: {}", pong.trim()).into());
+        }
+
+        let _ = wpactrl_cmd(&mut client, "DISCONNECT");
+        let _ = wpactrl_cmd(&mut client, "REMOVE_NETWORK all");
+        let net_id = wpactrl_cmd(&mut client, "ADD_NETWORK")?;
+        let net_id = net_id.lines().last().unwrap_or(net_id.as_str()).trim().to_string();
+        if net_id.is_empty() || net_id.eq_ignore_ascii_case("FAIL") {
+            return Err(format!("wpactrl ADD_NETWORK returned invalid network id: {}", net_id).into());
+        }
+
+        wpactrl_cmd(&mut client, &format!("SET_NETWORK {} ssid {}", net_id, ssid_cmd))?;
+        if !bssid_cmd.is_empty() {
+            if let Err(e) = wpactrl_cmd(&mut client, &format!("SET_NETWORK {} bssid {}", net_id, bssid_cmd)) {
+                warn!(
+                    "{} 🧪 bt-wireless-proxy car-wifi-mitm: wpactrl could not pin bssid {}: {}",
+                    NAME, bssid_cmd, e
+                );
+            }
+        }
+        if is_open {
+            wpactrl_cmd(&mut client, &format!("SET_NETWORK {} key_mgmt NONE", net_id))?;
+        } else {
+            wpactrl_cmd(&mut client, &format!("SET_NETWORK {} key_mgmt WPA-PSK", net_id))?;
+            wpactrl_cmd(&mut client, &format!("SET_NETWORK {} psk {}", net_id, key_cmd))?;
+        }
+        wpactrl_cmd(&mut client, &format!("ENABLE_NETWORK {}", net_id))?;
+        wpactrl_cmd(&mut client, &format!("SELECT_NETWORK {}", net_id))?;
+        let _ = wpactrl_cmd(&mut client, "RECONNECT");
+        Ok(())
+    })
+    .await??;
+
+    if command_available("udhcpc").await {
+        let output = timeout(
+            Duration::from_secs(35),
+            Command::new("udhcpc")
+                .args(["-i", iface, "-q", "-n", "-t", "6"])
+                .output(),
+        )
+        .await??;
+        if !output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!(
+                "{} 🧪 bt-wireless-proxy car-wifi-mitm: udhcpc after wpactrl did not return success status={} stdout={} stderr={}",
+                NAME,
+                output.status,
+                stdout.trim(),
+                stderr.trim()
+            );
+        }
+    } else {
+        warn!(
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: udhcpc not available after wpactrl; assuming interface already has an IP or DHCP is managed elsewhere",
+            NAME
+        );
+    }
+
+    Ok(())
+}
+
 async fn iface_exists(iface: &str) -> bool {
     if iface.trim().is_empty() {
         return false;
@@ -1162,6 +1337,7 @@ async fn run_wpa_supplicant_wifi_join(
 async fn run_car_wifi_join(
     custom_template: &str,
     auto_join: bool,
+    join_control: &str,
     base_iface: &str,
     keep_ap: bool,
     sta_iface: &str,
@@ -1223,7 +1399,70 @@ async fn run_car_wifi_join(
         prepare_sta_iface_takeover(requested_sta_iface).await?
     };
 
+    let join_control = join_control.trim().to_ascii_lowercase();
+    let join_control = if join_control.is_empty() { "auto" } else { join_control.as_str() };
+    info!(
+        "{} 🧪 bt-wireless-proxy car-wifi-mitm: Wi-Fi join control={} iface={}",
+        NAME, join_control, join_iface
+    );
+
     let mut errors = Vec::new();
+
+    if join_control == "wpactrl" {
+        match run_wpactrl_wifi_join(&join_iface, info_msg).await {
+            Ok(()) => {
+                if wait_for_wifi_ready(&join_iface, ssid, Duration::from_secs(25)).await {
+                    return Ok(join_iface);
+                }
+                return Err("wpactrl returned success but association/IPv4 was not observed".into());
+            }
+            Err(e) => return Err(format!("wpactrl: {}", e).into()),
+        }
+    }
+
+    if join_control == "wpa_supplicant" {
+        match run_wpa_supplicant_wifi_join(&join_iface, info_msg).await {
+            Ok(()) => {
+                if wait_for_wifi_ready(&join_iface, ssid, Duration::from_secs(25)).await {
+                    return Ok(join_iface);
+                }
+                return Err("wpa_supplicant returned success but association/IPv4 was not observed".into());
+            }
+            Err(e) => return Err(format!("wpa_supplicant: {}", e).into()),
+        }
+    }
+
+    if join_control == "wpa_cli" {
+        match run_wpa_cli_wifi_join(&join_iface, info_msg).await {
+            Ok(()) => {
+                if wait_for_wifi_ready(&join_iface, ssid, Duration::from_secs(25)).await {
+                    return Ok(join_iface);
+                }
+                return Err("wpa_cli returned success but association/IPv4 was not observed".into());
+            }
+            Err(e) => return Err(format!("wpa_cli: {}", e).into()),
+        }
+    }
+
+    if join_control == "nmcli" {
+        match run_nmcli_wifi_join(&join_iface, info_msg).await {
+            Ok(()) => {
+                if wait_for_wifi_ready(&join_iface, ssid, Duration::from_secs(25)).await {
+                    return Ok(join_iface);
+                }
+                return Err("nmcli returned success but association/IPv4 was not observed".into());
+            }
+            Err(e) => return Err(format!("nmcli: {}", e).into()),
+        }
+    }
+
+    if join_control != "auto" && join_control != "legacy" {
+        warn!(
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: unknown Wi-Fi join control {}; falling back to auto",
+            NAME, join_control
+        );
+    }
+
     if command_available("nmcli").await {
         match run_nmcli_wifi_join(&join_iface, info_msg).await {
             Ok(()) => {
@@ -2525,6 +2764,7 @@ impl Bluetooth {
         let join_iface = run_car_wifi_join(
             &options.join_cmd,
             options.auto_join,
+            &options.join_control,
             &options.iface,
             options.keep_ap,
             &options.sta_iface,
