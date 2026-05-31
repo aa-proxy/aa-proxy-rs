@@ -767,7 +767,7 @@ impl Default for AppConfig {
             enable_btle: true,
             dongle_mode: false,
             bt_wireless_proxy: false,
-            bt_wireless_proxy_mode: "bridge".to_string(),
+            bt_wireless_proxy_mode: "car-wifi-mitm".to_string(),
             bt_wireless_proxy_hu_mac: String::new(),
             bt_wireless_proxy_pairing_window_secs: 120,
             bt_wireless_proxy_hu_channel: None,
