@@ -443,12 +443,12 @@ async fn tokio_main(
             NAME
         );
     } else {
-        let poc_mode = cfg.bt_wireless_poc_mode.trim().to_ascii_lowercase();
-        let bt_poc_probe_only = cfg.bt_wireless_poc && poc_mode == "probe";
-        let register_aa_wireless_profile = !bt_poc_probe_only;
-        if bt_poc_probe_only {
+        let proxy_mode = cfg.bt_wireless_proxy_mode.trim().to_ascii_lowercase();
+        let bt_proxy_probe_only = cfg.bt_wireless_proxy && proxy_mode == "probe";
+        let register_aa_wireless_profile = !bt_proxy_probe_only;
+        if bt_proxy_probe_only {
             info!(
-                "{} 🧪 bt_wireless_poc probe mode: skipping local AA Wireless server profile registration to avoid UUID collision",
+                "{} 🧪 bt_wireless_proxy probe mode: skipping local AA Wireless server profile registration to avoid UUID collision",
                 NAME
             );
         }
@@ -480,6 +480,32 @@ async fn tokio_main(
                 }
             }
         }
+
+        // bt_wireless_proxy needs the configured HU paired/trusted before the USB/phone flow.
+        // If the HU is not paired yet, open a short BlueZ agent window that only accepts the
+        // configured HU MAC, then continue once it is trusted.
+        if cfg.bt_wireless_proxy && !cfg.bt_wireless_proxy_hu_mac.trim().is_empty() {
+            if let Some(ref mut bluetooth) = bluetooth {
+                loop {
+                    match bluetooth
+                        .ensure_hu_pairing_agent(
+                            &cfg.bt_wireless_proxy_hu_mac,
+                            cfg.bt_wireless_proxy_pairing_window_secs,
+                        )
+                        .await
+                    {
+                        Ok(()) => break,
+                        Err(e) => {
+                            warn!(
+                                "{} bt_wireless_proxy HU pairing window failed: {}; retrying before USB/phone flow",
+                                NAME, e
+                            );
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // main connection loop
@@ -504,32 +530,32 @@ async fn tokio_main(
         if aa_server_tcp_enabled {
             // Direct MD TCP mode does not use the Bluetooth/Wi-Fi AA handshake.
             // io_loop will connect to aa_server_tcp_addr after the HU/DHU side is ready.
-        } else if cfg.bt_wireless_poc {
+        } else if cfg.bt_wireless_proxy {
             if let Some(ref mut bluetooth) = bluetooth {
-                let poc_mode = cfg.bt_wireless_poc_mode.trim().to_ascii_lowercase();
-                let result = if poc_mode == "probe" {
+                let proxy_mode = cfg.bt_wireless_proxy_mode.trim().to_ascii_lowercase();
+                let result = if proxy_mode == "probe" {
                     bluetooth
-                        .aa_wireless_probe_poc(
-                            cfg.bt_wireless_poc_hu_mac.clone(),
-                            cfg.bt_wireless_poc_hu_channel,
-                            cfg.bt_wireless_poc_tcp_probe,
+                        .aa_wireless_probe_proxy(
+                            cfg.bt_wireless_proxy_hu_mac.clone(),
+                            cfg.bt_wireless_proxy_hu_channel,
+                            cfg.bt_wireless_proxy_tcp_probe,
                         )
                         .await
-                } else if poc_mode == "car-wifi-mitm" || poc_mode == "wifi-mitm" {
+                } else if proxy_mode == "car-wifi-mitm" || proxy_mode == "wifi-mitm" {
                     bluetooth
-                        .aa_wireless_car_wifi_mitm_poc(
+                        .aa_wireless_car_wifi_mitm_proxy(
                             cfg.connect.clone(),
-                            bluetooth::CarWifiMitmPocOptions {
-                                hu_mac: cfg.bt_wireless_poc_hu_mac.clone(),
-                                hu_channel: cfg.bt_wireless_poc_hu_channel,
+                            bluetooth::CarWifiMitmProxyOptions {
+                                hu_mac: cfg.bt_wireless_proxy_hu_mac.clone(),
+                                hu_channel: cfg.bt_wireless_proxy_hu_channel,
                                 iface: cfg.iface.clone(),
-                                join_cmd: cfg.bt_wireless_poc_car_wifi_join_cmd.clone(),
-                                auto_join: cfg.bt_wireless_poc_car_wifi_auto_join,
-                                keep_ap: cfg.bt_wireless_poc_car_wifi_keep_ap,
-                                sta_iface: cfg.bt_wireless_poc_car_wifi_sta_iface.clone(),
-                                ap_iface: cfg.bt_wireless_poc_car_wifi_ap_iface.clone(),
-                                rewrite_ip: cfg.bt_wireless_poc_rewrite_ip.clone(),
-                                listen_port: cfg.bt_wireless_poc_proxy_listen_port,
+                                join_cmd: cfg.bt_wireless_proxy_car_wifi_join_cmd.clone(),
+                                auto_join: cfg.bt_wireless_proxy_car_wifi_auto_join,
+                                keep_ap: cfg.bt_wireless_proxy_car_wifi_keep_ap,
+                                sta_iface: cfg.bt_wireless_proxy_car_wifi_sta_iface.clone(),
+                                ap_iface: cfg.bt_wireless_proxy_car_wifi_ap_iface.clone(),
+                                rewrite_ip: cfg.bt_wireless_proxy_rewrite_ip.clone(),
+                                listen_port: cfg.bt_wireless_proxy_listen_port,
                                 bt_timeout: Duration::from_secs(cfg.bt_timeout_secs.into()),
                                 stopped: cfg.action_requested == Some(Action::Stop),
                             },
@@ -537,10 +563,10 @@ async fn tokio_main(
                         .await
                 } else {
                     bluetooth
-                        .aa_wireless_bridge_poc(
+                        .aa_wireless_bridge_proxy(
                             cfg.connect.clone(),
-                            cfg.bt_wireless_poc_hu_mac.clone(),
-                            cfg.bt_wireless_poc_hu_channel,
+                            cfg.bt_wireless_proxy_hu_mac.clone(),
+                            cfg.bt_wireless_proxy_hu_channel,
                             Duration::from_secs(cfg.bt_timeout_secs.into()),
                             cfg.action_requested == Some(Action::Stop),
                         )
@@ -548,13 +574,13 @@ async fn tokio_main(
                 };
 
                 if let Err(e) = result {
-                    error!("{} bt_wireless_poc error: {}", NAME, e);
+                    error!("{} bt_wireless_proxy error: {}", NAME, e);
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     continue;
                 }
             } else {
                 warn!(
-                    "{} bt_wireless_poc requested but Bluetooth was not initialized; restart after clearing aa_server_tcp_addr",
+                    "{} bt_wireless_proxy requested but Bluetooth was not initialized; restart after clearing aa_server_tcp_addr",
                     NAME
                 );
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;

@@ -101,14 +101,14 @@
           "description": "EXPERIMENTAL: Maintain persistent Bluetooth connection to enable faster reconnection with MD",
           "advanced": true
         },
-        "bt_wireless_poc": {
+        "bt_wireless_proxy": {
           "typ": "boolean",
-          "description": "EXPERIMENTAL PoC: enable AA Wireless Bluetooth RFCOMM bridge/probe against a real wireless-capable HU. Disabled by default.",
+          "description": "EXPERIMENTAL Proxy: enable AA Wireless Bluetooth RFCOMM bridge/probe against a real wireless-capable HU. Disabled by default.",
           "advanced": true
         },
-        "bt_wireless_poc_mode": {
+        "bt_wireless_proxy_mode": {
           "typ": "string",
-          "description": "EXPERIMENTAL PoC mode: bridge = relay phone<->HU RFCOMM using one adapter; probe = connect to HU and emulate only the Wi-Fi bootstrap frames; car-wifi-mitm = delay/modify BT Wi-Fi bootstrap, join car Wi-Fi, and raw-relay TCP.",
+          "description": "EXPERIMENTAL Proxy mode: bridge = relay phone<->HU RFCOMM using one adapter; probe = connect to HU and emulate only the Wi-Fi bootstrap frames; car-wifi-mitm = delay/modify BT Wi-Fi bootstrap, join car Wi-Fi, and raw-relay TCP.",
           "values": [
             "bridge",
             "probe",
@@ -116,65 +116,71 @@
           ],
           "advanced": true
         },
-        "bt_wireless_poc_hu_mac": {
+        "bt_wireless_proxy_hu_mac": {
           "typ": "string",
-          "description": "EXPERIMENTAL PoC: Bluetooth MAC address of the wireless-capable head unit.",
+          "description": "EXPERIMENTAL Proxy: Bluetooth MAC address of the wireless-capable head unit.",
           "advanced": true,
-          "requires": "bt_wireless_poc"
+          "requires": "bt_wireless_proxy"
         },
-        "bt_wireless_poc_hu_channel": {
+        "bt_wireless_proxy_pairing_window_secs": {
           "typ": "integer",
-          "description": "EXPERIMENTAL PoC: RFCOMM channel for HU AA Wireless profile. Leave empty or use 0 for BlueZ SDP/ConnectProfile auto-discovery; set a positive value to force manual RFCOMM.",
+          "description": "AA Wireless proxy: if the configured HU is not paired/trusted, keep aa-proxy pairable/discoverable for this many seconds and auto-accept pairing only from bt_wireless_proxy_hu_mac. Default: 120.",
           "advanced": true,
-          "requires": "bt_wireless_poc"
+          "requires": "bt_wireless_proxy"
         },
-        "bt_wireless_poc_tcp_probe": {
-          "typ": "boolean",
-          "description": "EXPERIMENTAL PoC probe mode: after WifiStartRequest, try a TCP connection to the HU AA endpoint before sending WifiConnectStatus.",
-          "advanced": true,
-          "requires": "bt_wireless_poc"
-        },
-        "bt_wireless_poc_car_wifi_join_cmd": {
-          "typ": "string",
-          "description": "EXPERIMENTAL PoC car-wifi-mitm: optional shell command template for joining the HU Wi-Fi. Placeholders: {iface}, {ssid}, {bssid}, {key}, {security}. Non-empty custom command overrides automatic nmcli/wpa_cli join.",
-          "advanced": true,
-          "requires": "bt_wireless_poc"
-        },
-        "bt_wireless_poc_car_wifi_auto_join": {
-          "typ": "boolean",
-          "description": "EXPERIMENTAL PoC car-wifi-mitm: if true and no custom command is configured, try to join HU Wi-Fi automatically using nmcli, wpa_cli, or wpa_supplicant/udhcpc.",
-          "advanced": true,
-          "requires": "bt_wireless_poc"
-        },
-        "bt_wireless_poc_car_wifi_keep_ap": {
-          "typ": "boolean",
-          "description": "EXPERIMENTAL PoC car-wifi-mitm: keep aa-proxy AP up and join HU Wi-Fi through a separate managed STA interface. Requires AP+managed support on the same channel.",
-          "advanced": true,
-          "requires": "bt_wireless_poc"
-        },
-        "bt_wireless_poc_car_wifi_sta_iface": {
-          "typ": "string",
-          "description": "EXPERIMENTAL PoC car-wifi-mitm: managed STA interface used to join HU/car Wi-Fi. Empty falls back to iface in takeover mode, or sta0 when keep_ap is true.",
-          "advanced": true,
-          "requires": "bt_wireless_poc"
-        },
-        "bt_wireless_poc_car_wifi_ap_iface": {
-          "typ": "string",
-          "description": "EXPERIMENTAL PoC car-wifi-mitm: existing AP interface to keep when keep_ap is true. Empty falls back to iface.",
-          "advanced": true,
-          "requires": "bt_wireless_poc"
-        },
-        "bt_wireless_poc_rewrite_ip": {
-          "typ": "string",
-          "description": "EXPERIMENTAL PoC car-wifi-mitm: IP address to place in the phone-facing WifiStartRequest. Empty means auto-detect using route/interface IPv4.",
-          "advanced": true,
-          "requires": "bt_wireless_poc"
-        },
-        "bt_wireless_poc_proxy_listen_port": {
+        "bt_wireless_proxy_hu_channel": {
           "typ": "integer",
-          "description": "EXPERIMENTAL PoC car-wifi-mitm: local TCP port where aa-proxy listens for the phone, default 5288.",
+          "description": "EXPERIMENTAL Proxy: RFCOMM channel for HU AA Wireless profile. Leave empty or use 0 for BlueZ SDP/ConnectProfile auto-discovery; set a positive value to force manual RFCOMM.",
           "advanced": true,
-          "requires": "bt_wireless_poc"
+          "requires": "bt_wireless_proxy"
+        },
+        "bt_wireless_proxy_tcp_probe": {
+          "typ": "boolean",
+          "description": "EXPERIMENTAL Proxy probe mode: after WifiStartRequest, try a TCP connection to the HU AA endpoint before sending WifiConnectStatus.",
+          "advanced": true,
+          "requires": "bt_wireless_proxy"
+        },
+        "bt_wireless_proxy_car_wifi_join_cmd": {
+          "typ": "string",
+          "description": "EXPERIMENTAL Proxy car-wifi-mitm: optional shell command template for joining the HU Wi-Fi. Placeholders: {iface}, {ssid}, {bssid}, {key}, {security}. Non-empty custom command overrides automatic nmcli/wpa_cli join.",
+          "advanced": true,
+          "requires": "bt_wireless_proxy"
+        },
+        "bt_wireless_proxy_car_wifi_auto_join": {
+          "typ": "boolean",
+          "description": "EXPERIMENTAL Proxy car-wifi-mitm: if true and no custom command is configured, try to join HU Wi-Fi automatically using nmcli, wpa_cli, or wpa_supplicant/udhcpc.",
+          "advanced": true,
+          "requires": "bt_wireless_proxy"
+        },
+        "bt_wireless_proxy_car_wifi_keep_ap": {
+          "typ": "boolean",
+          "description": "EXPERIMENTAL Proxy car-wifi-mitm: keep aa-proxy AP up and join HU Wi-Fi through a separate managed STA interface. Requires AP+managed support on the same channel.",
+          "advanced": true,
+          "requires": "bt_wireless_proxy"
+        },
+        "bt_wireless_proxy_car_wifi_sta_iface": {
+          "typ": "string",
+          "description": "EXPERIMENTAL Proxy car-wifi-mitm: managed STA interface used to join HU/car Wi-Fi. Empty falls back to iface in takeover mode, or sta0 when keep_ap is true.",
+          "advanced": true,
+          "requires": "bt_wireless_proxy"
+        },
+        "bt_wireless_proxy_car_wifi_ap_iface": {
+          "typ": "string",
+          "description": "EXPERIMENTAL Proxy car-wifi-mitm: existing AP interface to keep when keep_ap is true. Empty falls back to iface.",
+          "advanced": true,
+          "requires": "bt_wireless_proxy"
+        },
+        "bt_wireless_proxy_rewrite_ip": {
+          "typ": "string",
+          "description": "EXPERIMENTAL Proxy car-wifi-mitm: IP address to place in the phone-facing WifiStartRequest. Empty means auto-detect using route/interface IPv4.",
+          "advanced": true,
+          "requires": "bt_wireless_proxy"
+        },
+        "bt_wireless_proxy_listen_port": {
+          "typ": "integer",
+          "description": "EXPERIMENTAL Proxy car-wifi-mitm: local TCP port where aa-proxy listens for the phone, default 5288.",
+          "advanced": true,
+          "requires": "bt_wireless_proxy"
         }
       }
     },
