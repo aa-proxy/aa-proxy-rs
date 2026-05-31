@@ -898,6 +898,12 @@ pub async fn io_loop(
                 Ok(s) => hu_usb = Some(s),
                 Err(e) => {
                     error!("{} 🔴 Error opening USB accessory: {}", NAME, e);
+                    // EBUSY (16): previous session's fd not yet released by kernel.
+                    // Without a delay, the main loop immediately fires another BT handshake,
+                    // causing rapid-fire "Connecting to Android Auto" notifications on the phone.
+                    if e.raw_os_error() == Some(libc::EBUSY) {
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    }
                     // notify main loop to restart
                     let _ = need_restart.send(None);
                     continue;
