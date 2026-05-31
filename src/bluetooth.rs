@@ -2177,13 +2177,25 @@ impl Bluetooth {
         let _hu_client_profile_guard = (hu_client_profile_session, hu_client_profile_handle);
 
         info!(
-            "{} 🧪 bt-wireless-poc car-wifi-mitm: connected to HU {}; starting delayed bootstrap MITM",
+            "{} 🧪 bt-wireless-poc car-wifi-mitm: connected to HU {}; starting delayed bootstrap MITM; waiting up to 10s for HU bootstrap frame",
             NAME, hu_endpoint
         );
 
-        let hu_start_payload =
-            read_hu_wifi_start_with_prebootstrap_passthrough(&mut hu_stream, &mut phone_stream)
-                .await?;
+        let hu_start_payload = match timeout(
+            Duration::from_secs(10),
+            read_hu_wifi_start_with_prebootstrap_passthrough(&mut hu_stream, &mut phone_stream),
+        )
+        .await
+        {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(format!(
+                    "timed out waiting 10s for HU bootstrap frame after RFCOMM connect to {}; closing connection and restarting car-wifi-mitm",
+                    hu_endpoint
+                )
+                .into())
+            }
+        };
         let hu_start_req = WifiStartRequest::WifiStartRequest::parse_from_bytes(&hu_start_payload)?;
         let hu_tcp_ip = hu_start_req.ip_address().to_string();
         let hu_tcp_port = hu_start_req.port();
