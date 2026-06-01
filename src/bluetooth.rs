@@ -1568,6 +1568,7 @@ pub struct Bluetooth {
     adapter: Adapter,
     handle_aa: Option<ProfileHandle>,
     hu_pairing_agent: Option<AgentHandle>,
+    companion_pairing_agent: Option<AgentHandle>,
     current_index: usize,
     dongle_mode: bool,
 }
@@ -1636,6 +1637,7 @@ pub async fn init(
         adapter,
         handle_aa,
         hu_pairing_agent: None,
+        companion_pairing_agent: None,
         current_index: 0,
         dongle_mode,
     })
@@ -1931,6 +1933,14 @@ impl Bluetooth {
             return Ok(());
         }
 
+        if self.companion_pairing_agent.is_some() {
+            info!(
+                "{} 🧲 bt-wireless-proxy pairing: using existing Companion Classic BT default agent while pairing configured HU {}",
+                NAME, hu_addr
+            );
+            return Ok(());
+        }
+
         let session_for_confirmation = self.session.clone();
         let session_for_authorization = self.session.clone();
         let allowed_for_pin = hu_addr.clone();
@@ -1986,13 +1996,26 @@ impl Bluetooth {
     }
 
     async fn cleanup_hu_pairing_window(&mut self) {
+        let keep_pairing_open_for_companion = self.companion_pairing_agent.is_some();
+        let (pairable, discoverable, timeout_secs) = if keep_pairing_open_for_companion {
+            (true, true, 0)
+        } else {
+            (false, false, 0)
+        };
+
         if let Err(e) = self
-            .set_adapter_pairable_discoverable(false, false, 0)
+            .set_adapter_pairable_discoverable(pairable, discoverable, timeout_secs)
             .await
         {
             warn!(
-                "{} 🧲 bt-wireless-proxy pairing: failed to disable pairable/discoverable after window: {}",
+                "{} 🧲 bt-wireless-proxy pairing: failed to restore pairable/discoverable state after window: {}",
                 NAME, e
+            );
+        }
+        if keep_pairing_open_for_companion {
+            info!(
+                "{} 🧲 bt-wireless-proxy pairing: keeping adapter pairable/discoverable for Companion Classic BT",
+                NAME
             );
         }
         if self.hu_pairing_agent.take().is_some() {
@@ -2089,6 +2112,32 @@ impl Bluetooth {
         if !enable_companion_bt {
             info!("{} 📱 Companion Classic BT profile: disabled", NAME);
             return Ok(());
+        }
+
+        if self.companion_pairing_agent.is_none() {
+            match crate::companion_bt::register_companion_pairing_agent(&self.session).await {
+                Ok(handle) => {
+                    info!("{} 📱 Companion Classic BT pairing agent: registered", NAME);
+                    self.companion_pairing_agent = Some(handle);
+                }
+                Err(e) => {
+                    warn!("{} 📱 Failed to register Companion Classic BT pairing agent: {}", NAME, e);
+                }
+            }
+        }
+
+        // Keep the adapter pairable/discoverable while Companion BT is enabled.  The HU pairing
+        // window is temporary, but the companion app may need to pair after startup or after the
+        // user deletes the bond from Android Settings.
+        match self.set_adapter_pairable_discoverable(true, true, 0).await {
+            Ok(()) => info!(
+                "{} 📱 Companion Classic BT: adapter is pairable/discoverable with no timeout",
+                NAME
+            ),
+            Err(e) => warn!(
+                "{} 📱 Companion Classic BT: failed to set adapter pairable/discoverable: {}",
+                NAME, e
+            ),
         }
 
         match crate::companion_bt::register_companion_bt_profile(&self.session).await {
