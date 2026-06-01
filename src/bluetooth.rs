@@ -2141,11 +2141,21 @@ impl Bluetooth {
 
         match crate::companion_bt::register_companion_bt_profile(&self.session).await {
             Ok(handle) => {
-                info!("{} 📱 Companion Classic BT profile: registered", NAME);
+                info!("{} 📱 Companion Classic BT custom profile: registered", NAME);
+                crate::companion_bt::spawn_companion_bt_accept_loop(handle, state.clone());
+            }
+            Err(e) => {
+                error!("{} 📱 Failed to register Companion Classic BT custom profile: {}", NAME, e);
+            }
+        }
+
+        match crate::companion_bt::register_companion_spp_profile(&self.session).await {
+            Ok(handle) => {
+                info!("{} 📱 Companion Classic BT SPP fallback profile: registered", NAME);
                 crate::companion_bt::spawn_companion_bt_accept_loop(handle, state);
             }
             Err(e) => {
-                error!("{} 📱 Failed to register Companion Classic BT profile: {}", NAME, e);
+                warn!("{} 📱 Failed to register Companion Classic BT SPP fallback profile: {}", NAME, e);
             }
         }
 

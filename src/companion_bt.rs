@@ -18,6 +18,8 @@ use tokio::sync::Mutex;
 
 const NAME: &str = "<i><bright-black> companion_bt: </>";
 const COMPANION_RFCOMM_CHANNEL: u16 = 23;
+const COMPANION_SPP_RFCOMM_CHANNEL: u16 = 24;
+const SERIAL_PORT_PROFILE_UUID: &str = "00001101-0000-1000-8000-00805f9b34fb";
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -152,11 +154,16 @@ pub async fn register_companion_pairing_agent(session: &Session) -> Result<Agent
     Ok(handle)
 }
 
-pub async fn register_companion_bt_profile(session: &Session) -> Result<ProfileHandle> {
+async fn register_companion_profile(
+    session: &Session,
+    uuid: &str,
+    name: &str,
+    channel: u16,
+) -> Result<ProfileHandle> {
     let profile = Profile {
-        uuid: Uuid::parse_str(COMPANION_BT_UUID)?,
-        name: Some("AA Proxy Companion Control".to_string()),
-        channel: Some(COMPANION_RFCOMM_CHANNEL),
+        uuid: Uuid::parse_str(uuid)?,
+        name: Some(name.to_string()),
+        channel: Some(channel),
         role: Some(Role::Server),
         require_authentication: Some(false),
         require_authorization: Some(false),
@@ -165,12 +172,34 @@ pub async fn register_companion_bt_profile(session: &Session) -> Result<ProfileH
 
     let handle = session.register_profile(profile).await?;
     info!(
-        "{} registered Classic BT companion profile uuid={} channel={}",
-        NAME,
-        COMPANION_BT_UUID,
-        COMPANION_RFCOMM_CHANNEL
+        "{} registered Classic BT companion profile name={} uuid={} channel={}",
+        NAME, name, uuid, channel
     );
     Ok(handle)
+}
+
+pub async fn register_companion_bt_profile(session: &Session) -> Result<ProfileHandle> {
+    register_companion_profile(
+        session,
+        COMPANION_BT_UUID,
+        "AA Proxy Companion Control",
+        COMPANION_RFCOMM_CHANNEL,
+    )
+    .await
+}
+
+pub async fn register_companion_spp_profile(session: &Session) -> Result<ProfileHandle> {
+    // Android's system Bluetooth settings can be picky when pairing with devices
+    // that only expose vendor/custom RFCOMM UUIDs. Exposing an additional standard
+    // Serial Port Profile record gives the OS a familiar Classic BT service to
+    // pair/connect against, while the companion app can still use the custom UUID.
+    register_companion_profile(
+        session,
+        SERIAL_PORT_PROFILE_UUID,
+        "AA Proxy Companion Serial",
+        COMPANION_SPP_RFCOMM_CHANNEL,
+    )
+    .await
 }
 
 pub fn spawn_companion_bt_accept_loop(mut handle: ProfileHandle, state: AppState) {
