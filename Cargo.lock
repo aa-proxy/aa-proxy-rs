@@ -9,6 +9,7 @@ dependencies = [
  "anyhow",
  "axum",
  "backon",
+ "base64 0.22.1",
  "bluer",
  "byteorder",
  "bytesize",

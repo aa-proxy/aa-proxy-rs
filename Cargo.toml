@@ -49,6 +49,7 @@ hyper = { version = "0.14", features = ["full"] }
 toml_edit = "0.22"
 chrono = "0.4.41"
 hex = "0.4.3"
+base64 = "0.22"
 indexmap = { version = "2", features = ["serde"] }
 regex = "1"
 anyhow = "1.0.99"
