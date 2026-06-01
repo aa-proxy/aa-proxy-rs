@@ -349,7 +349,6 @@ fn flatten_config_data_section(
 #[serde(default)]
 pub struct AppConfig {
     pub advertise: bool,
-    #[serde(alias = "enable_btle")]
     pub enable_companion_bt: bool,
     pub dongle_mode: bool,
     /// Experimental AA Wireless Bluetooth Proxy. Disabled by default.
@@ -517,7 +516,6 @@ pub struct AppConfig {
     pub wpa_passphrase: String,
     pub eth_mode: String,
     pub startup_delay: u8,
-    pub ble_password: String,
     pub external_antenna: bool,
     /// Base TCP port for media stream tapping. One port is allocated per media sink
     /// by order in the rewritten ServiceDiscoveryResponse: first media sink uses +0,
@@ -877,7 +875,6 @@ impl Default for AppConfig {
             wpa_passphrase: String::from(IDENTITY_NAME),
             eth_mode: String::new(),
             startup_delay: 0,
-            ble_password: String::new(),
             external_antenna: false,
             media_dump_base_port: None,
             media_wait_for_live_idr: true,
@@ -1171,7 +1168,6 @@ impl AppConfig {
         doc["wpa_passphrase"] = value(&self.wpa_passphrase);
         doc["eth_mode"] = value(&self.eth_mode);
         doc["startup_delay"] = value(self.startup_delay as i64);
-        doc["ble_password"] = value(&self.ble_password);
         doc["external_antenna"] = value(self.external_antenna);
         if let Some(port) = self.media_dump_base_port {
             doc["media_dump_base_port"] = value(port as i64);

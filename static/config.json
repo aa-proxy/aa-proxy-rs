@@ -61,13 +61,13 @@
     {
       "title": "📻 BLUETOOTH",
       "values": {
-        "enable_btle": {
+        "enable_companion_bt": {
           "typ": "boolean",
-          "description": "Enable BLE/GATT server for the companion app"
+          "description": "Enable Classic Bluetooth/RFCOMM companion transport"
         },
         "advertise": {
           "typ": "boolean",
-          "description": "BLE advertising"
+          "description": "Make the Bluetooth adapter discoverable"
         },
         "btalias": {
           "typ": "string",
@@ -76,10 +76,6 @@
         "connect": {
           "typ": "string",
           "description": "Auto-connect to phone and initiate connection\nempty string/no value: don't auto-connect,\nzeros: iterate over all previously connected devices,\nmay be set to a comma seperated list of phone BT MAC addresses for connecting to a specific list of phones, wildcard may not be used with list"
-        },
-        "ble_password": {
-          "typ": "string",
-          "description": "BLE password to communicate with the companion app; please set it on the app too"
         },
         "bt_timeout_secs": {
           "typ": "integer",
@@ -155,7 +151,14 @@
         "bt_wireless_proxy_wifi_join_control": {
           "typ": "select",
           "description": "EXPERIMENTAL Proxy car-wifi-mitm: automatic Wi-Fi join backend. auto/legacy keeps the old fallback chain. wpactrl starts/uses wpa_supplicant and configures it through its control socket. nmcli, wpa_cli, and wpa_supplicant force a single backend.",
-          "values": ["auto", "legacy", "wpactrl", "wpa_supplicant", "wpa_cli", "nmcli"],
+          "values": [
+            "auto",
+            "legacy",
+            "wpactrl",
+            "wpa_supplicant",
+            "wpa_cli",
+            "nmcli"
+          ],
           "advanced": true,
           "requires": "bt_wireless_proxy"
         },

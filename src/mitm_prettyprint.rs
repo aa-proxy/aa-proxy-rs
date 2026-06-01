@@ -4,6 +4,14 @@ use crate::mitm::protos::ControlMessageType;
 use crate::mitm::protos::ControlMessageType::*;
 use crate::mitm::protos::*;
 use crate::mitm::{get_name, ModifyContext, Packet, ProxyType, Result};
+use crate::companion_protocol::{
+    COMPANION_OP_ECHO, COMPANION_OP_ECHO_REPLY, COMPANION_OP_ERROR,
+    COMPANION_OP_GET_STATUS, COMPANION_OP_ON_SCRIPT_EVENT, COMPANION_OP_ON_TOPIC_EVENT,
+    COMPANION_OP_PING, COMPANION_OP_PONG, COMPANION_OP_REST_CALL,
+    COMPANION_OP_REST_CALL_REPLY, COMPANION_OP_REST_CALL_RESULT,
+    COMPANION_OP_REST_CALL_SYNC, COMPANION_OP_STATUS,
+    COMPANION_OP_SUBSCRIBE_TOPIC_EVENT, COMPANION_OP_UNSUBSCRIBE_TOPIC_EVENT,
+};
 use log::{debug, info, log_enabled, Level};
 use protobuf::text_format::print_to_string_pretty;
 use protobuf::{Enum, Message};
@@ -404,28 +412,28 @@ fn json_payload_len_and_preview(value: &serde_json::Value, name: &str) -> Option
 
 fn vec_opcode_name(opcode: u8) -> &'static str {
     match opcode {
-        0x02 => "VEC_OP_PING",
-        0x03 => "VEC_OP_GET_STATUS",
-        0x04 => "VEC_OP_ECHO",
-        0x05 => "VEC_OP_REST_CALL",
-        0x06 => "VEC_OP_REST_CALL_SYNC",
-        0x07 => "VEC_OP_SUBSCRIBE_TOPIC_EVENT",
-        0x08 => "VEC_OP_UNSUBSCRIBE_TOPIC_EVENT",
-        0x09 => "VEC_OP_ON_SCRIPT_EVENT",
-        0x81 => "VEC_OP_PONG",
-        0x82 => "VEC_OP_STATUS",
-        0x83 => "VEC_OP_ECHO_REPLY",
-        0x85 => "VEC_OP_REST_CALL_REPLY",
-        0x86 => "VEC_OP_REST_CALL_RESULT",
-        0x87 => "VEC_OP_ON_TOPIC_EVENT",
-        0xFF => "VEC_OP_ERROR",
-        _ => "VEC_OP_UNKNOWN",
+        COMPANION_OP_PING => "COMPANION_OP_PING",
+        COMPANION_OP_GET_STATUS => "COMPANION_OP_GET_STATUS",
+        COMPANION_OP_ECHO => "COMPANION_OP_ECHO",
+        COMPANION_OP_REST_CALL => "COMPANION_OP_REST_CALL",
+        COMPANION_OP_REST_CALL_SYNC => "COMPANION_OP_REST_CALL_SYNC",
+        COMPANION_OP_SUBSCRIBE_TOPIC_EVENT => "COMPANION_OP_SUBSCRIBE_TOPIC_EVENT",
+        COMPANION_OP_UNSUBSCRIBE_TOPIC_EVENT => "COMPANION_OP_UNSUBSCRIBE_TOPIC_EVENT",
+        COMPANION_OP_ON_SCRIPT_EVENT => "COMPANION_OP_ON_SCRIPT_EVENT",
+        COMPANION_OP_PONG => "COMPANION_OP_PONG",
+        COMPANION_OP_STATUS => "COMPANION_OP_STATUS",
+        COMPANION_OP_ECHO_REPLY => "COMPANION_OP_ECHO_REPLY",
+        COMPANION_OP_REST_CALL_REPLY => "COMPANION_OP_REST_CALL_REPLY",
+        COMPANION_OP_REST_CALL_RESULT => "COMPANION_OP_REST_CALL_RESULT",
+        COMPANION_OP_ON_TOPIC_EVENT => "COMPANION_OP_ON_TOPIC_EVENT",
+        COMPANION_OP_ERROR => "COMPANION_OP_ERROR",
+        _ => "COMPANION_OP_UNKNOWN",
     }
 }
 
 fn pretty_vec_app_packet(pkt: &Packet) -> Option<String> {
     if pkt.payload.len() < 2 {
-        return Some("VEC app packet too short".to_string());
+        return Some("Companion app packet too short".to_string());
     }
 
     let version = pkt.payload[0];
