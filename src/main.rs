@@ -473,11 +473,12 @@ async fn tokio_main(
                 }
             }
         }
-        if cfg.advertise {
-            if let Some(ref mut bluetooth) = bluetooth {
-                if let Err(e) = bluetooth.start_ble(state.clone(), cfg.enable_btle).await {
-                    warn!("{} Error starting BLE: {}", NAME, e);
-                }
+        if let Some(ref mut bluetooth) = bluetooth {
+            if let Err(e) = bluetooth
+                .start_companion_bt(state.clone(), cfg.enable_companion_bt)
+                .await
+            {
+                warn!("{} Error starting Companion Classic BT: {}", NAME, e);
             }
         }
 

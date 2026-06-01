@@ -349,7 +349,8 @@ fn flatten_config_data_section(
 #[serde(default)]
 pub struct AppConfig {
     pub advertise: bool,
-    pub enable_btle: bool,
+    #[serde(alias = "enable_btle")]
+    pub enable_companion_bt: bool,
     pub dongle_mode: bool,
     /// Experimental AA Wireless Bluetooth Proxy. Disabled by default.
     /// bridge = accept the phone AA RFCOMM connection, connect to the HU RFCOMM
@@ -766,7 +767,7 @@ impl Default for AppConfig {
         let iw_cache = iw_list_output().unwrap_or_default();
         Self {
             advertise: true,
-            enable_btle: true,
+            enable_companion_bt: true,
             dongle_mode: false,
             bt_wireless_proxy: false,
             bt_wireless_proxy_mode: "car-wifi-mitm".to_string(),
@@ -1049,7 +1050,7 @@ impl AppConfig {
         });
 
         doc["advertise"] = value(self.advertise);
-        doc["enable_btle"] = value(self.enable_btle);
+        doc["enable_companion_bt"] = value(self.enable_companion_bt);
         doc["dongle_mode"] = value(self.dongle_mode);
         doc["bt_wireless_proxy"] = value(self.bt_wireless_proxy);
         doc["bt_wireless_proxy_mode"] = value(self.bt_wireless_proxy_mode.clone());

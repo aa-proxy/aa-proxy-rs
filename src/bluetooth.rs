@@ -1,4 +1,3 @@
-use crate::btle;
 use crate::config::Action;
 use crate::config::SharedConfig;
 use crate::config::WifiConfig;
@@ -1569,8 +1568,6 @@ pub struct Bluetooth {
     session: Session,
     adapter: Adapter,
     handle_aa: Option<ProfileHandle>,
-    btle_handle: Option<bluer::gatt::local::ApplicationHandle>,
-    adv_handle: Option<bluer::adv::AdvertisementHandle>,
     hu_pairing_agent: Option<AgentHandle>,
     current_index: usize,
     dongle_mode: bool,
@@ -1639,8 +1636,6 @@ pub async fn init(
         session,
         adapter,
         handle_aa,
-        btle_handle: None,
-        adv_handle: None,
         hu_pairing_agent: None,
         current_index: 0,
         dongle_mode,
@@ -2091,107 +2086,19 @@ impl Bluetooth {
         }
     }
 
-    pub async fn start_ble(&mut self, state: AppState, enable_btle: bool) -> Result<()> {
-        // --- Start BLE GATT server first ---
-        if enable_btle {
-            match btle::run_btle_server(&self.adapter, state.clone()).await {
-                Ok(handle) => {
-                    info!("{} 🥏 BLE GATT server started successfully", NAME);
-                    self.btle_handle = Some(handle);
-                }
-                Err(e) => {
-                    error!("{} 🥏 Failed to start BLE server: {}", NAME, e);
-                }
-            }
+    pub async fn start_companion_bt(&mut self, state: AppState, enable_companion_bt: bool) -> Result<()> {
+        if !enable_companion_bt {
+            info!("{} 📱 Companion Classic BT profile: disabled", NAME);
+            return Ok(());
         }
 
-        // --- Prepare UUIDs ---
-        let mut uuids: std::collections::BTreeSet<bluer::Uuid> = std::collections::BTreeSet::new();
-        uuids.insert(BTLE_PROFILE_UUID);
-
-        // --- BLE advertisement ---
-        if !uuids.is_empty() {
-            // Stop any previous advertisement first
-            if let Some(handle) = self.adv_handle.take() {
-                drop(handle);
+        match crate::companion_bt::register_companion_bt_profile(&self.session).await {
+            Ok(handle) => {
+                info!("{} 📱 Companion Classic BT profile: registered", NAME);
+                crate::companion_bt::spawn_companion_bt_accept_loop(handle, state);
             }
-
-            let mut le_advertisement = bluer::adv::Advertisement {
-                advertisement_type: bluer::adv::Type::Peripheral,
-                service_uuids: uuids.clone(),
-                discoverable: Some(true), // temporarily true for stable discovery
-                local_name: Some(self.adapter.alias().await?),
-                ..Default::default()
-            };
-
-            let mut adv_success = false;
-            for attempt in 0..3 {
-                match self.adapter.advertise(le_advertisement.clone()).await {
-                    Ok(handle) => {
-                        info!(
-                            "{} 📣 BLE advertisement started with UUIDs (attempt {})",
-                            NAME,
-                            attempt + 1
-                        );
-                        self.adv_handle = Some(handle);
-                        adv_success = true;
-                        break;
-                    }
-                    Err(e) => {
-                        warn!(
-                            "{} 🥏 Advertising attempt {} failed: {}",
-                            NAME,
-                            attempt + 1,
-                            e
-                        );
-                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                    }
-                }
-            }
-
-            if !adv_success {
-                warn!(
-                    "{} 🥏 Advertising with UUIDs failed, fallback to local name only",
-                    NAME
-                );
-
-                // Retry only with local name
-                if let Some(handle) = self.adv_handle.take() {
-                    drop(handle);
-                }
-
-                le_advertisement.service_uuids = Default::default();
-
-                for attempt in 0..3 {
-                    match self.adapter.advertise(le_advertisement.clone()).await {
-                        Ok(handle) => {
-                            info!(
-                                "{} 📣 BLE advertisement started with local name only (attempt {})",
-                                NAME,
-                                attempt + 1
-                            );
-                            self.adv_handle = Some(handle);
-                            adv_success = true;
-                            break;
-                        }
-                        Err(e) => {
-                            warn!(
-                                "{} 🥏 Local-name-only advertising attempt {} failed: {}",
-                                NAME,
-                                attempt + 1,
-                                e
-                            );
-                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                        }
-                    }
-                }
-
-                if !adv_success {
-                    error!(
-                        "{} 🥏 BLE advertisement completely failed after retries",
-                        NAME
-                    );
-                }
+            Err(e) => {
+                error!("{} 📱 Failed to register Companion Classic BT profile: {}", NAME, e);
             }
         }
 
