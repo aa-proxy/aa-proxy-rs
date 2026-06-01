@@ -1,9 +1,14 @@
 use crate::companion_http::{dispatch_companion_http, CompanionHttpRequest};
 use crate::companion_protocol::*;
 use crate::web::{AppState, ServerEvent};
+use bluer::agent::{
+    Agent, AgentHandle, AuthorizeService, DisplayPasskey, DisplayPinCode,
+    ReqResult as AgentReqResult, RequestAuthorization, RequestConfirmation,
+    RequestPasskey, RequestPinCode,
+};
 use bluer::rfcomm::{Profile, ProfileHandle, Role, Stream};
-use bluer::{Session, Uuid};
-use futures::StreamExt;
+use bluer::{Address, Session, Uuid};
+use futures::{FutureExt, StreamExt};
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -39,6 +44,112 @@ struct ErrorPayload {
 struct TopicEventPayload {
     topic: String,
     payload: String,
+}
+
+
+async fn companion_trust_device(
+    session: Session,
+    adapter_name: String,
+    device_addr: Address,
+) -> AgentReqResult<()> {
+    match session.adapter(&adapter_name) {
+        Ok(adapter) => match adapter.device(device_addr) {
+            Ok(device) => match device.set_trusted(true).await {
+                Ok(()) => info!(
+                    "{} pairing: trusted companion device {} on adapter {}",
+                    NAME, device_addr, adapter_name
+                ),
+                Err(e) => warn!(
+                    "{} pairing: failed to trust companion device {} on adapter {}: {}",
+                    NAME, device_addr, adapter_name, e
+                ),
+            },
+            Err(e) => warn!(
+                "{} pairing: failed to open companion device {} on adapter {}: {}",
+                NAME, device_addr, adapter_name, e
+            ),
+        },
+        Err(e) => warn!(
+            "{} pairing: failed to open adapter {} while trusting companion device {}: {}",
+            NAME, adapter_name, device_addr, e
+        ),
+    }
+    Ok(())
+}
+
+async fn companion_request_pin_code(req: RequestPinCode) -> AgentReqResult<String> {
+    info!("{} pairing: replying with fallback PIN 0000 for {}", NAME, req.device);
+    Ok("0000".to_string())
+}
+
+async fn companion_display_pin_code(req: DisplayPinCode) -> AgentReqResult<()> {
+    info!("{} pairing: display PIN-code request from {}: {}", NAME, req.device, req.pincode);
+    Ok(())
+}
+
+async fn companion_request_passkey(req: RequestPasskey) -> AgentReqResult<u32> {
+    info!("{} pairing: replying with fallback passkey 000000 for {}", NAME, req.device);
+    Ok(0)
+}
+
+async fn companion_display_passkey(req: DisplayPasskey) -> AgentReqResult<()> {
+    info!(
+        "{} pairing: display passkey request from {}: {:06} entered={}",
+        NAME, req.device, req.passkey, req.entered
+    );
+    Ok(())
+}
+
+async fn companion_request_confirmation(
+    req: RequestConfirmation,
+    session: Session,
+) -> AgentReqResult<()> {
+    info!(
+        "{} pairing: confirming passkey {:06} for {}",
+        NAME, req.passkey, req.device
+    );
+    companion_trust_device(session, req.adapter.clone(), req.device).await
+}
+
+async fn companion_request_authorization(
+    req: RequestAuthorization,
+    session: Session,
+) -> AgentReqResult<()> {
+    info!("{} pairing: authorizing companion pairing from {}", NAME, req.device);
+    companion_trust_device(session, req.adapter.clone(), req.device).await
+}
+
+async fn companion_authorize_service(req: AuthorizeService) -> AgentReqResult<()> {
+    info!(
+        "{} pairing: authorizing service {} for {}",
+        NAME, req.service, req.device
+    );
+    Ok(())
+}
+
+pub async fn register_companion_pairing_agent(session: &Session) -> Result<AgentHandle> {
+    let session_for_confirmation = session.clone();
+    let session_for_authorization = session.clone();
+
+    let agent = Agent {
+        request_default: true,
+        request_pin_code: Some(Box::new(|req| companion_request_pin_code(req).boxed())),
+        display_pin_code: Some(Box::new(|req| companion_display_pin_code(req).boxed())),
+        request_passkey: Some(Box::new(|req| companion_request_passkey(req).boxed())),
+        display_passkey: Some(Box::new(|req| companion_display_passkey(req).boxed())),
+        request_confirmation: Some(Box::new(move |req| {
+            companion_request_confirmation(req, session_for_confirmation.clone()).boxed()
+        })),
+        request_authorization: Some(Box::new(move |req| {
+            companion_request_authorization(req, session_for_authorization.clone()).boxed()
+        })),
+        authorize_service: Some(Box::new(|req| companion_authorize_service(req).boxed())),
+        ..Default::default()
+    };
+
+    let handle = session.register_agent(agent).await?;
+    info!("{} pairing: registered default Companion Classic BT pairing agent", NAME);
+    Ok(handle)
 }
 
 pub async fn register_companion_bt_profile(session: &Session) -> Result<ProfileHandle> {
