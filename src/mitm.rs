@@ -23,7 +23,7 @@ use crate::vendor_ext::{
     add_vendor_extension_service, ensure_vendor_channel_open, ensure_vendor_topic_event_bridge,
     handle_vendor_channel_packet, has_vendor_extension_service, is_vendor_channel,
     is_vendor_service_id, mark_vendor_channel_open, VecChannelState, VecTopicEventBridge,
-    VecTopicEventRuntime, OUR_VEC_PACKAGE, OUR_VEC_SERVICE_NAME,
+    VecTopicEventRuntime, OUR_COMPANION_PACKAGE, OUR_COMPANION_SERVICE_NAME,
 };
 use crate::web::ServerEvent;
 use anyhow::Context;
@@ -2240,8 +2240,8 @@ pub async fn pkt_modify_hook(
                         get_name(proxy_type),
                         control.unwrap(),
                         service_id,
-                        OUR_VEC_SERVICE_NAME,
-                        OUR_VEC_PACKAGE,
+                        OUR_COMPANION_SERVICE_NAME,
+                        OUR_COMPANION_PACKAGE,
                     );
                 }
             }

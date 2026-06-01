@@ -5,6 +5,15 @@ use crate::mitm::{
 #[cfg(feature = "wasm-scripting")]
 use crate::script_wasm::{LoadedScript, ScriptRegistry};
 use crate::web::ServerEvent;
+use crate::companion_protocol::{
+    COMPANION_APP_VERSION, COMPANION_OP_ECHO, COMPANION_OP_ECHO_REPLY,
+    COMPANION_OP_ERROR, COMPANION_OP_GET_STATUS, COMPANION_OP_ON_SCRIPT_EVENT,
+    COMPANION_OP_ON_TOPIC_EVENT, COMPANION_OP_PING, COMPANION_OP_PONG,
+    COMPANION_OP_REST_CALL, COMPANION_OP_REST_CALL_REPLY,
+    COMPANION_OP_REST_CALL_RESULT, COMPANION_OP_REST_CALL_SYNC,
+    COMPANION_OP_STATUS, COMPANION_OP_SUBSCRIBE_TOPIC_EVENT,
+    COMPANION_OP_UNSUBSCRIBE_TOPIC_EVENT,
+};
 #[cfg(not(feature = "wasm-scripting"))]
 type ScriptRegistry = ();
 use log::{debug, info, warn};
@@ -14,33 +23,14 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc::Sender, RwLock};
 use tokio::task::JoinHandle;
 
-pub(crate) const OUR_VEC_SERVICE_NAME: &str = "aaproxy_companion";
-pub(crate) const OUR_VEC_PACKAGE: &str = "com.github.deadknight.aaproxycompanion";
+pub(crate) const OUR_COMPANION_SERVICE_NAME: &str = "aaproxy_companion";
+pub(crate) const OUR_COMPANION_PACKAGE: &str = "com.github.deadknight.aaproxycompanion";
 
-const VEC_APP_VERSION: u8 = 0x01;
-const VEC_OP_PING: u8 = 0x02;
-const VEC_OP_GET_STATUS: u8 = 0x03;
-const VEC_OP_ECHO: u8 = 0x04;
-const VEC_OP_REST_CALL: u8 = 0x05;
-const VEC_OP_REST_CALL_SYNC: u8 = 0x06;
-const VEC_OP_SUBSCRIBE_TOPIC_EVENT: u8 = 0x07;
-const VEC_OP_UNSUBSCRIBE_TOPIC_EVENT: u8 = 0x08;
-const VEC_OP_ON_SCRIPT_EVENT: u8 = 0x09;
-
-const VEC_OP_PONG: u8 = 0x81;
-const VEC_OP_STATUS: u8 = 0x82;
-const VEC_OP_ECHO_REPLY: u8 = 0x83;
-const VEC_OP_REST_CALL_REPLY: u8 = 0x85;
-const VEC_OP_REST_CALL_RESULT: u8 = 0x86;
-const VEC_OP_ON_TOPIC_EVENT: u8 = 0x87;
-
-const VEC_OP_ERROR: u8 = 0xFF;
-
-// Keep outbound custom VEC app-data packets below the aa-proxy IO buffer
+// Keep outbound custom companion app-data packets below the aa-proxy IO buffer
 // and below the sizes that some phone/HU stacks appear to tolerate on a
 // single vendor-extension channel frame. The AA transport supports FIRST /
 // middle / LAST fragmentation, so large REST responses are split here.
-const VEC_APP_FRAGMENT_CHUNK_SIZE: usize = 4 * 1024;
+const COMPANION_APP_FRAGMENT_CHUNK_SIZE: usize = 4 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum VecChannelState {
@@ -130,7 +120,7 @@ impl VecTopicEventBridge {
                             }
                         };
 
-                        let reply = build_vendor_app_reply(channel, VEC_OP_ON_TOPIC_EVENT, payload);
+                        let reply = build_vendor_app_reply(channel, COMPANION_OP_ON_TOPIC_EVENT, payload);
 
                         if let Err(e) = tx.send(reply).await {
                             warn!("Failed to send VEC topic event to phone: {}", e);
@@ -139,7 +129,7 @@ impl VecTopicEventBridge {
                     }
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
                         warn!(
-                            "VEC topic event bridge lagged on channel={:#04x}, skipped {} events",
+                            "Companion topic event bridge lagged on channel={:#04x}, skipped {} events",
                             channel, skipped
                         );
                     }
@@ -175,13 +165,13 @@ pub(crate) fn ensure_vendor_topic_event_bridge(
 
     let Some(tx) = ctx.hu_tx.clone() else {
         warn!(
-            "Cannot start VEC topic event bridge for channel={:#04x}: hu_tx is missing",
+            "Cannot start Companion topic event bridge for channel={:#04x}: hu_tx is missing",
             channel
         );
         return false;
     };
 
-    info!("Starting VEC topic event bridge channel={:#04x}", channel);
+    info!("Starting Companion topic event bridge channel={:#04x}", channel);
 
     ctx.vendor_topic_event_bridges
         .insert(channel, VecTopicEventBridge::new(channel, tx, runtime));
@@ -195,7 +185,7 @@ pub(crate) fn vendor_extension_service_id(msg: &ServiceDiscoveryResponse) -> Opt
         .find(|svc| {
             svc.vendor_extension_service
                 .as_ref()
-                .map(|ves| ves.service_name() == OUR_VEC_SERVICE_NAME)
+                .map(|ves| ves.service_name() == OUR_COMPANION_SERVICE_NAME)
                 .unwrap_or(false)
         })
         .map(|svc| svc.id() as u8)
@@ -220,8 +210,8 @@ pub(crate) fn add_vendor_extension_service(
     service.set_id(next_service_id);
 
     let mut ves = VendorExtensionService::new();
-    ves.set_service_name(OUR_VEC_SERVICE_NAME.to_string());
-    ves.package_white_list.push(OUR_VEC_PACKAGE.to_string());
+    ves.set_service_name(OUR_COMPANION_SERVICE_NAME.to_string());
+    ves.package_white_list.push(OUR_COMPANION_PACKAGE.to_string());
 
     service.vendor_extension_service = protobuf::MessageField::some(ves);
     msg.services.push(service);
@@ -234,7 +224,7 @@ pub(crate) fn add_vendor_extension_service(
 
 fn build_vendor_app_reply(channel: u8, opcode: u8, payload: Vec<u8>) -> Packet {
     let mut out = Vec::with_capacity(2 + payload.len());
-    out.push(VEC_APP_VERSION);
+    out.push(COMPANION_APP_VERSION);
     out.push(opcode);
     out.extend_from_slice(&payload);
 
@@ -249,11 +239,11 @@ fn build_vendor_app_reply(channel: u8, opcode: u8, payload: Vec<u8>) -> Packet {
 
 fn build_vendor_app_reply_fragments(channel: u8, opcode: u8, payload: Vec<u8>) -> Vec<Packet> {
     let mut out = Vec::with_capacity(2 + payload.len());
-    out.push(VEC_APP_VERSION);
+    out.push(COMPANION_APP_VERSION);
     out.push(opcode);
     out.extend_from_slice(&payload);
 
-    if out.len() <= VEC_APP_FRAGMENT_CHUNK_SIZE {
+    if out.len() <= COMPANION_APP_FRAGMENT_CHUNK_SIZE {
         return vec![Packet {
             channel,
             // Custom vendor app-data frame. Do not set CONTROL here.
@@ -264,15 +254,15 @@ fn build_vendor_app_reply_fragments(channel: u8, opcode: u8, payload: Vec<u8>) -
     }
 
     let total_len = out.len() as u32;
-    let total_chunks = (out.len() + VEC_APP_FRAGMENT_CHUNK_SIZE - 1) / VEC_APP_FRAGMENT_CHUNK_SIZE;
+    let total_chunks = (out.len() + COMPANION_APP_FRAGMENT_CHUNK_SIZE - 1) / COMPANION_APP_FRAGMENT_CHUNK_SIZE;
 
     info!(
         "VEC reply fragmented channel={:#04x} opcode={:#04x} total_len={} chunks={} chunk_size={}",
-        channel, opcode, total_len, total_chunks, VEC_APP_FRAGMENT_CHUNK_SIZE
+        channel, opcode, total_len, total_chunks, COMPANION_APP_FRAGMENT_CHUNK_SIZE
     );
 
     let mut packets = Vec::with_capacity(total_chunks);
-    for (index, chunk) in out.chunks(VEC_APP_FRAGMENT_CHUNK_SIZE).enumerate() {
+    for (index, chunk) in out.chunks(COMPANION_APP_FRAGMENT_CHUNK_SIZE).enumerate() {
         let first = index == 0;
         let last = index + 1 == total_chunks;
 
@@ -311,7 +301,7 @@ async fn send_vendor_app_reply_fragments(
 fn build_error_reply(channel: u8, message: impl Into<String>) -> Packet {
     let message = message.into();
     warn!("VEC error: {}", message);
-    build_vendor_app_reply(channel, VEC_OP_ERROR, message.into_bytes())
+    build_vendor_app_reply(channel, COMPANION_OP_ERROR, message.into_bytes())
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -369,7 +359,7 @@ fn build_topic_status_reply(
     })
     .to_string();
 
-    build_vendor_app_reply(channel, VEC_OP_STATUS, payload.into_bytes())
+    build_vendor_app_reply(channel, COMPANION_OP_STATUS, payload.into_bytes())
 }
 
 #[cfg(not(feature = "wasm-scripting"))]
@@ -455,7 +445,7 @@ pub(crate) async fn handle_vendor_channel_packet(
     let opcode = pkt.payload[1];
     let body = pkt.payload[2..].to_vec();
 
-    if version != VEC_APP_VERSION {
+    if version != COMPANION_APP_VERSION {
         warn!(
             "VEC unsupported app version={} opcode={:#04x} channel={:#04x}",
             version, opcode, pkt.channel
@@ -466,16 +456,16 @@ pub(crate) async fn handle_vendor_channel_packet(
     }
 
     match opcode {
-        VEC_OP_PING => {
+        COMPANION_OP_PING => {
             info!(
                 "VEC PING received channel={:#04x} payload={:02X?}",
                 pkt.channel, body
             );
 
-            *pkt = build_vendor_app_reply(pkt.channel, VEC_OP_PONG, body);
+            *pkt = build_vendor_app_reply(pkt.channel, COMPANION_OP_PONG, body);
             Ok(PacketAction::SendBack)
         }
-        VEC_OP_GET_STATUS => {
+        COMPANION_OP_GET_STATUS => {
             let status = serde_json::json!({
                 "ok": true,
                 "channel": pkt.channel,
@@ -488,20 +478,20 @@ pub(crate) async fn handle_vendor_channel_packet(
 
             info!("VEC GET_STATUS received channel={:#04x}", pkt.channel);
 
-            *pkt = build_vendor_app_reply(pkt.channel, VEC_OP_STATUS, status.into_bytes());
+            *pkt = build_vendor_app_reply(pkt.channel, COMPANION_OP_STATUS, status.into_bytes());
             Ok(PacketAction::SendBack)
         }
-        VEC_OP_ECHO => {
+        COMPANION_OP_ECHO => {
             info!(
                 "VEC ECHO received channel={:#04x} payload_len={}",
                 pkt.channel,
                 body.len()
             );
 
-            *pkt = build_vendor_app_reply(pkt.channel, VEC_OP_ECHO_REPLY, body);
+            *pkt = build_vendor_app_reply(pkt.channel, COMPANION_OP_ECHO_REPLY, body);
             Ok(PacketAction::SendBack)
         }
-        VEC_OP_SUBSCRIBE_TOPIC_EVENT => {
+        COMPANION_OP_SUBSCRIBE_TOPIC_EVENT => {
             let subscription: VecTopicSubscription = match parse_json_body(body, "VEC subscribe") {
                 Ok(v) => v,
                 Err(e) => {
@@ -520,7 +510,7 @@ pub(crate) async fn handle_vendor_channel_packet(
             if !ensure_vendor_topic_event_bridge(ctx, pkt.channel, runtime) {
                 *pkt = build_error_reply(
                     pkt.channel,
-                    "VEC topic event bridge is not available for this channel",
+                    "Companion topic event bridge is not available for this channel",
                 );
                 return Ok(PacketAction::SendBack);
             }
@@ -532,7 +522,7 @@ pub(crate) async fn handle_vendor_channel_packet(
             else {
                 *pkt = build_error_reply(
                     pkt.channel,
-                    "VEC topic event bridge was not registered for this channel",
+                    "Companion topic event bridge was not registered for this channel",
                 );
                 return Ok(PacketAction::SendBack);
             };
@@ -546,7 +536,7 @@ pub(crate) async fn handle_vendor_channel_packet(
             *pkt = build_topic_status_reply(pkt.channel, "subscribed", topic, None);
             Ok(PacketAction::SendBack)
         }
-        VEC_OP_UNSUBSCRIBE_TOPIC_EVENT => {
+        COMPANION_OP_UNSUBSCRIBE_TOPIC_EVENT => {
             let subscription: VecTopicSubscription = match parse_json_body(body, "VEC unsubscribe")
             {
                 Ok(v) => v,
@@ -579,7 +569,7 @@ pub(crate) async fn handle_vendor_channel_packet(
             *pkt = build_topic_status_reply(pkt.channel, "unsubscribed", topic, None);
             Ok(PacketAction::SendBack)
         }
-        VEC_OP_ON_SCRIPT_EVENT => {
+        COMPANION_OP_ON_SCRIPT_EVENT => {
             let event: VecTopicEvent = match parse_json_body(body, "VEC script event") {
                 Ok(v) => v,
                 Err(e) => {
@@ -652,7 +642,7 @@ pub(crate) async fn handle_vendor_channel_packet(
             *pkt = build_topic_status_reply(pkt.channel, "published", topic, Some(receiver_count));
             Ok(PacketAction::SendBack)
         }
-        VEC_OP_REST_CALL_SYNC => {
+        COMPANION_OP_REST_CALL_SYNC => {
             let body_str = match String::from_utf8(body) {
                 Ok(s) => s,
                 Err(e) => {
@@ -693,11 +683,11 @@ pub(crate) async fn handle_vendor_channel_packet(
                 rest_call_blocking(rest_call.method, rest_call.path, rest_call.body, false);
 
             *pkt =
-                build_vendor_app_reply(channel, VEC_OP_REST_CALL_RESULT, result_call.into_bytes());
+                build_vendor_app_reply(channel, COMPANION_OP_REST_CALL_RESULT, result_call.into_bytes());
 
             return Ok(PacketAction::SendBack);
         }
-        VEC_OP_REST_CALL => {
+        COMPANION_OP_REST_CALL => {
             let body_str = match String::from_utf8(body) {
                 Ok(s) => s,
                 Err(e) => {
@@ -778,7 +768,7 @@ pub(crate) async fn handle_vendor_channel_packet(
                 if let Err(e) = send_vendor_app_reply_fragments(
                     tx,
                     channel,
-                    VEC_OP_REST_CALL_RESULT,
+                    COMPANION_OP_REST_CALL_RESULT,
                     payload.into_bytes(),
                 )
                 .await
@@ -805,7 +795,7 @@ pub(crate) async fn handle_vendor_channel_packet(
             };
 
             *pkt =
-                build_vendor_app_reply(pkt.channel, VEC_OP_REST_CALL_REPLY, payload.into_bytes());
+                build_vendor_app_reply(pkt.channel, COMPANION_OP_REST_CALL_REPLY, payload.into_bytes());
 
             Ok(PacketAction::SendBack)
         }
