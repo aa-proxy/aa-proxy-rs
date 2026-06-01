@@ -1,3 +1,5 @@
+use crate::bluetooth::remove_known_device_entry;
+
 use axum::{extract::Path, http::StatusCode, response::IntoResponse, Json};
 
 use serde::{Deserialize, Serialize};
@@ -162,9 +164,13 @@ pub async fn bt_remove_device_handler(Path(mac): Path<String>) -> impl IntoRespo
             .into_response();
     }
 
+    let known_device_result = remove_known_device_entry(&mac);
+
     match run_bluetoothctl(&["remove", &mac]).await {
         Ok(result) => {
-            let status = if result.ok {
+            let known_device_removed = known_device_result.as_ref().copied().unwrap_or(false);
+            let ok = result.ok || known_device_removed;
+            let status = if ok {
                 StatusCode::OK
             } else {
                 StatusCode::INTERNAL_SERVER_ERROR
@@ -173,7 +179,10 @@ pub async fn bt_remove_device_handler(Path(mac): Path<String>) -> impl IntoRespo
             (
                 status,
                 Json(json!({
-                    "ok": result.ok,
+                    "ok": ok,
+                    "bluez_ok": result.ok,
+                    "known_device_removed": known_device_removed,
+                    "known_device_error": known_device_result.err().map(|e| e.to_string()),
                     "mac": mac,
                     "stdout": result.stdout,
                     "stderr": result.stderr,
@@ -181,15 +190,28 @@ pub async fn bt_remove_device_handler(Path(mac): Path<String>) -> impl IntoRespo
             )
                 .into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "ok": false,
-                "mac": mac,
-                "error": e
-            })),
-        )
-            .into_response(),
+        Err(e) => {
+            let known_device_removed = known_device_result.as_ref().copied().unwrap_or(false);
+            let ok = known_device_removed;
+            let status = if ok {
+                StatusCode::OK
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+
+            (
+                status,
+                Json(json!({
+                    "ok": ok,
+                    "bluez_ok": false,
+                    "known_device_removed": known_device_removed,
+                    "known_device_error": known_device_result.err().map(|e| e.to_string()),
+                    "mac": mac,
+                    "error": e
+                })),
+            )
+                .into_response()
+        }
     }
 }
 

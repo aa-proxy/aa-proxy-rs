@@ -1688,6 +1688,56 @@ pub fn load_known_devices() -> Vec<Address> {
     addrs
 }
 
+/// Remove a device address from the known-good devices file.
+pub fn remove_known_device_entry(mac: &str) -> std::io::Result<bool> {
+    let path = std::path::Path::new(KNOWN_DEVICES_FILE);
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+
+    let target = mac.trim();
+    let mut removed = false;
+    let mut remaining: Vec<String> = Vec::new();
+
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if trimmed.eq_ignore_ascii_case(target) {
+            removed = true;
+        } else {
+            remaining.push(trimmed.to_string());
+        }
+    }
+
+    if !removed {
+        return Ok(false);
+    }
+
+    if remaining.is_empty() {
+        match std::fs::remove_file(path) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    } else {
+        let mut new_contents = remaining.join("\n");
+        new_contents.push('\n');
+        std::fs::write(path, new_contents)?;
+    }
+
+    info!(
+        "{} 🗑️ Removed {} from known devices file",
+        NAME, target
+    );
+
+    Ok(true)
+}
+
 /// Append a device address to the known-good devices file (if not already present).
 fn save_known_device(addr: Address) {
     if addr == Address::any() {
