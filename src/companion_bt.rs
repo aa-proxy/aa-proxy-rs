@@ -12,6 +12,7 @@ use tokio::io::WriteHalf;
 use tokio::sync::Mutex;
 
 const NAME: &str = "<i><bright-black> companion_bt: </>";
+const COMPANION_RFCOMM_CHANNEL: u16 = 23;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -44,6 +45,7 @@ pub async fn register_companion_bt_profile(session: &Session) -> Result<ProfileH
     let profile = Profile {
         uuid: Uuid::parse_str(COMPANION_BT_UUID)?,
         name: Some("AA Proxy Companion Control".to_string()),
+        channel: Some(COMPANION_RFCOMM_CHANNEL),
         role: Some(Role::Server),
         require_authentication: Some(false),
         require_authorization: Some(false),
@@ -51,7 +53,12 @@ pub async fn register_companion_bt_profile(session: &Session) -> Result<ProfileH
     };
 
     let handle = session.register_profile(profile).await?;
-    info!("{} registered Classic BT companion profile uuid={}", NAME, COMPANION_BT_UUID);
+    info!(
+        "{} registered Classic BT companion profile uuid={} channel={}",
+        NAME,
+        COMPANION_BT_UUID,
+        COMPANION_RFCOMM_CHANNEL
+    );
     Ok(handle)
 }
 
