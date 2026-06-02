@@ -336,6 +336,8 @@ enum MessageId {
     WifiVersionResponse = 5,
     WifiConnectStatus = 6,
     WifiStartResponse = 7,
+    WifiPingRequest = 8,
+    WifiPingResponse = 9,
 }
 
 
@@ -350,6 +352,8 @@ enum ProxyMessageId {
     WifiVersionResponse = 5,
     WifiConnectStatus = 6,
     WifiStartResponse = 7,
+    WifiPingRequest = 8,
+    WifiPingResponse = 9,
 }
 
 impl ProxyMessageId {
@@ -362,6 +366,8 @@ impl ProxyMessageId {
             5 => "WifiVersionResponse",
             6 => "WifiConnectStatus",
             7 => "WifiStartResponse",
+            8 => "WifiPingRequest",
+            9 => "WifiPingResponse",
             _ => "Unknown",
         }
     }
@@ -452,6 +458,12 @@ impl ProxyFrameSniffer {
                     ),
                 }
             }
+            x if x == ProxyMessageId::WifiVersionRequest as u16 => {
+                log_wifi_version_request(self.direction, payload);
+            }
+            x if x == ProxyMessageId::WifiVersionResponse as u16 => {
+                log_wifi_version_response(self.direction, payload);
+            }
             _ => {}
         }
     }
@@ -487,6 +499,15 @@ pub struct CarWifiMitmProxyOptions {
     pub ap_iface: String,
     pub rewrite_ip: String,
     pub listen_port: u16,
+    /// If HU WifiVersionRequest contains WifiProjectionProtocolInfo(ip/port) and no explicit
+    /// WifiStartRequest arrives, synthesize WifiStartRequest from that endpoint.
+    pub use_version_projection_fallback: bool,
+    /// Timeout for the wpa_supplicant control socket to appear in wpactrl mode.
+    pub wpactrl_socket_timeout: Duration,
+    /// Timeout for STA association + IPv4 readiness after a Wi-Fi join attempt.
+    pub wifi_association_timeout: Duration,
+    /// Timeout for DHCP/udhcpc attempts.
+    pub dhcp_timeout: Duration,
     pub bt_timeout: Duration,
     pub stopped: bool,
 }
@@ -570,27 +591,455 @@ fn success_status_payload() -> &'static [u8] {
     &[0x08, 0x00]
 }
 
+async fn read_phone_bootstrap_frame(
+    phone_stream: &mut Stream,
+    expected: ProxyMessageId,
+    cached_wifi_info_response: Option<&[u8]>,
+    timeout_duration: Duration,
+) -> Result<(u16, Vec<u8>)> {
+    let start = Instant::now();
+    loop {
+        let elapsed = start.elapsed();
+        if elapsed >= timeout_duration {
+            return Err(format!(
+                "timed out after {:?} waiting for PHONE {} during Wi-Fi bootstrap",
+                timeout_duration,
+                ProxyMessageId::name(expected as u16)
+            )
+            .into());
+        }
+        let remaining = timeout_duration - elapsed;
+        let (phone_id, phone_payload) = timeout(
+            remaining,
+            read_proxy_frame(phone_stream, "PHONE -> POC"),
+        )
+        .await??;
+
+        if phone_id == expected as u16 {
+            return Ok((phone_id, phone_payload));
+        }
+
+        if phone_id == ProxyMessageId::WifiPingRequest as u16 {
+            info!(
+                "{} 🧪 bt-wireless-proxy car-wifi-mitm: PHONE sent WifiPingRequest while waiting for {}; replying with WifiPingResponse and keeping state",
+                NAME,
+                ProxyMessageId::name(expected as u16)
+            );
+            send_proxy_frame(
+                phone_stream,
+                "POC -> PHONE",
+                ProxyMessageId::WifiPingResponse,
+                &phone_payload,
+            )
+            .await?;
+            continue;
+        }
+
+        if expected == ProxyMessageId::WifiStartResponse
+            && phone_id == ProxyMessageId::WifiInfoRequest as u16
+        {
+            if let Some(info_payload) = cached_wifi_info_response {
+                info!(
+                    "{} 🧪 bt-wireless-proxy car-wifi-mitm: PHONE sent another WifiInfoRequest while waiting for WifiStartResponse; re-sending cached HU WifiInfoResponse",
+                    NAME
+                );
+                send_proxy_frame(
+                    phone_stream,
+                    "POC -> PHONE",
+                    ProxyMessageId::WifiInfoResponse,
+                    info_payload,
+                )
+                .await?;
+                continue;
+            }
+        }
+
+        warn!(
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: expected PHONE {}, got {} ({}); returning unexpected frame to caller",
+            NAME,
+            ProxyMessageId::name(expected as u16),
+            phone_id,
+            ProxyMessageId::name(phone_id)
+        );
+        return Ok((phone_id, phone_payload));
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+struct WifiProjectionProtocolDebugInfo {
+    ip_address: Option<String>,
+    port: Option<u32>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct WifiVersionRequestDebugInfo {
+    major_version: Option<u64>,
+    minor_version: Option<u64>,
+    supported_wifi_channels: Vec<i64>,
+    car_make: Option<String>,
+    car_model: Option<String>,
+    car_year: Option<String>,
+    vehicle_id: Option<String>,
+    head_unit_make: Option<String>,
+    head_unit_model: Option<String>,
+    head_unit_software_build: Option<String>,
+    head_unit_software_version: Option<String>,
+    projection: WifiProjectionProtocolDebugInfo,
+}
+
+#[derive(Debug, Default, Clone)]
+struct WifiVersionResponseDebugInfo {
+    major_version: Option<u64>,
+    minor_version: Option<u64>,
+    device_serial: Option<String>,
+    status: Option<i64>,
+    selected_wifi_channel_type: Option<u64>,
+    device_id: Option<String>,
+    connectivity_lifetime_id: Option<String>,
+}
+
+fn read_proto_varint(buf: &[u8], offset: &mut usize) -> Option<u64> {
+    let mut shift = 0u32;
+    let mut value = 0u64;
+    while *offset < buf.len() && shift < 64 {
+        let b = buf[*offset];
+        *offset += 1;
+        value |= ((b & 0x7f) as u64) << shift;
+        if b & 0x80 == 0 {
+            return Some(value);
+        }
+        shift += 7;
+    }
+    None
+}
+
+fn signed_from_proto_varint(value: u64) -> i64 {
+    value as i64
+}
+
+fn try_utf8(bytes: &[u8]) -> Option<String> {
+    std::str::from_utf8(bytes).ok().map(|s| s.to_string())
+}
+
+fn skip_proto_value(payload: &[u8], offset: &mut usize, wire: u8) -> bool {
+    match wire {
+        0 => read_proto_varint(payload, offset).is_some(),
+        1 => {
+            if *offset + 8 > payload.len() { return false; }
+            *offset += 8;
+            true
+        }
+        2 => {
+            let Some(len) = read_proto_varint(payload, offset).map(|v| v as usize) else { return false; };
+            if *offset + len > payload.len() { return false; }
+            *offset += len;
+            true
+        }
+        5 => {
+            if *offset + 4 > payload.len() { return false; }
+            *offset += 4;
+            true
+        }
+        _ => false,
+    }
+}
+
+fn inspect_wifi_version_request(payload: &[u8]) -> WifiVersionRequestDebugInfo {
+    let mut info = WifiVersionRequestDebugInfo::default();
+    let mut offset = 0usize;
+    while offset < payload.len() {
+        let field_start = offset;
+        let Some(key) = read_proto_varint(payload, &mut offset) else { break; };
+        let field = (key >> 3) as u32;
+        let wire = (key & 0x07) as u8;
+        match wire {
+            0 => {
+                let Some(value) = read_proto_varint(payload, &mut offset) else { break; };
+                match field {
+                    1 => info.major_version = Some(value),
+                    2 => info.minor_version = Some(value),
+                    3 => info.supported_wifi_channels.push(signed_from_proto_varint(value)),
+                    _ => {}
+                }
+            }
+            2 => {
+                let Some(len) = read_proto_varint(payload, &mut offset).map(|v| v as usize) else { break; };
+                if offset + len > payload.len() { break; }
+                let data = &payload[offset..offset + len];
+                match field {
+                    // Some encoders may pack repeated int32 supported_wifi_channels.
+                    3 => {
+                        let mut packed_offset = 0usize;
+                        while packed_offset < data.len() {
+                            let Some(value) = read_proto_varint(data, &mut packed_offset) else { break; };
+                            info.supported_wifi_channels.push(signed_from_proto_varint(value));
+                        }
+                    }
+                    4 => inspect_wifi_version_head_unit_info(data, &mut info),
+                    5 => info.projection = inspect_wifi_projection_protocol_info(data),
+                    _ => {}
+                }
+                offset += len;
+            }
+            1 | 5 => {
+                if !skip_proto_value(payload, &mut offset, wire) { break; }
+            }
+            _ => {
+                warn!(
+                    "{} 🧪 bt-wireless-proxy: unsupported WifiVersionRequest proto wire type {} at field {} offset {}; stopping debug parse",
+                    NAME, wire, field, field_start
+                );
+                break;
+            }
+        }
+    }
+    info
+}
+
+fn inspect_wifi_version_head_unit_info(payload: &[u8], info: &mut WifiVersionRequestDebugInfo) {
+    let mut offset = 0usize;
+    while offset < payload.len() {
+        let field_start = offset;
+        let Some(key) = read_proto_varint(payload, &mut offset) else { break; };
+        let field = (key >> 3) as u32;
+        let wire = (key & 0x07) as u8;
+        match wire {
+            2 => {
+                let Some(len) = read_proto_varint(payload, &mut offset).map(|v| v as usize) else { break; };
+                if offset + len > payload.len() { break; }
+                let value = try_utf8(&payload[offset..offset + len]);
+                match field {
+                    1 => info.car_make = value,
+                    2 => info.car_model = value,
+                    3 => info.car_year = value,
+                    4 => info.vehicle_id = value,
+                    5 => info.head_unit_make = value,
+                    6 => info.head_unit_model = value,
+                    7 => info.head_unit_software_build = value,
+                    8 => info.head_unit_software_version = value,
+                    _ => {}
+                }
+                offset += len;
+            }
+            _ => {
+                if !skip_proto_value(payload, &mut offset, wire) {
+                    warn!(
+                        "{} 🧪 bt-wireless-proxy: unsupported WifiVersionRequest HeadUnitInfo proto wire type {} at field {} offset {}; stopping debug parse",
+                        NAME, wire, field, field_start
+                    );
+                    break;
+                }
+            }
+        }
+    }
+}
+
+fn inspect_wifi_projection_protocol_info(payload: &[u8]) -> WifiProjectionProtocolDebugInfo {
+    let mut info = WifiProjectionProtocolDebugInfo::default();
+    let mut offset = 0usize;
+    while offset < payload.len() {
+        let field_start = offset;
+        let Some(key) = read_proto_varint(payload, &mut offset) else { break; };
+        let field = (key >> 3) as u32;
+        let wire = (key & 0x07) as u8;
+        match wire {
+            0 => {
+                let Some(value) = read_proto_varint(payload, &mut offset) else { break; };
+                if field == 2 {
+                    info.port = Some(value as u32);
+                }
+            }
+            2 => {
+                let Some(len) = read_proto_varint(payload, &mut offset).map(|v| v as usize) else { break; };
+                if offset + len > payload.len() { break; }
+                if field == 1 {
+                    info.ip_address = try_utf8(&payload[offset..offset + len]);
+                }
+                offset += len;
+            }
+            _ => {
+                if !skip_proto_value(payload, &mut offset, wire) {
+                    warn!(
+                        "{} 🧪 bt-wireless-proxy: unsupported WifiProjectionProtocolInfo proto wire type {} at field {} offset {}; stopping debug parse",
+                        NAME, wire, field, field_start
+                    );
+                    break;
+                }
+            }
+        }
+    }
+    info
+}
+
+fn inspect_wifi_version_response(payload: &[u8]) -> WifiVersionResponseDebugInfo {
+    let mut info = WifiVersionResponseDebugInfo::default();
+    let mut offset = 0usize;
+    while offset < payload.len() {
+        let field_start = offset;
+        let Some(key) = read_proto_varint(payload, &mut offset) else { break; };
+        let field = (key >> 3) as u32;
+        let wire = (key & 0x07) as u8;
+        match wire {
+            0 => {
+                let Some(value) = read_proto_varint(payload, &mut offset) else { break; };
+                match field {
+                    1 => info.major_version = Some(value),
+                    2 => info.minor_version = Some(value),
+                    4 => info.status = Some(signed_from_proto_varint(value)),
+                    5 => info.selected_wifi_channel_type = Some(value),
+                    _ => {}
+                }
+            }
+            2 => {
+                let Some(len) = read_proto_varint(payload, &mut offset).map(|v| v as usize) else { break; };
+                if offset + len > payload.len() { break; }
+                let data = &payload[offset..offset + len];
+                match field {
+                    3 => info.device_serial = try_utf8(data),
+                    6 => inspect_wifi_version_device_info(data, &mut info),
+                    _ => {}
+                }
+                offset += len;
+            }
+            1 | 5 => {
+                if !skip_proto_value(payload, &mut offset, wire) { break; }
+            }
+            _ => {
+                warn!(
+                    "{} 🧪 bt-wireless-proxy: unsupported WifiVersionResponse proto wire type {} at field {} offset {}; stopping debug parse",
+                    NAME, wire, field, field_start
+                );
+                break;
+            }
+        }
+    }
+    info
+}
+
+fn inspect_wifi_version_device_info(payload: &[u8], info: &mut WifiVersionResponseDebugInfo) {
+    let mut offset = 0usize;
+    while offset < payload.len() {
+        let field_start = offset;
+        let Some(key) = read_proto_varint(payload, &mut offset) else { break; };
+        let field = (key >> 3) as u32;
+        let wire = (key & 0x07) as u8;
+        match wire {
+            2 => {
+                let Some(len) = read_proto_varint(payload, &mut offset).map(|v| v as usize) else { break; };
+                if offset + len > payload.len() { break; }
+                let value = try_utf8(&payload[offset..offset + len]);
+                match field {
+                    1 => info.device_id = value,
+                    2 => info.connectivity_lifetime_id = value,
+                    _ => {}
+                }
+                offset += len;
+            }
+            _ => {
+                if !skip_proto_value(payload, &mut offset, wire) {
+                    warn!(
+                        "{} 🧪 bt-wireless-proxy: unsupported WifiVersionResponse WifiDeviceInfo proto wire type {} at field {} offset {}; stopping debug parse",
+                        NAME, wire, field, field_start
+                    );
+                    break;
+                }
+            }
+        }
+    }
+}
+
+fn log_wifi_version_request(direction: &str, payload: &[u8]) -> WifiVersionRequestDebugInfo {
+    let info_msg = inspect_wifi_version_request(payload);
+    info!(
+        "{} 🧪 bt-wireless-proxy: {} parsed WifiVersionRequest major={:?} minor={:?} channels={:?} car_make={:?} car_model={:?} car_year={:?} hu_make={:?} hu_model={:?} hu_sw_build={:?} hu_sw_version={:?} projection_ip={:?} projection_port={:?}",
+        NAME,
+        direction,
+        info_msg.major_version,
+        info_msg.minor_version,
+        info_msg.supported_wifi_channels,
+        info_msg.car_make,
+        info_msg.car_model,
+        info_msg.car_year,
+        info_msg.head_unit_make,
+        info_msg.head_unit_model,
+        info_msg.head_unit_software_build,
+        info_msg.head_unit_software_version,
+        info_msg.projection.ip_address,
+        info_msg.projection.port
+    );
+    info_msg
+}
+
+fn log_wifi_version_response(direction: &str, payload: &[u8]) -> WifiVersionResponseDebugInfo {
+    let info_msg = inspect_wifi_version_response(payload);
+    info!(
+        "{} 🧪 bt-wireless-proxy: {} parsed WifiVersionResponse major={:?} minor={:?} serial={:?} status={:?} selected_channel={:?} device_id={:?} connectivity_lifetime_id={:?}",
+        NAME,
+        direction,
+        info_msg.major_version,
+        info_msg.minor_version,
+        info_msg.device_serial,
+        info_msg.status,
+        info_msg.selected_wifi_channel_type,
+        info_msg.device_id,
+        info_msg.connectivity_lifetime_id
+    );
+    info_msg
+}
+
+fn build_wifi_start_request_payload(ip_address: &str, port: u32) -> Result<Vec<u8>> {
+    if port > i32::MAX as u32 {
+        return Err(format!("WifiStartRequest port is out of range for generated proto setter: {}", port).into());
+    }
+
+    let mut req = WifiStartRequest::WifiStartRequest::new();
+    req.set_ip_address(ip_address.to_string());
+    req.set_port(port as i32);
+    Ok(req.write_to_bytes()?)
+}
+
 async fn read_hu_wifi_start_with_prebootstrap_passthrough(
     hu_stream: &mut Stream,
     phone_stream: &mut Stream,
+    use_version_projection_fallback: bool,
 ) -> Result<Vec<u8>> {
     // Some HUs start the AA Wireless RFCOMM bootstrap with a version exchange
-    // before WifiStartRequest. The original Proxy expected WifiStartRequest as
-    // the first frame, which worked with our fake HU but stalls on version-first
-    // implementations. Keep HU-initiated pre-bootstrap frames flowing until the
-    // real WifiStartRequest arrives; then stop and let the MITM rewrite path take
-    // over. Avoid a bidirectional select here because read_exact on RFCOMM is not
-    // cancellation-safe if a partial frame has already been consumed.
+    // before WifiStartRequest. Keep HU-initiated pre-bootstrap frames flowing
+    // until the real WifiStartRequest arrives. Correct Gearhead protos show that
+    // WifiVersionRequest can also carry WifiProjectionProtocolInfo(ip/port), so
+    // strict HUs may provide the projection endpoint there and then omit
+    // WifiStartRequest. When enabled, synthesize WifiStartRequest from that
+    // endpoint after a short wait to avoid a deadlock.
     let mut forwarded_frames = 0usize;
+    let mut last_projection_endpoint: Option<WifiProjectionProtocolDebugInfo> = None;
+    let mut pending_hu_frame: Option<(u16, Vec<u8>)> = None;
 
     loop {
-        let (hu_id, hu_payload) = read_proxy_frame(hu_stream, "HU -> POC pre-bootstrap").await?;
+        let (hu_id, hu_payload) = if let Some(frame) = pending_hu_frame.take() {
+            frame
+        } else {
+            read_proxy_frame(hu_stream, "HU -> POC pre-bootstrap").await?
+        };
+
         if hu_id == ProxyMessageId::WifiStartRequest as u16 {
             info!(
                 "{} 🧪 bt-wireless-proxy car-wifi-mitm: captured HU WifiStartRequest after forwarding {} pre-bootstrap frame(s)",
                 NAME, forwarded_frames
             );
             return Ok(hu_payload);
+        }
+
+        if hu_id == ProxyMessageId::WifiVersionRequest as u16 {
+            let req_info = inspect_wifi_version_request(&hu_payload);
+            if req_info.projection.ip_address.is_some() && req_info.projection.port.is_some() {
+                info!(
+                    "{} 🧪 bt-wireless-proxy car-wifi-mitm: HU WifiVersionRequest contains projection endpoint {:?}:{:?}; can use as fallback if WifiStartRequest is omitted",
+                    NAME,
+                    req_info.projection.ip_address,
+                    req_info.projection.port
+                );
+                last_projection_endpoint = Some(req_info.projection.clone());
+            }
         }
 
         forwarded_frames += 1;
@@ -635,6 +1084,35 @@ async fn read_hu_wifi_start_with_prebootstrap_passthrough(
                 &phone_payload,
             )
             .await?;
+
+            if use_version_projection_fallback {
+                if let Some(endpoint) = &last_projection_endpoint {
+                    if let (Some(ip), Some(port)) = (&endpoint.ip_address, endpoint.port) {
+                        info!(
+                            "{} 🧪 bt-wireless-proxy car-wifi-mitm: waiting up to 3s for explicit HU WifiStartRequest before using VersionRequest projection endpoint {}:{}",
+                            NAME, ip, port
+                        );
+                        match timeout(
+                            Duration::from_secs(3),
+                            read_proxy_frame(hu_stream, "HU -> POC pre-bootstrap"),
+                        )
+                        .await
+                        {
+                            Ok(Ok(next_frame)) => {
+                                pending_hu_frame = Some(next_frame);
+                            }
+                            Ok(Err(e)) => return Err(e),
+                            Err(_) => {
+                                info!(
+                                    "{} 🧪 bt-wireless-proxy car-wifi-mitm: no explicit HU WifiStartRequest after VersionResponse; synthesizing WifiStartRequest from VersionRequest projection endpoint {}:{}",
+                                    NAME, ip, port
+                                );
+                                return build_wifi_start_request_payload(ip, port);
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         if forwarded_frames > 32 {
@@ -884,9 +1362,30 @@ async fn wait_for_wpa_ctrl_socket(iface: &str, timeout_duration: Duration) -> Re
     .into())
 }
 
+async fn cleanup_wpactrl_wpa_supplicant(iface: &str, reason: &str) {
+    let iface = iface.trim();
+    warn!(
+        "{} 🧪 bt-wireless-proxy car-wifi-mitm: cleaning up wpactrl/wpa_supplicant for iface={} after {}",
+        NAME,
+        iface,
+        reason
+    );
+    let _ = run_shell_for_wifi(
+        "cleanup wpactrl wpa_supplicant",
+        "killall wpa_supplicant 2>/dev/null || true",
+        5,
+    )
+    .await;
+    if !iface.is_empty() {
+        let _ = tokio::fs::remove_file(format!("/var/run/wpa_supplicant/{}", iface)).await;
+    }
+}
+
 async fn run_wpactrl_wifi_join(
     iface: &str,
     info_msg: &WifiInfoResponse::WifiInfoResponse,
+    socket_timeout: Duration,
+    dhcp_timeout: Duration,
 ) -> Result<()> {
     let iface = iface.trim();
     if iface.is_empty() {
@@ -952,13 +1451,19 @@ async fn run_wpactrl_wifi_join(
         .into());
     }
 
-    let ctrl_path = wait_for_wpa_ctrl_socket(iface, Duration::from_secs(8)).await?;
+    let ctrl_path = match wait_for_wpa_ctrl_socket(iface, socket_timeout).await {
+        Ok(path) => path,
+        Err(e) => {
+            cleanup_wpactrl_wpa_supplicant(iface, "control socket timeout").await;
+            return Err(e);
+        }
+    };
     let ssid_cmd = wpa_quote(&ssid);
     let key_cmd = wpa_quote(&key);
     let bssid_cmd = bssid.clone();
     let ctrl_path_for_blocking = ctrl_path.clone();
 
-    tokio::task::spawn_blocking(move || -> Result<()> {
+    let wpactrl_result = tokio::task::spawn_blocking(move || -> Result<()> {
         let mut client = wpactrl::Client::builder()
             .ctrl_path(ctrl_path_for_blocking.as_str())
             .open()
@@ -997,33 +1502,21 @@ async fn run_wpactrl_wifi_join(
         let _ = wpactrl_cmd(&mut client, "RECONNECT");
         Ok(())
     })
-    .await??;
+    .await;
 
-    if command_available("udhcpc").await {
-        let output = timeout(
-            Duration::from_secs(35),
-            Command::new("udhcpc")
-                .args(["-i", iface, "-q", "-n", "-t", "6"])
-                .output(),
-        )
-        .await??;
-        if !output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!(
-                "{} 🧪 bt-wireless-proxy car-wifi-mitm: udhcpc after wpactrl did not return success status={} stdout={} stderr={}",
-                NAME,
-                output.status,
-                stdout.trim(),
-                stderr.trim()
-            );
+    match wpactrl_result {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            cleanup_wpactrl_wpa_supplicant(iface, "wpactrl command failure").await;
+            return Err(e);
         }
-    } else {
-        warn!(
-            "{} 🧪 bt-wireless-proxy car-wifi-mitm: udhcpc not available after wpactrl; assuming interface already has an IP or DHCP is managed elsewhere",
-            NAME
-        );
+        Err(e) => {
+            cleanup_wpactrl_wpa_supplicant(iface, "wpactrl blocking task failure").await;
+            return Err(format!("wpactrl blocking task failed: {}", e).into());
+        }
     }
+
+    let _ = run_udhcpc_for_iface(iface, "after wpactrl network selection", dhcp_timeout).await;
 
     Ok(())
 }
@@ -1092,23 +1585,95 @@ async fn iface_ipv4(iface: &str) -> Option<String> {
     None
 }
 
+async fn run_udhcpc_for_iface(iface: &str, reason: &str, timeout_duration: Duration) -> bool {
+    let iface = iface.trim();
+    if iface.is_empty() {
+        return false;
+    }
+    if !command_available("udhcpc").await {
+        warn!(
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: udhcpc not available while {}; cannot request DHCP lease for {}",
+            NAME, reason, iface
+        );
+        return false;
+    }
+
+    info!(
+        "{} 🧪 bt-wireless-proxy car-wifi-mitm: running udhcpc on {} because {}",
+        NAME, iface, reason
+    );
+    match timeout(
+        timeout_duration,
+        Command::new("udhcpc")
+            .args(["-i", iface, "-q", "-n", "-t", "6"])
+            .output(),
+    )
+    .await
+    {
+        Ok(Ok(output)) if output.status.success() => true,
+        Ok(Ok(output)) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!(
+                "{} 🧪 bt-wireless-proxy car-wifi-mitm: udhcpc on {} did not return success status={} stdout={} stderr={}",
+                NAME,
+                iface,
+                output.status,
+                stdout.trim(),
+                stderr.trim()
+            );
+            false
+        }
+        Ok(Err(e)) => {
+            warn!(
+                "{} 🧪 bt-wireless-proxy car-wifi-mitm: failed to run udhcpc on {}: {}",
+                NAME, iface, e
+            );
+            false
+        }
+        Err(_) => {
+            warn!(
+                "{} 🧪 bt-wireless-proxy car-wifi-mitm: timed out running udhcpc on {}",
+                NAME, iface
+            );
+            false
+        }
+    }
+}
+
 async fn wait_for_wifi_ready(iface: &str, ssid: &str, timeout_duration: Duration) -> bool {
     let start = Instant::now();
+    let mut logged_associated_without_ip = false;
     while start.elapsed() < timeout_duration {
-        if current_iw_ssid(iface).await.as_deref() == Some(ssid) {
+        let current_ssid = current_iw_ssid(iface).await;
+        let associated = if ssid.trim().is_empty() {
+            current_ssid.is_some()
+        } else {
+            current_ssid.as_deref() == Some(ssid)
+        };
+        let ip = iface_ipv4(iface).await;
+
+        if associated && ip.is_some() {
             info!(
-                "{} 🧪 bt-wireless-proxy car-wifi-mitm: iface {} is associated to ssid={}",
-                NAME, iface, ssid
+                "{} 🧪 bt-wireless-proxy car-wifi-mitm: iface {} is associated to ssid={} and has IPv4 {}",
+                NAME,
+                iface,
+                current_ssid.as_deref().unwrap_or("<unknown>"),
+                ip.as_deref().unwrap_or("<none>")
             );
             return true;
         }
-        if let Some(ip) = iface_ipv4(iface).await {
+
+        if associated && ip.is_none() && !logged_associated_without_ip {
             info!(
-                "{} 🧪 bt-wireless-proxy car-wifi-mitm: iface {} has IPv4 {} after Wi-Fi join",
-                NAME, iface, ip
+                "{} 🧪 bt-wireless-proxy car-wifi-mitm: iface {} is associated to ssid={} but has no IPv4 yet; waiting for DHCP",
+                NAME,
+                iface,
+                current_ssid.as_deref().unwrap_or(ssid)
             );
-            return true;
+            logged_associated_without_ip = true;
         }
+
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     false
@@ -1156,7 +1721,7 @@ async fn prepare_sta_iface_takeover(iface: &str) -> Result<String> {
     run_shell_for_wifi(
         "switch iface to managed",
         &format!(
-            "ip link set {i} down && iw dev {i} set type managed && ip link set {i} up",
+            "ip link set {i} down && ip addr flush dev {i} && iw dev {i} set type managed && ip link set {i} up",
             i = shell_quote(iface)
         ),
         10,
@@ -1234,6 +1799,7 @@ async fn prepare_sta_iface_keep_ap(sta_iface: &str, ap_iface: &str) -> Result<St
 async fn run_wpa_supplicant_wifi_join(
     iface: &str,
     info_msg: &WifiInfoResponse::WifiInfoResponse,
+    dhcp_timeout: Duration,
 ) -> Result<()> {
     let iface = iface.trim();
     if iface.is_empty() {
@@ -1281,31 +1847,7 @@ async fn run_wpa_supplicant_wifi_join(
 
     tokio::time::sleep(Duration::from_secs(5)).await;
 
-    if command_available("udhcpc").await {
-        let output = timeout(
-            Duration::from_secs(35),
-            Command::new("udhcpc")
-                .args(["-i", iface, "-q", "-n", "-t", "6"])
-                .output(),
-        )
-        .await??;
-        if !output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!(
-                "{} 🧪 bt-wireless-proxy car-wifi-mitm: udhcpc did not return success status={} stdout={} stderr={}",
-                NAME,
-                output.status,
-                stdout.trim(),
-                stderr.trim()
-            );
-        }
-    } else {
-        warn!(
-            "{} 🧪 bt-wireless-proxy car-wifi-mitm: udhcpc not available; assuming interface already has an IP or DHCP is managed elsewhere",
-            NAME
-        );
-    }
+    let _ = run_udhcpc_for_iface(iface, "after wpa_supplicant start", dhcp_timeout).await;
 
     Ok(())
 }
@@ -1319,6 +1861,9 @@ async fn run_car_wifi_join(
     sta_iface: &str,
     ap_iface: &str,
     info_msg: &WifiInfoResponse::WifiInfoResponse,
+    wpactrl_socket_timeout: Duration,
+    wifi_association_timeout: Duration,
+    dhcp_timeout: Duration,
 ) -> Result<String> {
     let ssid = info_msg.ssid().trim();
     let base_iface = base_iface.trim();
@@ -1341,16 +1886,30 @@ async fn run_car_wifi_join(
         && current_iw_ssid(requested_sta_iface).await.as_deref() == Some(ssid)
     {
         info!(
-            "{} 🧪 bt-wireless-proxy car-wifi-mitm: iface {} is already associated to ssid={}",
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: iface {} is already associated to ssid={}; verifying IPv4 before reusing it",
             NAME, requested_sta_iface, ssid
         );
-        return Ok(requested_sta_iface.to_string());
+        if wait_for_wifi_ready(requested_sta_iface, ssid, Duration::from_secs(2)).await {
+            return Ok(requested_sta_iface.to_string());
+        }
+        warn!(
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: iface {} is associated to ssid={} but IPv4 is not ready; requesting DHCP before deciding to rejoin",
+            NAME, requested_sta_iface, ssid
+        );
+        let _ = run_udhcpc_for_iface(requested_sta_iface, "existing association has no IPv4", dhcp_timeout).await;
+        if wait_for_wifi_ready(requested_sta_iface, ssid, wifi_association_timeout).await {
+            return Ok(requested_sta_iface.to_string());
+        }
+        warn!(
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: existing association on {} still has no IPv4; continuing with configured Wi-Fi join flow",
+            NAME, requested_sta_iface
+        );
     }
 
     if !custom_template.trim().is_empty() {
         run_wifi_join_custom_cmd(custom_template, requested_sta_iface, info_msg).await?;
         if requested_sta_iface.is_empty()
-            || wait_for_wifi_ready(requested_sta_iface, ssid, Duration::from_secs(15)).await
+            || wait_for_wifi_ready(requested_sta_iface, ssid, wifi_association_timeout).await
         {
             return Ok(requested_sta_iface.to_string());
         }
@@ -1385,9 +1944,9 @@ async fn run_car_wifi_join(
     let mut errors = Vec::new();
 
     if join_control == "wpactrl" {
-        match run_wpactrl_wifi_join(&join_iface, info_msg).await {
+        match run_wpactrl_wifi_join(&join_iface, info_msg, wpactrl_socket_timeout, dhcp_timeout).await {
             Ok(()) => {
-                if wait_for_wifi_ready(&join_iface, ssid, Duration::from_secs(25)).await {
+                if wait_for_wifi_ready(&join_iface, ssid, wifi_association_timeout).await {
                     return Ok(join_iface);
                 }
                 return Err("wpactrl returned success but association/IPv4 was not observed".into());
@@ -1397,9 +1956,9 @@ async fn run_car_wifi_join(
     }
 
     if join_control == "wpa_supplicant" {
-        match run_wpa_supplicant_wifi_join(&join_iface, info_msg).await {
+        match run_wpa_supplicant_wifi_join(&join_iface, info_msg, dhcp_timeout).await {
             Ok(()) => {
-                if wait_for_wifi_ready(&join_iface, ssid, Duration::from_secs(25)).await {
+                if wait_for_wifi_ready(&join_iface, ssid, wifi_association_timeout).await {
                     return Ok(join_iface);
                 }
                 return Err("wpa_supplicant returned success but association/IPv4 was not observed".into());
@@ -1411,7 +1970,7 @@ async fn run_car_wifi_join(
     if join_control == "wpa_cli" {
         match run_wpa_cli_wifi_join(&join_iface, info_msg).await {
             Ok(()) => {
-                if wait_for_wifi_ready(&join_iface, ssid, Duration::from_secs(25)).await {
+                if wait_for_wifi_ready(&join_iface, ssid, wifi_association_timeout).await {
                     return Ok(join_iface);
                 }
                 return Err("wpa_cli returned success but association/IPv4 was not observed".into());
@@ -1423,7 +1982,7 @@ async fn run_car_wifi_join(
     if join_control == "nmcli" {
         match run_nmcli_wifi_join(&join_iface, info_msg).await {
             Ok(()) => {
-                if wait_for_wifi_ready(&join_iface, ssid, Duration::from_secs(25)).await {
+                if wait_for_wifi_ready(&join_iface, ssid, wifi_association_timeout).await {
                     return Ok(join_iface);
                 }
                 return Err("nmcli returned success but association/IPv4 was not observed".into());
@@ -1442,7 +2001,7 @@ async fn run_car_wifi_join(
     if command_available("nmcli").await {
         match run_nmcli_wifi_join(&join_iface, info_msg).await {
             Ok(()) => {
-                if wait_for_wifi_ready(&join_iface, ssid, Duration::from_secs(25)).await {
+                if wait_for_wifi_ready(&join_iface, ssid, wifi_association_timeout).await {
                     return Ok(join_iface);
                 }
                 errors.push("nmcli returned success but association/IPv4 was not observed".to_string());
@@ -1459,7 +2018,7 @@ async fn run_car_wifi_join(
     if command_available("wpa_cli").await {
         match run_wpa_cli_wifi_join(&join_iface, info_msg).await {
             Ok(()) => {
-                if wait_for_wifi_ready(&join_iface, ssid, Duration::from_secs(25)).await {
+                if wait_for_wifi_ready(&join_iface, ssid, wifi_association_timeout).await {
                     return Ok(join_iface);
                 }
                 errors.push("wpa_cli returned success but association/IPv4 was not observed".to_string());
@@ -1474,9 +2033,9 @@ async fn run_car_wifi_join(
     }
 
     if command_available("wpa_supplicant").await {
-        match run_wpa_supplicant_wifi_join(&join_iface, info_msg).await {
+        match run_wpa_supplicant_wifi_join(&join_iface, info_msg, dhcp_timeout).await {
             Ok(()) => {
-                if wait_for_wifi_ready(&join_iface, ssid, Duration::from_secs(25)).await {
+                if wait_for_wifi_ready(&join_iface, ssid, wifi_association_timeout).await {
                     return Ok(join_iface);
                 }
                 errors.push("wpa_supplicant returned success but association/IPv4 was not observed".to_string());
@@ -1497,7 +2056,26 @@ async fn run_car_wifi_join(
     }
 }
 
-async fn discover_rewrite_ip(target_ip: &str, iface: &str, override_ip: &str) -> Result<String> {
+fn ipv4_likely_same_lan(src_ip: &str, target_ip: &str) -> bool {
+    let Ok(src) = src_ip.parse::<std::net::Ipv4Addr>() else { return true; };
+    let Ok(target) = target_ip.parse::<std::net::Ipv4Addr>() else { return true; };
+    let s = src.octets();
+    let t = target.octets();
+
+    if s[0] == 10 || t[0] == 10 {
+        return s[0] == t[0];
+    }
+    if s[0] == 192 || t[0] == 192 {
+        return s[0] == t[0] && s[1] == t[1] && s[2] == t[2];
+    }
+    if s[0] == 172 || t[0] == 172 {
+        return s[0] == 172 && t[0] == 172 && s[1] == t[1];
+    }
+
+    s[0] == t[0] && s[1] == t[1]
+}
+
+async fn discover_rewrite_ip(target_ip: &str, iface: &str, override_ip: &str, dhcp_timeout: Duration) -> Result<String> {
     let override_ip = override_ip.trim();
     if !override_ip.is_empty() {
         info!(
@@ -1520,6 +2098,13 @@ async fn discover_rewrite_ip(target_ip: &str, iface: &str, override_ip: &str) ->
             let tokens: Vec<&str> = stdout.split_whitespace().collect();
             for pair in tokens.windows(2) {
                 if pair[0] == "src" {
+                    if !ipv4_likely_same_lan(pair[1], target_ip.trim()) {
+                        warn!(
+                            "{} 🧪 bt-wireless-proxy car-wifi-mitm: ignoring route src {} as rewrite IP because it does not look reachable for HU endpoint {}; will try iface/DHCP fallback",
+                            NAME, pair[1], target_ip.trim()
+                        );
+                        continue;
+                    }
                     info!(
                         "{} 🧪 bt-wireless-proxy car-wifi-mitm: discovered rewrite IP {} via route to HU {}",
                         NAME, pair[1], target_ip
@@ -1550,6 +2135,13 @@ async fn discover_rewrite_ip(target_ip: &str, iface: &str, override_ip: &str) ->
             for pair in tokens.windows(2) {
                 if pair[0] == "inet" {
                     let ip = pair[1].split('/').next().unwrap_or(pair[1]);
+                    if !target_ip.trim().is_empty() && !ipv4_likely_same_lan(ip, target_ip.trim()) {
+                        warn!(
+                            "{} 🧪 bt-wireless-proxy car-wifi-mitm: ignoring iface {} IPv4 {} as rewrite IP because it does not look reachable for HU endpoint {}; set bt_wireless_proxy_rewrite_ip to override",
+                            NAME, iface, ip, target_ip.trim()
+                        );
+                        continue;
+                    }
                     info!(
                         "{} 🧪 bt-wireless-proxy car-wifi-mitm: discovered rewrite IP {} from iface {}",
                         NAME, ip, iface
@@ -1557,6 +2149,49 @@ async fn discover_rewrite_ip(target_ip: &str, iface: &str, override_ip: &str) ->
                     return Ok(ip.to_string());
                 }
             }
+        }
+    }
+
+    if !iface.is_empty() && !target_ip.trim().is_empty() {
+        warn!(
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: no suitable rewrite IP found for HU {}; requesting DHCP on {} and retrying once",
+            NAME, target_ip.trim(), iface
+        );
+        let _ = run_udhcpc_for_iface(iface, "rewrite IP discovery had no suitable source address", dhcp_timeout).await;
+
+        if let Ok(Ok(output)) = timeout(
+            Duration::from_secs(5),
+            Command::new("ip")
+                .args(["-4", "route", "get", target_ip.trim()])
+                .output(),
+        )
+        .await
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let tokens: Vec<&str> = stdout.split_whitespace().collect();
+            for pair in tokens.windows(2) {
+                if pair[0] == "src" && ipv4_likely_same_lan(pair[1], target_ip.trim()) {
+                    info!(
+                        "{} 🧪 bt-wireless-proxy car-wifi-mitm: discovered rewrite IP {} via route to HU {} after DHCP retry",
+                        NAME, pair[1], target_ip
+                    );
+                    return Ok(pair[1].to_string());
+                }
+            }
+        }
+
+        if let Some(ip) = iface_ipv4(iface).await {
+            if ipv4_likely_same_lan(&ip, target_ip.trim()) {
+                info!(
+                    "{} 🧪 bt-wireless-proxy car-wifi-mitm: discovered rewrite IP {} from iface {} after DHCP retry",
+                    NAME, ip, iface
+                );
+                return Ok(ip);
+            }
+            warn!(
+                "{} 🧪 bt-wireless-proxy car-wifi-mitm: iface {} still has non-matching IPv4 {} after DHCP retry for HU {}",
+                NAME, iface, ip, target_ip.trim()
+            );
         }
     }
 
@@ -1571,6 +2206,7 @@ pub struct Bluetooth {
     companion_pairing_agent: Option<AgentHandle>,
     current_index: usize,
     dongle_mode: bool,
+    adapter_alias: String,
 }
 
 // Create and configure the Bluetooth adapter
@@ -1640,6 +2276,7 @@ pub async fn init(
         companion_pairing_agent: None,
         current_index: 0,
         dongle_mode,
+        adapter_alias: alias,
     })
 }
 
@@ -2705,13 +3342,19 @@ impl Bluetooth {
         let _hu_client_profile_guard = (hu_client_profile_session, hu_client_profile_handle);
 
         info!(
-            "{} 🧪 bt-wireless-proxy car-wifi-mitm: connected to HU {}; starting delayed bootstrap MITM; waiting up to 10s for HU bootstrap frame",
-            NAME, hu_endpoint
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: connected to HU {}; starting delayed bootstrap MITM; waiting up to 10s for HU bootstrap frame; version_projection_fallback={}",
+            NAME,
+            hu_endpoint,
+            options.use_version_projection_fallback
         );
 
         let hu_start_payload = match timeout(
             Duration::from_secs(10),
-            read_hu_wifi_start_with_prebootstrap_passthrough(&mut hu_stream, &mut phone_stream),
+            read_hu_wifi_start_with_prebootstrap_passthrough(
+                &mut hu_stream,
+                &mut phone_stream,
+                options.use_version_projection_fallback,
+            ),
         )
         .await
         {
@@ -2763,11 +3406,14 @@ impl Bluetooth {
             &options.sta_iface,
             &options.ap_iface,
             &hu_wifi_info,
+            options.wpactrl_socket_timeout,
+            options.wifi_association_timeout,
+            options.dhcp_timeout,
         )
         .await?;
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        let rewrite_ip = discover_rewrite_ip(&hu_tcp_ip, &join_iface, &options.rewrite_ip).await?;
+        let rewrite_ip = discover_rewrite_ip(&hu_tcp_ip, &join_iface, &options.rewrite_ip, options.dhcp_timeout).await?;
         let listen_addr = format!("0.0.0.0:{}", listen_port);
         let listener = TcpListener::bind(listen_addr.as_str()).await?;
         info!(
@@ -2787,11 +3433,16 @@ impl Bluetooth {
         )
         .await?;
 
-        let (phone_info_req_id, _phone_info_req_payload) =
-            read_proxy_frame(&mut phone_stream, "PHONE -> POC").await?;
+        let (phone_info_req_id, _phone_info_req_payload) = read_phone_bootstrap_frame(
+            &mut phone_stream,
+            ProxyMessageId::WifiInfoRequest,
+            None,
+            Duration::from_secs(30),
+        )
+        .await?;
         if phone_info_req_id != ProxyMessageId::WifiInfoRequest as u16 {
             warn!(
-                "{} 🧪 bt-wireless-proxy car-wifi-mitm: expected PHONE WifiInfoRequest, got {} ({})",
+                "{} 🧪 bt-wireless-proxy car-wifi-mitm: continuing after unexpected PHONE frame while waiting for WifiInfoRequest: {} ({})",
                 NAME,
                 phone_info_req_id,
                 ProxyMessageId::name(phone_info_req_id)
@@ -2810,8 +3461,13 @@ impl Bluetooth {
         )
         .await?;
 
-        let (phone_start_resp_id, phone_start_resp_payload) =
-            read_proxy_frame(&mut phone_stream, "PHONE -> POC").await?;
+        let (phone_start_resp_id, phone_start_resp_payload) = read_phone_bootstrap_frame(
+            &mut phone_stream,
+            ProxyMessageId::WifiStartResponse,
+            Some(&hu_info_payload),
+            Duration::from_secs(45),
+        )
+        .await?;
         if phone_start_resp_id != ProxyMessageId::WifiStartResponse as u16 {
             warn!(
                 "{} 🧪 bt-wireless-proxy car-wifi-mitm: expected PHONE WifiStartResponse, got {} ({})",

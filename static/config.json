@@ -162,6 +162,24 @@
           "advanced": true,
           "requires": "bt_wireless_proxy"
         },
+        "bt_wireless_proxy_wpactrl_socket_timeout_secs": {
+          "typ": "integer",
+          "description": "EXPERIMENTAL Proxy car-wifi-mitm: seconds to wait for /var/run/wpa_supplicant/<iface> to appear after starting wpa_supplicant in wpactrl mode. Default: 12.",
+          "advanced": true,
+          "requires": "bt_wireless_proxy"
+        },
+        "bt_wireless_proxy_wifi_association_timeout_secs": {
+          "typ": "integer",
+          "description": "EXPERIMENTAL Proxy car-wifi-mitm: seconds to wait for the STA interface to associate to the HU/car SSID and have an IPv4 address after a Wi-Fi join attempt. Default: 30.",
+          "advanced": true,
+          "requires": "bt_wireless_proxy"
+        },
+        "bt_wireless_proxy_dhcp_timeout_secs": {
+          "typ": "integer",
+          "description": "EXPERIMENTAL Proxy car-wifi-mitm: seconds to allow udhcpc/DHCP attempts to run. Default: 30.",
+          "advanced": true,
+          "requires": "bt_wireless_proxy"
+        },
         "bt_wireless_proxy_car_wifi_keep_ap": {
           "typ": "boolean",
           "description": "EXPERIMENTAL Proxy car-wifi-mitm: keep aa-proxy AP up and join HU Wi-Fi through a separate managed STA interface. Requires AP+managed support on the same channel.",
@@ -189,6 +207,12 @@
         "bt_wireless_proxy_listen_port": {
           "typ": "integer",
           "description": "EXPERIMENTAL Proxy car-wifi-mitm: local TCP port where aa-proxy listens for the phone, default 5288.",
+          "advanced": true,
+          "requires": "bt_wireless_proxy"
+        },
+        "bt_wireless_proxy_use_version_projection_fallback": {
+          "typ": "boolean",
+          "description": "EXPERIMENTAL Proxy car-wifi-mitm: if WifiVersionRequest includes WifiProjectionProtocolInfo ip/port and HU does not send explicit WifiStartRequest, synthesize WifiStartRequest from that endpoint. Default: true.",
           "advanced": true,
           "requires": "bt_wireless_proxy"
         }
