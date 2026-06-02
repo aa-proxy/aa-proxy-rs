@@ -383,6 +383,14 @@ pub struct AppConfig {
     /// wpa_supplicant/wpa_cli/nmcli = force one backend.
     #[serde(alias = "bt_wireless_poc_wifi_join_control")]
     pub bt_wireless_proxy_wifi_join_control: String,
+    /// car-wifi-mitm mode: how long to wait for /var/run/wpa_supplicant/<iface>
+    /// after starting wpa_supplicant for wpactrl mode.
+    pub bt_wireless_proxy_wpactrl_socket_timeout_secs: u64,
+    /// car-wifi-mitm mode: how long to wait for the STA interface to be
+    /// associated to the HU/car SSID and have an IPv4 address.
+    pub bt_wireless_proxy_wifi_association_timeout_secs: u64,
+    /// car-wifi-mitm mode: how long to let udhcpc/DHCP attempts run.
+    pub bt_wireless_proxy_dhcp_timeout_secs: u64,
     /// car-wifi-mitm mode: keep the aa-proxy AP up and join the car Wi-Fi with a
     /// separate managed STA interface. Requires AP+managed support on the same channel.
     #[serde(alias = "bt_wireless_poc_car_wifi_keep_ap")]
@@ -402,6 +410,11 @@ pub struct AppConfig {
     /// car-wifi-mitm mode: local TCP port where aa-proxy listens for the phone.
     #[serde(alias = "bt_wireless_poc_proxy_listen_port")]
     pub bt_wireless_proxy_listen_port: u16,
+    /// car-wifi-mitm mode: if HU WifiVersionRequest carries WifiProjectionProtocolInfo
+    /// ip/port but no explicit WifiStartRequest follows, synthesize WifiStartRequest
+    /// from that endpoint to avoid version-bootstrap deadlock on stricter HUs.
+    #[serde(alias = "bt_wireless_poc_use_version_projection_fallback")]
+    pub bt_wireless_proxy_use_version_projection_fallback: bool,
     pub debug: bool,
     /// Enable packet debug output independently from global debug logging.
     /// When enabled, pkt_debug lines are emitted at INFO level so `debug = false` can be kept.
@@ -776,11 +789,15 @@ impl Default for AppConfig {
             bt_wireless_proxy_car_wifi_join_cmd: String::new(),
             bt_wireless_proxy_car_wifi_auto_join: false,
             bt_wireless_proxy_wifi_join_control: "auto".to_string(),
+            bt_wireless_proxy_wpactrl_socket_timeout_secs: 12,
+            bt_wireless_proxy_wifi_association_timeout_secs: 30,
+            bt_wireless_proxy_dhcp_timeout_secs: 30,
             bt_wireless_proxy_car_wifi_keep_ap: false,
             bt_wireless_proxy_car_wifi_sta_iface: String::new(),
             bt_wireless_proxy_car_wifi_ap_iface: String::new(),
             bt_wireless_proxy_rewrite_ip: String::new(),
             bt_wireless_proxy_listen_port: 5288,
+            bt_wireless_proxy_use_version_projection_fallback: true,
             debug: false,
             pkt_debug: false,
             hexdump_level: HexdumpLevel::Disabled,
@@ -1063,6 +1080,12 @@ impl AppConfig {
             value(self.bt_wireless_proxy_car_wifi_auto_join);
         doc["bt_wireless_proxy_wifi_join_control"] =
             value(self.bt_wireless_proxy_wifi_join_control.clone());
+        doc["bt_wireless_proxy_wpactrl_socket_timeout_secs"] =
+            value(self.bt_wireless_proxy_wpactrl_socket_timeout_secs as i64);
+        doc["bt_wireless_proxy_wifi_association_timeout_secs"] =
+            value(self.bt_wireless_proxy_wifi_association_timeout_secs as i64);
+        doc["bt_wireless_proxy_dhcp_timeout_secs"] =
+            value(self.bt_wireless_proxy_dhcp_timeout_secs as i64);
         doc["bt_wireless_proxy_car_wifi_keep_ap"] =
             value(self.bt_wireless_proxy_car_wifi_keep_ap);
         doc["bt_wireless_proxy_car_wifi_sta_iface"] =
@@ -1072,6 +1095,8 @@ impl AppConfig {
         doc["bt_wireless_proxy_rewrite_ip"] = value(self.bt_wireless_proxy_rewrite_ip.clone());
         doc["bt_wireless_proxy_listen_port"] =
             value(self.bt_wireless_proxy_listen_port as i64);
+        doc["bt_wireless_proxy_use_version_projection_fallback"] =
+            value(self.bt_wireless_proxy_use_version_projection_fallback);
         doc["debug"] = value(self.debug);
         doc["pkt_debug"] = value(self.pkt_debug);
         doc["hexdump_level"] = value(format!("{:?}", self.hexdump_level));
