@@ -473,6 +473,20 @@ async fn tokio_main(
                 }
             }
         }
+        if cfg.bt_wireless_proxy {
+            if let Some(ref mut bluetooth) = bluetooth {
+                if let Err(e) = bluetooth
+                    .register_phone_like_sdp_profiles(
+                        cfg.bt_wireless_proxy_phone_like_sdp_profiles,
+                        &cfg.bt_wireless_proxy_phone_like_sdp_profile_set,
+                    )
+                    .await
+                {
+                    warn!("{} bt_wireless_proxy phone-like SDP registration failed: {}", NAME, e);
+                }
+            }
+        }
+
         if let Some(ref mut bluetooth) = bluetooth {
             if let Err(e) = bluetooth
                 .start_companion_bt(state.clone(), cfg.enable_companion_bt)
@@ -565,6 +579,8 @@ async fn tokio_main(
                                 wpactrl_socket_timeout: Duration::from_secs(cfg.bt_wireless_proxy_wpactrl_socket_timeout_secs.max(1)),
                                 wifi_association_timeout: Duration::from_secs(cfg.bt_wireless_proxy_wifi_association_timeout_secs.max(1)),
                                 dhcp_timeout: Duration::from_secs(cfg.bt_wireless_proxy_dhcp_timeout_secs.max(1)),
+                                hu_first_connect: cfg.bt_wireless_proxy_hu_first_connect,
+                                hu_first_wait_phone_timeout: Duration::from_secs(cfg.bt_wireless_proxy_hu_first_wait_phone_secs.max(1)),
                                 bt_timeout: Duration::from_secs(cfg.bt_timeout_secs.into()),
                                 stopped: cfg.action_requested == Some(Action::Stop),
                             },

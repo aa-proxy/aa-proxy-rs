@@ -142,6 +142,34 @@
           "advanced": true,
           "requires": "bt_wireless_proxy"
         },
+        "bt_wireless_proxy_phone_like_sdp_profiles": {
+          "typ": "boolean",
+          "description": "AA Wireless proxy: register additional dummy phone-like SDP service UUIDs while bt_wireless_proxy is enabled. This is for HUs such as MBUX that classify paired devices by SDP profile list. The AA Wireless UUID remains registered and is never removed. Dummy profiles only advertise UUIDs and log/close incoming connections; they do not implement HFP/PBAP/MAP semantics. Default: false.",
+          "advanced": true,
+          "requires": "bt_wireless_proxy"
+        },
+        "bt_wireless_proxy_phone_like_sdp_profile_set": {
+          "typ": "select",
+          "description": "AA Wireless proxy: dummy phone-like SDP profile set. minimal advertises HFP AG, PBAP Server, MAP Server, OPP, Audio Source, and AVRCP Target. full additionally advertises HSP AG, AVRCP Remote/Controller, PANU, NAP, and PnP Information. Use minimal first.",
+          "values": [
+            "minimal",
+            "full"
+          ],
+          "advanced": true,
+          "requires": "bt_wireless_proxy_phone_like_sdp_profiles"
+        },
+        "bt_wireless_proxy_hu_first_connect": {
+          "typ": "boolean",
+          "description": "EXPERIMENTAL Proxy car-wifi-mitm: connect to the HU AA Wireless RFCOMM endpoint first, then trigger/wait for the phone. This helps HUs that activate Android Auto only after their own advertised AA Wireless UUID is connected. HU frames received before the phone arrives are buffered and replayed. Default: false.",
+          "advanced": true,
+          "requires": "bt_wireless_proxy"
+        },
+        "bt_wireless_proxy_hu_first_wait_phone_secs": {
+          "typ": "integer",
+          "description": "EXPERIMENTAL Proxy car-wifi-mitm HU-first mode: seconds to keep the HU RFCOMM connection open while waiting for the phone AA RFCOMM connection. Default: 30.",
+          "advanced": true,
+          "requires": "bt_wireless_proxy_hu_first_connect"
+        },
         "bt_wireless_proxy_hu_channel": {
           "typ": "integer",
           "description": "EXPERIMENTAL Proxy: RFCOMM channel for HU AA Wireless profile. Leave empty or use 0 for BlueZ SDP/ConnectProfile auto-discovery; set a positive value to force manual RFCOMM.",
