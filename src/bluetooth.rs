@@ -1688,7 +1688,7 @@ async fn run_wpactrl_wifi_join(
     let bssid = info_msg.bssid().trim().to_string();
     let is_open = key.is_empty() || info_msg.security_mode() == SecurityMode::OPEN;
     let conf_path = format!("/tmp/aa-proxy-car-wifi-{}-wpactrl.conf", iface.replace('/', "_"));
-    tokio::fs::write(&conf_path, wpa_supplicant_config(info_msg)).await?;
+    tokio::fs::write(&conf_path, wpa_supplicant_config(info_msg, false)).await?;
 
     info!(
         "{} 🧪 bt-wireless-proxy car-wifi-mitm: auto Wi-Fi join using wpactrl+wpa_supplicant iface={} ssid={} bssid={} key_len={}",
@@ -1712,32 +1712,9 @@ async fn run_wpactrl_wifi_join(
     let _ = tokio::fs::remove_file(format!("/var/run/wpa_supplicant/{}", iface)).await;
     let _ = tokio::fs::remove_file(format!("/run/wpa_supplicant/{}", iface)).await;
 
-    let output = timeout(
-        Duration::from_secs(15),
-        Command::new("wpa_supplicant")
-            .args([
-                "-B",
-                "-i",
-                iface,
-                "-c",
-                conf_path.as_str(),
-                "-D",
-                "nl80211,wext",
-            ])
-            .output(),
-    )
-    .await??;
-    if !output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "wpa_supplicant for wpactrl failed status={} stdout={} stderr={}",
-            output.status,
-            stdout.trim(),
-            stderr.trim()
-        )
-        .into());
-    }
+    start_wpa_supplicant_process(iface, &conf_path, Some("/var/run/wpa_supplicant"))
+        .await
+        .map_err(|e| format!("wpa_supplicant for wpactrl: {}", e))?;
 
     let ctrl_path = match wait_for_wpa_ctrl_socket(iface, socket_timeout).await {
         Ok(path) => path,
@@ -1967,30 +1944,79 @@ async fn wait_for_wifi_ready(iface: &str, ssid: &str, timeout_duration: Duration
     false
 }
 
-fn wpa_supplicant_config(info_msg: &WifiInfoResponse::WifiInfoResponse) -> String {
+fn wpa_supplicant_config(
+    info_msg: &WifiInfoResponse::WifiInfoResponse,
+    include_bssid: bool,
+) -> String {
     let ssid = info_msg.ssid();
     let key = info_msg.key();
     let bssid = info_msg.bssid().trim();
-    let bssid_line = if bssid.is_empty() {
-        String::new()
-    } else {
+    let bssid_line = if include_bssid && !bssid.is_empty() {
         format!("    bssid={}\n", bssid)
+    } else {
+        String::new()
     };
 
+    // Keep this file deliberately minimal. Some embedded/Android-derived
+    // wpa_supplicant builds used by AA boxes reject otherwise-standard global
+    // config keys such as `ctrl_interface=`, `update_config=` and `ap_scan=`
+    // when they are provided from a generated file. The control socket, when
+    // needed for wpactrl, is requested with the `-C` command-line option
+    // instead of a config-file global.
     if key.is_empty() || info_msg.security_mode() == SecurityMode::OPEN {
         format!(
-            "ctrl_interface=/var/run/wpa_supplicant\nupdate_config=1\nap_scan=1\nnetwork={{\n    ssid={}\n{}    scan_ssid=1\n    key_mgmt=NONE\n}}\n",
+            "network={{\n    ssid={}\n{}    scan_ssid=1\n    key_mgmt=NONE\n}}\n",
             wpa_quote(ssid),
             bssid_line
         )
     } else {
         format!(
-            "ctrl_interface=/var/run/wpa_supplicant\nupdate_config=1\nap_scan=1\nnetwork={{\n    ssid={}\n{}    scan_ssid=1\n    psk={}\n    key_mgmt=WPA-PSK\n}}\n",
+            "network={{\n    ssid={}\n{}    scan_ssid=1\n    key_mgmt=WPA-PSK\n    psk={}\n}}\n",
             wpa_quote(ssid),
             bssid_line,
             wpa_quote(key)
         )
     }
+}
+
+fn wpa_supplicant_parse_failure_text(stdout: &str, stderr: &str) -> bool {
+    let combined = format!("{}\n{}", stdout, stderr).to_ascii_lowercase();
+    combined.contains("failed to read or parse configuration")
+        || combined.contains("invalid configuration line")
+        || combined.contains("unknown global field")
+}
+
+async fn start_wpa_supplicant_process(
+    iface: &str,
+    conf_path: &str,
+    ctrl_dir: Option<&str>,
+) -> Result<()> {
+    let mut cmd = Command::new("wpa_supplicant");
+    cmd.args(["-B", "-i", iface, "-c", conf_path, "-D", "nl80211,wext"]);
+    if let Some(ctrl_dir) = ctrl_dir {
+        cmd.args(["-C", ctrl_dir]);
+    }
+
+    let output = timeout(Duration::from_secs(15), cmd.output()).await??;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let parse_hint = if wpa_supplicant_parse_failure_text(&stdout, &stderr) {
+        " parse_failure=true"
+    } else {
+        ""
+    };
+    Err(format!(
+        "wpa_supplicant failed status={}{} stdout={} stderr={}",
+        output.status,
+        parse_hint,
+        stdout.trim(),
+        stderr.trim()
+    )
+    .into())
 }
 
 
@@ -2103,8 +2129,9 @@ async fn run_wpa_supplicant_wifi_join(
     if iface.is_empty() {
         return Err("wpa_supplicant auto join needs a non-empty interface".into());
     }
-    let conf_path = format!("/tmp/aa-proxy-car-wifi-{}.conf", iface.replace('/', "_"));
-    tokio::fs::write(&conf_path, wpa_supplicant_config(info_msg)).await?;
+    if !command_available("wpa_supplicant").await {
+        return Err("wpa_supplicant auto join needs wpa_supplicant binary".into());
+    }
 
     info!(
         "{} 🧪 bt-wireless-proxy car-wifi-mitm: auto Wi-Fi join using wpa_supplicant iface={} ssid={} bssid={} key_len={}",
@@ -2124,23 +2151,41 @@ async fn run_wpa_supplicant_wifi_join(
     )
     .await;
 
-    let output = timeout(
-        Duration::from_secs(15),
-        Command::new("wpa_supplicant")
-            .args(["-B", "-i", iface, "-c", conf_path.as_str(), "-D", "nl80211,wext"])
-            .output(),
-    )
-    .await??;
-    if !output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "wpa_supplicant failed status={} stdout={} stderr={}",
-            output.status,
-            stdout.trim(),
-            stderr.trim()
+    let conf_path = format!("/tmp/aa-proxy-car-wifi-{}.conf", iface.replace('/', "_"));
+    tokio::fs::write(&conf_path, wpa_supplicant_config(info_msg, true)).await?;
+
+    let first_start = start_wpa_supplicant_process(iface, &conf_path, None).await;
+    if let Err(first_error) = first_start {
+        let bssid = info_msg.bssid().trim();
+        if bssid.is_empty() {
+            return Err(format!("wpa_supplicant: {}", first_error).into());
+        }
+
+        warn!(
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: wpa_supplicant failed with bssid pinned ({}); retrying without bssid",
+            NAME,
+            first_error
+        );
+        let _ = run_shell_for_wifi(
+            "stop failed bssid-pinned wpa_supplicant",
+            "pidof wpa_supplicant >/dev/null 2>&1 && killall wpa_supplicant 2>/dev/null || true",
+            5,
         )
-        .into());
+        .await;
+
+        let no_bssid_conf_path = format!(
+            "/tmp/aa-proxy-car-wifi-{}-nobssid.conf",
+            iface.replace('/', "_")
+        );
+        tokio::fs::write(&no_bssid_conf_path, wpa_supplicant_config(info_msg, false)).await?;
+        start_wpa_supplicant_process(iface, &no_bssid_conf_path, None)
+            .await
+            .map_err(|second_error| {
+                format!(
+                    "wpa_supplicant failed with bssid pinned and without bssid; first={} second={}",
+                    first_error, second_error
+                )
+            })?;
     }
 
     tokio::time::sleep(Duration::from_secs(5)).await;
