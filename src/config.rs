@@ -364,6 +364,15 @@ pub struct AppConfig {
     pub bt_wireless_proxy_hu_mac: String,
     /// When HU is not paired/trusted, keep the adapter pairable/discoverable for this many seconds.
     pub bt_wireless_proxy_pairing_window_secs: u64,
+    /// During HU pairing preflight, temporarily make the local adapter look phone-like
+    /// (alias + Bluetooth Classic Class of Device) so HUs that filter non-phone devices
+    /// may list or accept it. Restored after the pairing window.
+    pub bt_wireless_proxy_phone_like_pairing: bool,
+    /// Temporary alias used only during phone-like HU pairing preflight. Empty = AndroidAuto.
+    pub bt_wireless_proxy_phone_like_pairing_alias: String,
+    /// Temporary Bluetooth Classic Class of Device used only during phone-like HU pairing
+    /// preflight. Examples: 0x00020C (phone/smartphone), 0x5A020C (phone-like with service bits).
+    pub bt_wireless_proxy_phone_like_pairing_class: String,
     #[serde(default, alias = "bt_wireless_poc_hu_channel", deserialize_with = "empty_string_as_none")]
     pub bt_wireless_proxy_hu_channel: Option<u8>,
     #[serde(alias = "bt_wireless_poc_tcp_probe")]
@@ -784,6 +793,9 @@ impl Default for AppConfig {
             bt_wireless_proxy_mode: "car-wifi-mitm".to_string(),
             bt_wireless_proxy_hu_mac: String::new(),
             bt_wireless_proxy_pairing_window_secs: 120,
+            bt_wireless_proxy_phone_like_pairing: false,
+            bt_wireless_proxy_phone_like_pairing_alias: "AndroidAuto".to_string(),
+            bt_wireless_proxy_phone_like_pairing_class: "0x00020C".to_string(),
             bt_wireless_proxy_hu_channel: None,
             bt_wireless_proxy_tcp_probe: true,
             bt_wireless_proxy_car_wifi_join_cmd: String::new(),
@@ -1071,6 +1083,11 @@ impl AppConfig {
         doc["bt_wireless_proxy_hu_mac"] = value(self.bt_wireless_proxy_hu_mac.clone());
         doc["bt_wireless_proxy_pairing_window_secs"] =
             value(self.bt_wireless_proxy_pairing_window_secs as i64);
+        doc["bt_wireless_proxy_phone_like_pairing"] = value(self.bt_wireless_proxy_phone_like_pairing);
+        doc["bt_wireless_proxy_phone_like_pairing_alias"] =
+            value(self.bt_wireless_proxy_phone_like_pairing_alias.clone());
+        doc["bt_wireless_proxy_phone_like_pairing_class"] =
+            value(self.bt_wireless_proxy_phone_like_pairing_class.clone());
         doc["bt_wireless_proxy_hu_channel"] =
             value(self.bt_wireless_proxy_hu_channel.unwrap_or(0) as i64);
         doc["bt_wireless_proxy_tcp_probe"] = value(self.bt_wireless_proxy_tcp_probe);
