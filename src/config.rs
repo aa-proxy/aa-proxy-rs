@@ -373,6 +373,19 @@ pub struct AppConfig {
     /// Temporary Bluetooth Classic Class of Device used only during phone-like HU pairing
     /// preflight. Examples: 0x00020C (phone/smartphone), 0x5A020C (phone-like with service bits).
     pub bt_wireless_proxy_phone_like_pairing_class: String,
+    /// Register extra dummy phone-like SDP service UUIDs in bt_wireless_proxy mode.
+    /// This is useful for HUs such as MBUX that classify paired devices by SDP UUIDs.
+    /// The AA Wireless UUID is never removed. Disabled by default.
+    pub bt_wireless_proxy_phone_like_sdp_profiles: bool,
+    /// Profile set for dummy phone-like SDP records: minimal or full.
+    pub bt_wireless_proxy_phone_like_sdp_profile_set: String,
+    /// car-wifi-mitm mode: connect to the HU AA Wireless RFCOMM endpoint first, then
+    /// trigger/wait for the phone. Useful for HUs that activate AA only after their
+    /// own advertised AA Wireless UUID is connected.
+    pub bt_wireless_proxy_hu_first_connect: bool,
+    /// car-wifi-mitm HU-first mode: how long to keep the HU RFCOMM connection open
+    /// while waiting for the phone. HU frames received meanwhile are buffered.
+    pub bt_wireless_proxy_hu_first_wait_phone_secs: u64,
     #[serde(default, alias = "bt_wireless_poc_hu_channel", deserialize_with = "empty_string_as_none")]
     pub bt_wireless_proxy_hu_channel: Option<u8>,
     #[serde(alias = "bt_wireless_poc_tcp_probe")]
@@ -796,6 +809,10 @@ impl Default for AppConfig {
             bt_wireless_proxy_phone_like_pairing: false,
             bt_wireless_proxy_phone_like_pairing_alias: "AndroidAuto".to_string(),
             bt_wireless_proxy_phone_like_pairing_class: "0x00020C".to_string(),
+            bt_wireless_proxy_phone_like_sdp_profiles: false,
+            bt_wireless_proxy_phone_like_sdp_profile_set: "minimal".to_string(),
+            bt_wireless_proxy_hu_first_connect: false,
+            bt_wireless_proxy_hu_first_wait_phone_secs: 30,
             bt_wireless_proxy_hu_channel: None,
             bt_wireless_proxy_tcp_probe: true,
             bt_wireless_proxy_car_wifi_join_cmd: String::new(),
@@ -1088,6 +1105,14 @@ impl AppConfig {
             value(self.bt_wireless_proxy_phone_like_pairing_alias.clone());
         doc["bt_wireless_proxy_phone_like_pairing_class"] =
             value(self.bt_wireless_proxy_phone_like_pairing_class.clone());
+        doc["bt_wireless_proxy_phone_like_sdp_profiles"] =
+            value(self.bt_wireless_proxy_phone_like_sdp_profiles);
+        doc["bt_wireless_proxy_phone_like_sdp_profile_set"] =
+            value(self.bt_wireless_proxy_phone_like_sdp_profile_set.clone());
+        doc["bt_wireless_proxy_hu_first_connect"] =
+            value(self.bt_wireless_proxy_hu_first_connect);
+        doc["bt_wireless_proxy_hu_first_wait_phone_secs"] =
+            value(self.bt_wireless_proxy_hu_first_wait_phone_secs as i64);
         doc["bt_wireless_proxy_hu_channel"] =
             value(self.bt_wireless_proxy_hu_channel.unwrap_or(0) as i64);
         doc["bt_wireless_proxy_tcp_probe"] = value(self.bt_wireless_proxy_tcp_probe);
