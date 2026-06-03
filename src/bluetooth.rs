@@ -14,13 +14,14 @@ use bluer::{
     },
     l2cap::{SocketAddr as L2capSocketAddr, Stream as L2capStream},
     rfcomm::{Profile, ProfileHandle, Role, SocketAddr, Stream},
-    Adapter, Address, AddressType, Session, Uuid,
+    Adapter, AdapterEvent, Address, AddressType, Session, Uuid,
 };
-use futures::{FutureExt, StreamExt};
+use futures::{FutureExt, Stream as FuturesStream, StreamExt};
 use simplelog::*;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::pin::Pin;
 use std::time::{Duration, Instant};
 use tokio::io::{copy_bidirectional, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -2206,6 +2207,9 @@ pub struct Bluetooth {
     current_index: usize,
     dongle_mode: bool,
     adapter_alias: String,
+    hu_pairing_original_alias: Option<String>,
+    hu_pairing_original_class: Option<String>,
+    hu_pairing_class_iface: Option<String>,
 }
 
 // Create and configure the Bluetooth adapter
@@ -2276,6 +2280,9 @@ pub async fn init(
         current_index: 0,
         dongle_mode,
         adapter_alias: alias,
+        hu_pairing_original_alias: None,
+        hu_pairing_original_class: None,
+        hu_pairing_class_iface: None,
     })
 }
 
@@ -2600,6 +2607,42 @@ async fn hu_authorize_service(req: AuthorizeService, allowed_hu: Address) -> Age
     Ok(())
 }
 
+
+async fn log_hu_device_snapshot(adapter: &Adapter, hu_addr: Address, context: &str) {
+    match adapter.device(hu_addr) {
+        Ok(device) => {
+            let alias = device.alias().await.ok();
+            let name = device.name().await.ok().flatten();
+            let address_type = device.address_type().await.ok();
+            let paired = device.is_paired().await.ok();
+            let trusted = device.is_trusted().await.ok();
+            let connected = device.is_connected().await.ok();
+            let rssi = device.rssi().await.ok().flatten();
+            let legacy_pairing = device.is_legacy_pairing().await.ok();
+            let services_resolved = device.is_services_resolved().await.ok();
+            info!(
+                "{} 🧲 bt-wireless-proxy pairing: device snapshot [{}] addr={} alias={:?} name={:?} address_type={:?} paired={:?} trusted={:?} connected={:?} rssi={:?} legacy_pairing={:?} services_resolved={:?}",
+                NAME,
+                context,
+                hu_addr,
+                alias,
+                name,
+                address_type,
+                paired,
+                trusted,
+                connected,
+                rssi,
+                legacy_pairing,
+                services_resolved
+            );
+        }
+        Err(e) => warn!(
+            "{} 🧲 bt-wireless-proxy pairing: failed to open device snapshot [{}] for {}: {}",
+            NAME, context, hu_addr, e
+        ),
+    }
+}
+
 impl Bluetooth {
     pub async fn set_adapter_pairable_discoverable(
         &self,
@@ -2612,6 +2655,162 @@ impl Bluetooth {
         self.adapter.set_pairable(pairable).await?;
         self.adapter.set_discoverable(discoverable).await?;
         Ok(())
+    }
+
+    fn normalize_bt_class_value(value: &str) -> Option<String> {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let hex = trimmed
+            .strip_prefix("0x")
+            .or_else(|| trimmed.strip_prefix("0X"))
+            .unwrap_or(trimmed);
+        if hex.is_empty() || hex.len() > 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        let parsed = u32::from_str_radix(hex, 16).ok()? & 0x00ff_ffff;
+        Some(format!("0x{:06x}", parsed))
+    }
+
+    async fn read_adapter_class_via_hciconfig(iface: &str) -> Option<String> {
+        let output = Command::new("hciconfig")
+            .arg(iface)
+            .arg("class")
+            .output()
+            .await
+            .ok()?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let combined = format!("{}\n{}", stdout, stderr);
+        for token in combined.split(|c: char| c.is_whitespace() || c == ',') {
+            let token = token.trim();
+            if token.starts_with("0x") || token.starts_with("0X") {
+                if let Some(normalized) = Self::normalize_bt_class_value(token) {
+                    return Some(normalized);
+                }
+            }
+        }
+        None
+    }
+
+    async fn set_adapter_class_via_hciconfig(iface: &str, class_value: &str) -> Result<()> {
+        let output = Command::new("hciconfig")
+            .arg(iface)
+            .arg("class")
+            .arg(class_value)
+            .output()
+            .await?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(format!(
+                "hciconfig {} class {} failed status={:?} stdout={} stderr={}",
+                iface,
+                class_value,
+                output.status.code(),
+                stdout.trim(),
+                stderr.trim()
+            )
+            .into())
+        }
+    }
+
+    async fn apply_phone_like_hu_pairing_identity(
+        &mut self,
+        enabled: bool,
+        requested_alias: &str,
+        requested_class: &str,
+    ) {
+        if !enabled {
+            info!(
+                "{} 🧲 bt-wireless-proxy pairing: temporary phone-like pairing identity is disabled",
+                NAME
+            );
+            return;
+        }
+
+        let alias = requested_alias.trim();
+        let alias = if alias.is_empty() { "AndroidAuto" } else { alias };
+        let class_value = match Self::normalize_bt_class_value(requested_class) {
+            Some(value) => value,
+            None => {
+                warn!(
+                    "{} 🧲 bt-wireless-proxy pairing: invalid bt_wireless_proxy_phone_like_pairing_class={:?}; using default phone/smartphone class 0x00020c",
+                    NAME, requested_class
+                );
+                "0x00020c".to_string()
+            }
+        };
+        let iface = self.adapter.name().to_string();
+
+        self.hu_pairing_original_alias = Some(self.adapter_alias.clone());
+        self.hu_pairing_class_iface = Some(iface.clone());
+        self.hu_pairing_original_class = Self::read_adapter_class_via_hciconfig(&iface).await;
+
+        info!(
+            "{} 🧲 bt-wireless-proxy pairing: enabling temporary phone-like identity for HU pairing: alias={:?} class={} iface={} original_alias={:?} original_class={:?}",
+            NAME,
+            alias,
+            class_value,
+            iface,
+            self.hu_pairing_original_alias,
+            self.hu_pairing_original_class
+        );
+
+        match self.adapter.set_alias(alias.to_string()).await {
+            Ok(()) => info!(
+                "{} 🧲 bt-wireless-proxy pairing: temporary adapter alias set to {:?}",
+                NAME, alias
+            ),
+            Err(e) => warn!(
+                "{} 🧲 bt-wireless-proxy pairing: failed to set temporary adapter alias {:?}: {}",
+                NAME, alias, e
+            ),
+        }
+
+        match Self::set_adapter_class_via_hciconfig(&iface, &class_value).await {
+            Ok(()) => info!(
+                "{} 🧲 bt-wireless-proxy pairing: temporary Bluetooth Class of Device set to {} on {}",
+                NAME, class_value, iface
+            ),
+            Err(e) => warn!(
+                "{} 🧲 bt-wireless-proxy pairing: failed to set temporary Bluetooth Class of Device {} on {}: {}; continuing with alias/pairable/discoverable only",
+                NAME, class_value, iface, e
+            ),
+        }
+    }
+
+    async fn restore_phone_like_hu_pairing_identity(&mut self) {
+        if let Some(alias) = self.hu_pairing_original_alias.take() {
+            match self.adapter.set_alias(alias.clone()).await {
+                Ok(()) => info!(
+                    "{} 🧲 bt-wireless-proxy pairing: restored adapter alias to {:?}",
+                    NAME, alias
+                ),
+                Err(e) => warn!(
+                    "{} 🧲 bt-wireless-proxy pairing: failed to restore adapter alias {:?}: {}",
+                    NAME, alias, e
+                ),
+            }
+        }
+
+        let iface = self.hu_pairing_class_iface.take();
+        let class_value = self.hu_pairing_original_class.take();
+        if let (Some(iface), Some(class_value)) = (iface, class_value) {
+            match Self::set_adapter_class_via_hciconfig(&iface, &class_value).await {
+                Ok(()) => info!(
+                    "{} 🧲 bt-wireless-proxy pairing: restored Bluetooth Class of Device to {} on {}",
+                    NAME, class_value, iface
+                ),
+                Err(e) => warn!(
+                    "{} 🧲 bt-wireless-proxy pairing: failed to restore Bluetooth Class of Device {} on {}: {}",
+                    NAME, class_value, iface, e
+                ),
+            }
+        }
     }
 
     async fn register_hu_pairing_agent(&mut self, hu_addr: Address) -> Result<()> {
@@ -2682,6 +2881,8 @@ impl Bluetooth {
     }
 
     async fn cleanup_hu_pairing_window(&mut self) {
+        self.restore_phone_like_hu_pairing_identity().await;
+
         let keep_pairing_open_for_companion = self.companion_pairing_agent.is_some();
         let (pairable, discoverable, timeout_secs) = if keep_pairing_open_for_companion {
             (true, true, 0)
@@ -2716,13 +2917,22 @@ impl Bluetooth {
         &mut self,
         hu_mac: &str,
         pairing_window_secs: u64,
+        phone_like_pairing: bool,
+        phone_like_pairing_alias: &str,
+        phone_like_pairing_class: &str,
     ) -> Result<()> {
         let hu_mac = hu_mac.trim();
         if hu_mac.is_empty() {
+            info!(
+                "{} 🧲 bt-wireless-proxy pairing: configured HU MAC is empty; skipping HU pairing preflight",
+                NAME
+            );
             return Ok(());
         }
 
         let hu_addr: Address = hu_mac.parse()?;
+        log_hu_device_snapshot(&self.adapter, hu_addr, "preflight-before-check").await;
+
         let already_ready = match self.adapter.device(hu_addr) {
             Ok(device) => {
                 let paired = device.is_paired().await.unwrap_or(false);
@@ -2741,7 +2951,13 @@ impl Bluetooth {
                 }
                 paired && (trusted || device.is_trusted().await.unwrap_or(false))
             }
-            Err(_) => false,
+            Err(e) => {
+                info!(
+                    "{} 🧲 bt-wireless-proxy pairing: HU {} is not known to BlueZ yet or cannot be opened: {}",
+                    NAME, hu_addr, e
+                );
+                false
+            }
         };
 
         if already_ready {
@@ -2753,15 +2969,57 @@ impl Bluetooth {
         }
 
         let window_secs = pairing_window_secs.max(10) as u32;
-        self.register_hu_pairing_agent(hu_addr).await?;
-        self.set_adapter_pairable_discoverable(true, true, window_secs)
-            .await?;
+        self.apply_phone_like_hu_pairing_identity(
+            phone_like_pairing,
+            phone_like_pairing_alias,
+            phone_like_pairing_class,
+        )
+        .await;
+        if let Err(e) = self.register_hu_pairing_agent(hu_addr).await {
+            self.cleanup_hu_pairing_window().await;
+            return Err(e);
+        }
+        if let Err(e) = self
+            .set_adapter_pairable_discoverable(true, true, window_secs)
+            .await
+        {
+            self.cleanup_hu_pairing_window().await;
+            return Err(e);
+        }
         info!(
-            "{} 🧲 bt-wireless-proxy pairing: HU {} is not paired/trusted; adapter is pairable/discoverable for {}s before USB/phone flow",
+            "{} 🧲 bt-wireless-proxy pairing: HU {} is not paired/trusted; starting active+passive pairing window for {}s before USB/phone flow",
             NAME, hu_addr, window_secs
         );
+        info!(
+            "{} 🧲 bt-wireless-proxy pairing: passive mode is open: aa-proxy is pairable/discoverable and will accept pairing callbacks for the configured HU",
+            NAME
+        );
+        info!(
+            "{} 🧲 bt-wireless-proxy pairing: active mode will scan for configured HU {} and call Pair() when it is discovered",
+            NAME, hu_addr
+        );
 
+        let mut discovery: Option<Pin<Box<dyn FuturesStream<Item = AdapterEvent> + Send>>> = match self.adapter.discover_devices_with_changes().await {
+            Ok(stream) => {
+                info!(
+                    "{} 🧲 bt-wireless-proxy pairing: BlueZ discovery started for configured HU {}; known devices will be reported first",
+                    NAME, hu_addr
+                );
+                Some(Box::pin(stream))
+            }
+            Err(e) => {
+                warn!(
+                    "{} 🧲 bt-wireless-proxy pairing: failed to start BlueZ discovery for HU {}; passive inbound pairing only for this window: {}",
+                    NAME, hu_addr, e
+                );
+                None
+            }
+        };
+
+        let mut discovery_done = discovery.is_none();
+        let mut active_pair_attempts: u32 = 0;
         let started = Instant::now();
+
         loop {
             if let Ok(device) = self.adapter.device(hu_addr) {
                 let paired = device.is_paired().await.unwrap_or(false);
@@ -2776,21 +3034,157 @@ impl Bluetooth {
                             NAME, hu_addr, e
                         ),
                     }
+                    log_hu_device_snapshot(&self.adapter, hu_addr, "paired-ready").await;
                     self.cleanup_hu_pairing_window().await;
                     return Ok(());
                 }
             }
 
             if started.elapsed() >= Duration::from_secs(window_secs as u64) {
+                log_hu_device_snapshot(&self.adapter, hu_addr, "timeout-final-state").await;
                 self.cleanup_hu_pairing_window().await;
                 return Err(format!(
-                    "timed out waiting {}s for HU {} pairing; select aa-proxy on the HU and pair again",
+                    "timed out waiting {}s for HU {} pairing; on HUs like MBUX open the car's add-phone screen and keep bt_wireless_proxy_hu_mac set to the HU Bluetooth MAC, not Wi-Fi BSSID",
                     window_secs, hu_addr
                 )
                 .into());
             }
 
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            if discovery_done {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+
+            let remaining_secs = window_secs
+                .saturating_sub(started.elapsed().as_secs() as u32)
+                .max(1);
+
+            let next_event = {
+                let Some(discovery_stream) = discovery.as_mut() else {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                };
+                timeout(Duration::from_secs(1), discovery_stream.next()).await
+            };
+
+            match next_event {
+                Ok(Some(AdapterEvent::DeviceAdded(addr))) => {
+                    if addr == hu_addr {
+                        active_pair_attempts += 1;
+                        info!(
+                            "{} 🧲 bt-wireless-proxy pairing: discovered configured HU {} during active scan; active_pair_attempt={} remaining={}s",
+                            NAME, hu_addr, active_pair_attempts, remaining_secs
+                        );
+                        log_hu_device_snapshot(&self.adapter, hu_addr, "discovered-target-before-pair").await;
+
+                        match self.adapter.device(hu_addr) {
+                            Ok(device) => {
+                                let paired = device.is_paired().await.unwrap_or(false);
+                                if paired {
+                                    info!(
+                                        "{} 🧲 bt-wireless-proxy pairing: discovered HU {} is already paired; trusting and finishing",
+                                        NAME, hu_addr
+                                    );
+                                    let _ = device.set_trusted(true).await;
+                                    log_hu_device_snapshot(&self.adapter, hu_addr, "discovered-already-paired").await;
+                                    self.cleanup_hu_pairing_window().await;
+                                    return Ok(());
+                                }
+
+                                let pair_timeout_secs = remaining_secs.min(45).max(5);
+                                info!(
+                                    "{} 🧲 bt-wireless-proxy pairing: initiating BlueZ Pair() to configured HU {} with {}s timeout",
+                                    NAME, hu_addr, pair_timeout_secs
+                                );
+                                let pair_started = Instant::now();
+                                match timeout(Duration::from_secs(pair_timeout_secs as u64), device.pair()).await {
+                                    Ok(Ok(())) => {
+                                        info!(
+                                            "{} 🧲 bt-wireless-proxy pairing: Pair() to HU {} succeeded in {} ms",
+                                            NAME,
+                                            hu_addr,
+                                            pair_started.elapsed().as_millis()
+                                        );
+                                    }
+                                    Ok(Err(e)) => {
+                                        warn!(
+                                            "{} 🧲 bt-wireless-proxy pairing: Pair() to HU {} failed after {} ms: {}; continuing active/passive window",
+                                            NAME,
+                                            hu_addr,
+                                            pair_started.elapsed().as_millis(),
+                                            e
+                                        );
+                                    }
+                                    Err(_) => {
+                                        warn!(
+                                            "{} 🧲 bt-wireless-proxy pairing: Pair() to HU {} timed out after {}s; continuing active/passive window",
+                                            NAME, hu_addr, pair_timeout_secs
+                                        );
+                                    }
+                                }
+
+                                log_hu_device_snapshot(&self.adapter, hu_addr, "after-pair-attempt").await;
+                                if device.is_paired().await.unwrap_or(false) {
+                                    match device.set_trusted(true).await {
+                                        Ok(()) => info!(
+                                            "{} 🧲 bt-wireless-proxy pairing: HU {} paired and trusted after active Pair()",
+                                            NAME, hu_addr
+                                        ),
+                                        Err(e) => warn!(
+                                            "{} 🧲 bt-wireless-proxy pairing: HU {} paired after active Pair() but trust failed: {}",
+                                            NAME, hu_addr, e
+                                        ),
+                                    }
+                                    self.cleanup_hu_pairing_window().await;
+                                    return Ok(());
+                                }
+                            }
+                            Err(e) => warn!(
+                                "{} 🧲 bt-wireless-proxy pairing: discovered target HU {} but failed to open BlueZ device object: {}",
+                                NAME, hu_addr, e
+                            ),
+                        }
+                    } else if active_pair_attempts == 0 {
+                        // Keep non-target logs sparse but useful. Once we have started trying the target,
+                        // avoid flooding the console with every background device in the car/garage.
+                        if let Ok(device) = self.adapter.device(addr) {
+                            let alias = device.alias().await.ok();
+                            let name = device.name().await.ok().flatten();
+                            let paired = device.is_paired().await.ok();
+                            let rssi = device.rssi().await.ok().flatten();
+                            info!(
+                                "{} 🧲 bt-wireless-proxy pairing: discovered non-target device addr={} alias={:?} name={:?} paired={:?} rssi={:?}; waiting for configured HU {}",
+                                NAME, addr, alias, name, paired, rssi, hu_addr
+                            );
+                        }
+                    }
+                }
+                Ok(Some(AdapterEvent::DeviceRemoved(addr))) => {
+                    if addr == hu_addr {
+                        warn!(
+                            "{} 🧲 bt-wireless-proxy pairing: configured HU {} was removed during discovery window",
+                            NAME, hu_addr
+                        );
+                    }
+                }
+                Ok(Some(AdapterEvent::PropertyChanged(prop))) => {
+                    info!(
+                        "{} 🧲 bt-wireless-proxy pairing: adapter discovery property changed while waiting for HU {}: {:?}",
+                        NAME, hu_addr, prop
+                    );
+                }
+                Ok(None) => {
+                    warn!(
+                        "{} 🧲 bt-wireless-proxy pairing: BlueZ discovery stream ended while waiting for HU {}; passive inbound pairing remains active until timeout",
+                        NAME, hu_addr
+                    );
+                    discovery_done = true;
+                    discovery = None;
+                }
+                Err(_) => {
+                    // 1s tick: no discovery event. Passive pairing may still complete through the agent.
+                }
+            }
         }
     }
 

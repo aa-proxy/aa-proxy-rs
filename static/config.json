@@ -124,6 +124,24 @@
           "advanced": true,
           "requires": "bt_wireless_proxy"
         },
+        "bt_wireless_proxy_phone_like_pairing": {
+          "typ": "boolean",
+          "description": "AA Wireless proxy: during HU pairing preflight, temporarily make the local Bluetooth adapter look more like a phone by changing its alias and Classic Bluetooth Class of Device. Useful for HUs such as MBUX that may hide non-phone devices from the pair-phone screen. Restored after the pairing window. Default: false.",
+          "advanced": true,
+          "requires": "bt_wireless_proxy"
+        },
+        "bt_wireless_proxy_phone_like_pairing_alias": {
+          "typ": "string",
+          "description": "AA Wireless proxy: temporary Bluetooth alias used only while bt_wireless_proxy_phone_like_pairing is active. Empty means AndroidAuto.",
+          "advanced": true,
+          "requires": "bt_wireless_proxy"
+        },
+        "bt_wireless_proxy_phone_like_pairing_class": {
+          "typ": "string",
+          "description": "AA Wireless proxy: temporary Classic Bluetooth Class of Device used only while bt_wireless_proxy_phone_like_pairing is active. Examples: 0x00020C = phone/smartphone; 0x5A020C = more phone-like with service bits. Requires hciconfig on the SBC.",
+          "advanced": true,
+          "requires": "bt_wireless_proxy"
+        },
         "bt_wireless_proxy_hu_channel": {
           "typ": "integer",
           "description": "EXPERIMENTAL Proxy: RFCOMM channel for HU AA Wireless profile. Leave empty or use 0 for BlueZ SDP/ConnectProfile auto-discovery; set a positive value to force manual RFCOMM.",

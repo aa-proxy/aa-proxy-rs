@@ -492,6 +492,9 @@ async fn tokio_main(
                         .ensure_hu_pairing_agent(
                             &cfg.bt_wireless_proxy_hu_mac,
                             cfg.bt_wireless_proxy_pairing_window_secs,
+                            cfg.bt_wireless_proxy_phone_like_pairing,
+                            &cfg.bt_wireless_proxy_phone_like_pairing_alias,
+                            &cfg.bt_wireless_proxy_phone_like_pairing_class,
                         )
                         .await
                     {
