@@ -158,9 +158,20 @@
           "advanced": true,
           "requires": "bt_wireless_proxy_phone_like_sdp_profiles"
         },
+        "bt_wireless_proxy_rendezvous_mode": {
+          "typ": "select",
+          "description": "EXPERIMENTAL Proxy car-wifi-mitm Bluetooth rendezvous strategy. auto tries the HU-first buffered path first and falls back to phone-first if the phone AA RFCOMM never arrives. hu_first and phone_first force the strict old order. Default: auto.",
+          "values": [
+            "auto",
+            "hu_first",
+            "phone_first"
+          ],
+          "advanced": true,
+          "requires": "bt_wireless_proxy"
+        },
         "bt_wireless_proxy_hu_first_connect": {
           "typ": "boolean",
-          "description": "EXPERIMENTAL Proxy car-wifi-mitm: connect to the HU AA Wireless RFCOMM endpoint first, then trigger/wait for the phone. This helps HUs that activate Android Auto only after their own advertised AA Wireless UUID is connected. HU frames received before the phone arrives are buffered and replayed. Default: false.",
+          "description": "LEGACY Proxy car-wifi-mitm: old HU-first switch. With rendezvous_mode=auto this is treated as auto/hybrid, not strict HU-first. Use rendezvous_mode=hu_first for strict old behavior.",
           "advanced": true,
           "requires": "bt_wireless_proxy"
         },
@@ -168,7 +179,7 @@
           "typ": "integer",
           "description": "EXPERIMENTAL Proxy car-wifi-mitm HU-first mode: seconds to keep the HU RFCOMM connection open while waiting for the phone AA RFCOMM connection. Default: 30.",
           "advanced": true,
-          "requires": "bt_wireless_proxy_hu_first_connect"
+          "requires": "bt_wireless_proxy"
         },
         "bt_wireless_proxy_hu_channel": {
           "typ": "integer",

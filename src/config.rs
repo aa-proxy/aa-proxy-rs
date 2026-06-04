@@ -379,9 +379,13 @@ pub struct AppConfig {
     pub bt_wireless_proxy_phone_like_sdp_profiles: bool,
     /// Profile set for dummy phone-like SDP records: minimal or full.
     pub bt_wireless_proxy_phone_like_sdp_profile_set: String,
-    /// car-wifi-mitm mode: connect to the HU AA Wireless RFCOMM endpoint first, then
-    /// trigger/wait for the phone. Useful for HUs that activate AA only after their
-    /// own advertised AA Wireless UUID is connected.
+    /// car-wifi-mitm Bluetooth rendezvous strategy.
+    /// auto/hybrid tries the HU-first buffered path first and falls back to phone-first.
+    /// hu_first and phone_first force the old strict order.
+    pub bt_wireless_proxy_rendezvous_mode: String,
+    /// Legacy car-wifi-mitm mode switch kept for older configs. When rendezvous_mode
+    /// is auto, true is treated as auto/hybrid, not strict HU-first. Use
+    /// bt_wireless_proxy_rendezvous_mode=hu_first for strict old behavior.
     pub bt_wireless_proxy_hu_first_connect: bool,
     /// car-wifi-mitm HU-first mode: how long to keep the HU RFCOMM connection open
     /// while waiting for the phone. HU frames received meanwhile are buffered.
@@ -811,6 +815,7 @@ impl Default for AppConfig {
             bt_wireless_proxy_phone_like_pairing_class: "0x00020C".to_string(),
             bt_wireless_proxy_phone_like_sdp_profiles: false,
             bt_wireless_proxy_phone_like_sdp_profile_set: "minimal".to_string(),
+            bt_wireless_proxy_rendezvous_mode: "auto".to_string(),
             bt_wireless_proxy_hu_first_connect: false,
             bt_wireless_proxy_hu_first_wait_phone_secs: 30,
             bt_wireless_proxy_hu_channel: None,
@@ -1109,6 +1114,8 @@ impl AppConfig {
             value(self.bt_wireless_proxy_phone_like_sdp_profiles);
         doc["bt_wireless_proxy_phone_like_sdp_profile_set"] =
             value(self.bt_wireless_proxy_phone_like_sdp_profile_set.clone());
+        doc["bt_wireless_proxy_rendezvous_mode"] =
+            value(self.bt_wireless_proxy_rendezvous_mode.clone());
         doc["bt_wireless_proxy_hu_first_connect"] =
             value(self.bt_wireless_proxy_hu_first_connect);
         doc["bt_wireless_proxy_hu_first_wait_phone_secs"] =
