@@ -566,6 +566,7 @@ async fn tokio_main(
                             bluetooth::CarWifiMitmProxyOptions {
                                 hu_mac: cfg.bt_wireless_proxy_hu_mac.clone(),
                                 hu_channel: cfg.bt_wireless_proxy_hu_channel,
+                                rendezvous_mode: cfg.bt_wireless_proxy_rendezvous_mode.clone(),
                                 iface: cfg.iface.clone(),
                                 join_cmd: cfg.bt_wireless_proxy_car_wifi_join_cmd.clone(),
                                 auto_join: cfg.bt_wireless_proxy_car_wifi_auto_join,

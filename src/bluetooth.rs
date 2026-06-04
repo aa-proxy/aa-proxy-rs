@@ -526,10 +526,64 @@ struct ProxyHuConnection {
     _client_profile_handle: Option<ProfileHandle>,
 }
 
+type CarWifiRendezvousResult = (
+    Address,
+    Stream,
+    Stream,
+    String,
+    Option<bluer::Session>,
+    Option<ProfileHandle>,
+    Vec<(u16, Vec<u8>)>,
+);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CarWifiRendezvousMode {
+    Auto,
+    HuFirst,
+    PhoneFirst,
+}
+
+impl CarWifiRendezvousMode {
+    fn parse(configured: &str, legacy_hu_first: bool) -> Self {
+        let normalized = configured.trim().to_ascii_lowercase().replace('-', "_");
+        let mode = match normalized.as_str() {
+            "phone_first" | "phonefirst" | "phone" => Self::PhoneFirst,
+            "hu_first" | "hufirst" | "headunit_first" | "head_unit_first" | "hu" => Self::HuFirst,
+            "auto" | "hybrid" | "" => Self::Auto,
+            other => {
+                warn!(
+                    "{} 🧪 bt-wireless-proxy car-wifi-mitm: unknown rendezvous mode {:?}; using auto",
+                    NAME, other
+                );
+                Self::Auto
+            }
+        };
+        if legacy_hu_first && mode == Self::Auto {
+            info!(
+                "{} 🧪 bt-wireless-proxy car-wifi-mitm: legacy bt_wireless_proxy_hu_first_connect=true is treated as rendezvous_mode=auto/hybrid; set rendezvous_mode=hu_first for strict old behavior",
+                NAME
+            );
+        }
+        mode
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::HuFirst => "hu_first",
+            Self::PhoneFirst => "phone_first",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CarWifiMitmProxyOptions {
     pub hu_mac: String,
     pub hu_channel: Option<u8>,
+    /// car-wifi-mitm Bluetooth rendezvous strategy: auto/hybrid, hu_first, phone_first.
+    /// auto starts with the HU-first/hybrid path and falls back to phone-first if the
+    /// phone AA Wireless RFCOMM connection never arrives.
+    pub rendezvous_mode: String,
     /// Legacy/default interface. Used as the STA interface when
     /// bt_wireless_proxy_car_wifi_sta_iface is empty.
     pub iface: String,
@@ -3828,6 +3882,213 @@ impl Bluetooth {
         Ok(())
     }
 
+    fn spawn_phone_aa_connection_trigger(
+        &self,
+        connect: BluetoothAddressList,
+        stopped: bool,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        if stopped {
+            return None;
+        }
+
+        let Some(addresses_to_connect) = connect.0 else {
+            return None;
+        };
+
+        let adapter_cloned = self.adapter.clone();
+        let dongle_mode = self.dongle_mode;
+        let current_index = self.current_index;
+
+        Some(tokio::spawn(async move {
+            let addresses: Vec<Address> = if addresses_to_connect
+                .iter()
+                .any(|addr| *addr == Address::any())
+            {
+                let known = load_known_devices();
+                if !known.is_empty() {
+                    info!(
+                        "{} 🥏 HU-first background trigger: using {} known-good device(s)...",
+                        NAME,
+                        known.len()
+                    );
+                } else {
+                    info!(
+                        "{} 🥏 HU-first background trigger: no known-good devices; passively waiting for incoming phone AA RFCOMM",
+                        NAME
+                    );
+                }
+                known
+            } else {
+                addresses_to_connect
+            };
+
+            if addresses.is_empty() {
+                return;
+            }
+
+            info!(
+                "{} 🧲 HU-first background trigger: attempting to start AndroidAuto phone session via bluetooth with devices: {:?}",
+                NAME,
+                addresses
+            );
+
+            if !dongle_mode {
+                let try_connect_bluetooth_addresses_retry = || async {
+                    let _next_index = Bluetooth::try_connect_bluetooth_addresses(
+                        &adapter_cloned,
+                        &addresses,
+                        current_index,
+                    )
+                    .await?;
+
+                    Ok(())
+                };
+
+                let retry_policy = ExponentialBuilder::default()
+                    .with_min_delay(Duration::from_secs(1))
+                    .with_max_delay(Duration::from_secs(15))
+                    .without_max_times();
+
+                if let Err(e) = try_connect_bluetooth_addresses_retry
+                    .retry(retry_policy)
+                    .sleep(tokio::time::sleep)
+                    .notify(
+                        |err: &Box<dyn std::error::Error + Send + Sync + 'static>,
+                         dur: Duration| {
+                            debug!(
+                                "{} HU-first background trigger: retrying phone connect trigger due to error: {:?} after {:?}",
+                                NAME, err, dur
+                            );
+                        },
+                    )
+                    .await
+                {
+                    warn!(
+                        "{} 🧲 HU-first background trigger: phone connect trigger ended with error: {}",
+                        NAME,
+                        e
+                    );
+                }
+            } else {
+                for addr in addresses {
+                    if let Ok(device) = adapter_cloned.device(addr) {
+                        match device.name().await {
+                            Ok(Some(name)) => {
+                                if name.starts_with("AndroidAuto-") {
+                                    let dev_name = format!(" (<b><blue>{}</>)", name);
+                                    info!(
+                                        "{} 🧲 HU-first background trigger (dongle_mode): forcing BR/EDR device.connect() to {} {}",
+                                        NAME,
+                                        addr,
+                                        dev_name
+                                    );
+                                    if let Err(e) = device.connect().await {
+                                        debug!(
+                                            "{} HU-first background trigger (dongle_mode): connect() returned {:?} (ignored)",
+                                            NAME,
+                                            e
+                                        );
+                                    }
+                                } else {
+                                    debug!(
+                                        "{} 🧲 HU-first background trigger (dongle_mode): skipping {} - name doesn't start with AndroidAuto-",
+                                        NAME,
+                                        addr
+                                    );
+                                }
+                            }
+                            _ => {
+                                debug!(
+                                    "{} 🧲 HU-first background trigger (dongle_mode): skipping {} - no device name available",
+                                    NAME,
+                                    addr
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }))
+    }
+
+    async fn wait_for_phone_aa_profile_request(
+        &mut self,
+        bt_timeout: Duration,
+        reason: &str,
+        reject_addr: Option<Address>,
+    ) -> Result<(Address, Stream)> {
+        let handle_aa = self
+            .handle_aa
+            .as_mut()
+            .ok_or("AA Wireless local server profile is not registered in this mode")?;
+
+        let start = Instant::now();
+        info!(
+            "{} 🧪 bt-wireless-proxy: waiting up to {:?} for PHONE AA Wireless RFCOMM ({})",
+            NAME,
+            bt_timeout,
+            reason
+        );
+
+        loop {
+            let elapsed = start.elapsed();
+            if elapsed >= bt_timeout {
+                return Err(format!(
+                    "timed out after {:?} waiting for PHONE AA Wireless RFCOMM ({})",
+                    bt_timeout, reason
+                )
+                .into());
+            }
+            let remaining = bt_timeout - elapsed;
+
+            let req = timeout(remaining, handle_aa.next())
+                .await
+                .map_err(|_| format!(
+                    "timed out after {:?} waiting for PHONE AA Wireless RFCOMM ({})",
+                    bt_timeout, reason
+                ))?
+                .ok_or("AA Wireless local server profile ended while waiting for PHONE AA RFCOMM")?;
+            let addr = req.device().clone();
+            info!(
+                "{} 📱 AA Wireless Profile: inbound RFCOMM from <b>{}</> while {}",
+                NAME,
+                addr,
+                reason
+            );
+
+            if reject_addr == Some(addr) {
+                warn!(
+                    "{} 🧪 bt-wireless-proxy: inbound AA Wireless RFCOMM came from HU {}; accepting and dropping it while waiting for phone ({})",
+                    NAME,
+                    addr,
+                    reason
+                );
+                match req.accept() {
+                    Ok(mut duplicate) => {
+                        let _ = duplicate.shutdown().await;
+                    }
+                    Err(e) => warn!(
+                        "{} 🧪 bt-wireless-proxy: failed to accept/drop duplicate HU AA RFCOMM from {} while {}: {}",
+                        NAME,
+                        addr,
+                        reason,
+                        e
+                    ),
+                }
+                continue;
+            }
+
+            let stream = req.accept()?;
+            info!(
+                "{} 🧪 bt-wireless-proxy: accepted PHONE AA Wireless RFCOMM from {} ({})",
+                NAME,
+                addr,
+                reason
+            );
+            return Ok((addr, stream));
+        }
+    }
+
     async fn get_aa_profile_connection(
         &mut self,
         connect: BluetoothAddressList,
@@ -3932,22 +4193,12 @@ impl Bluetooth {
             }
         }
 
-        let handle_aa = self
-            .handle_aa
-            .as_mut()
-            .ok_or("AA Wireless local server profile is not registered in this mode")?;
-        let req = timeout(bt_timeout, handle_aa.next())
-            .await?
-            .expect("received no connect request");
-        info!(
-            "{} 📱 AA Wireless Profile: connect from: <b>{}</>",
-            NAME,
-            req.device()
-        );
-        let addr = req.device().clone();
-        let stream = req.accept()?;
-
-        Ok((addr, stream))
+        self.wait_for_phone_aa_profile_request(
+            bt_timeout,
+            "after phone BT trigger",
+            None,
+        )
+        .await
     }
 
     async fn wait_for_phone_aa_profile_while_buffering_hu(
@@ -4229,9 +4480,20 @@ impl Bluetooth {
 
                         match req.accept() {
                             Ok(stream) => {
+                                // Keep the classic BT trigger behavior identical to the normal
+                                // aa_handshake path: accept and immediately drop the HSP control
+                                // RFCOMM stream. Holding this stream without a real HSP/HFP AT state
+                                // machine can leave Android stuck at "Android Auto is starting" and
+                                // it did not make the PHONE AA Wireless RFCOMM arrive in car-wifi-mitm
+                                // tests. The AA Wireless profile itself is polled separately.
                                 if bt_sco {
                                     info!(
                                         "{} 🎧 Headset Profile (HSP): accepted from <b>{}</>, dropping control stream in SCO mode",
+                                        NAME, device
+                                    );
+                                } else {
+                                    info!(
+                                        "{} 🎧 Headset Profile (HSP): accepted from <b>{}</>, dropping trigger control stream immediately to mirror normal AA handshake behavior",
                                         NAME, device
                                     );
                                 }
@@ -4271,6 +4533,13 @@ impl Bluetooth {
 
     async fn connect_hu_aa_wireless_proxy(
         &self,
+        hu_mac: &str,
+        hu_channel: Option<u8>,
+    ) -> Result<ProxyHuConnection> {
+        Self::connect_hu_aa_wireless_proxy_inner(hu_mac, hu_channel).await
+    }
+
+    async fn connect_hu_aa_wireless_proxy_inner(
         hu_mac: &str,
         hu_channel: Option<u8>,
     ) -> Result<ProxyHuConnection> {
@@ -4390,6 +4659,202 @@ impl Bluetooth {
         Ok(())
     }
 
+    async fn car_wifi_mitm_hu_first_rendezvous(
+        &mut self,
+        connect: BluetoothAddressList,
+        options: &CarWifiMitmProxyOptions,
+    ) -> Result<CarWifiRendezvousResult> {
+        info!(
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: HU-first legacy rendezvous: connect to HU first, then trigger phone AA RFCOMM",
+            NAME
+        );
+
+        let hu_conn = self
+            .connect_hu_aa_wireless_proxy(options.hu_mac.trim(), options.hu_channel)
+            .await?;
+        let hu_endpoint = hu_conn.endpoint.clone();
+        let ProxyHuConnection {
+            stream: mut hu_stream,
+            endpoint: _,
+            _client_profile_session: hu_client_profile_session,
+            _client_profile_handle: hu_client_profile_handle,
+        } = hu_conn;
+
+        info!(
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: HU-first connected to HU {}; now triggering/waiting for phone for up to {:?}",
+            NAME,
+            hu_endpoint,
+            options.hu_first_wait_phone_timeout
+        );
+
+        // This intentionally mirrors the last known-good sequencing: do not nudge the
+        // phone before the HU AA RFCOMM socket is established. Some phones appear to
+        // enter a stale cached WPP/TCP path when HSP is triggered too early, before the
+        // bridge is ready to replay the HU Bluetooth bootstrap frames.
+        self.trigger_phone_aa_connection(connect, options.stopped).await?;
+
+        let hu_addr: Address = options.hu_mac.trim().parse()?;
+        let (phone_addr, phone_stream, buffered_hu_frames) = self
+            .wait_for_phone_aa_profile_while_buffering_hu(
+                hu_addr,
+                &mut hu_stream,
+                options.hu_first_wait_phone_timeout,
+            )
+            .await?;
+
+        Ok((
+            phone_addr,
+            phone_stream,
+            hu_stream,
+            hu_endpoint,
+            hu_client_profile_session,
+            hu_client_profile_handle,
+            buffered_hu_frames,
+        ))
+    }
+
+    async fn disconnect_triggered_phone_devices(
+        &self,
+        connect: &BluetoothAddressList,
+        reason: &str,
+    ) {
+        let Some(addresses_to_connect) = connect.0.as_ref() else {
+            return;
+        };
+        let addresses: Vec<Address> = if addresses_to_connect
+            .iter()
+            .any(|addr| *addr == Address::any())
+        {
+            load_known_devices()
+        } else {
+            addresses_to_connect.clone()
+        };
+        if addresses.is_empty() {
+            return;
+        }
+        info!(
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: disconnecting {} triggered phone device(s) to clear stale AA/HSP state after {}",
+            NAME,
+            addresses.len(),
+            reason
+        );
+        for addr in addresses {
+            match self.adapter.device(addr) {
+                Ok(device) => {
+                    match device.disconnect().await {
+                        Ok(_) => info!(
+                            "{} 🧪 bt-wireless-proxy car-wifi-mitm: disconnected phone {} after {}",
+                            NAME,
+                            addr,
+                            reason
+                        ),
+                        Err(e) => debug!(
+                            "{} 🧪 bt-wireless-proxy car-wifi-mitm: phone {} disconnect after {} returned: {}",
+                            NAME,
+                            addr,
+                            reason,
+                            e
+                        ),
+                    }
+                }
+                Err(e) => debug!(
+                    "{} 🧪 bt-wireless-proxy car-wifi-mitm: cannot get phone device {} for stale-state disconnect after {}: {}",
+                    NAME,
+                    addr,
+                    reason,
+                    e
+                ),
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(750)).await;
+    }
+
+    async fn car_wifi_mitm_phone_first_rendezvous(
+        &mut self,
+        connect: BluetoothAddressList,
+        options: &CarWifiMitmProxyOptions,
+        hu_endpoint_hint: &str,
+    ) -> Result<CarWifiRendezvousResult> {
+        let (phone_addr, phone_stream) = self
+            .get_aa_profile_connection(connect, options.bt_timeout, options.stopped)
+            .await?;
+
+        info!(
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: phone connected from {}; connecting to HU {}",
+            NAME, phone_addr, hu_endpoint_hint
+        );
+
+        let hu_conn = self
+            .connect_hu_aa_wireless_proxy(options.hu_mac.trim(), options.hu_channel)
+            .await?;
+        let hu_endpoint = hu_conn.endpoint.clone();
+        let ProxyHuConnection {
+            stream: hu_stream,
+            endpoint: _,
+            _client_profile_session: hu_client_profile_session,
+            _client_profile_handle: hu_client_profile_handle,
+        } = hu_conn;
+
+        Ok((
+            phone_addr,
+            phone_stream,
+            hu_stream,
+            hu_endpoint,
+            hu_client_profile_session,
+            hu_client_profile_handle,
+            Vec::new(),
+        ))
+    }
+
+
+    async fn car_wifi_mitm_passive_phone_first_probe(
+        &mut self,
+        wait_timeout: Duration,
+        options: &CarWifiMitmProxyOptions,
+        hu_endpoint_hint: &str,
+    ) -> Result<CarWifiRendezvousResult> {
+        info!(
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: passive phone-first probe: waiting up to {:?} for PHONE AA RFCOMM before any active phone BT trigger",
+            NAME,
+            wait_timeout
+        );
+        let (phone_addr, phone_stream) = self
+            .wait_for_phone_aa_profile_request(
+                wait_timeout,
+                "auto passive phone-first probe before active phone trigger",
+                None,
+            )
+            .await?;
+
+        info!(
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: passive phone-first probe accepted PHONE AA RFCOMM from {}; now connecting to HU {}",
+            NAME,
+            phone_addr,
+            hu_endpoint_hint
+        );
+
+        let hu_conn = self
+            .connect_hu_aa_wireless_proxy(options.hu_mac.trim(), options.hu_channel)
+            .await?;
+        let hu_endpoint = hu_conn.endpoint.clone();
+        let ProxyHuConnection {
+            stream: hu_stream,
+            endpoint: _,
+            _client_profile_session: hu_client_profile_session,
+            _client_profile_handle: hu_client_profile_handle,
+        } = hu_conn;
+
+        Ok((
+            phone_addr,
+            phone_stream,
+            hu_stream,
+            hu_endpoint,
+            hu_client_profile_session,
+            hu_client_profile_handle,
+            Vec::new(),
+        ))
+    }
+
     pub async fn aa_wireless_car_wifi_mitm_proxy(
         &mut self,
         connect: BluetoothAddressList,
@@ -4409,17 +4874,16 @@ impl Bluetooth {
             None => format!("{} AA Wireless SDP auto-discovery", options.hu_mac.trim()),
         };
 
-        if options.hu_first_connect {
-            info!(
-                "{} 🧪 bt-wireless-proxy car-wifi-mitm: HU-first rendezvous enabled; connecting to HU {} before waiting for phone AA RFCOMM",
-                NAME, hu_endpoint_hint
-            );
-        } else {
-            info!(
-                "{} 🧪 bt-wireless-proxy car-wifi-mitm: waiting for phone AA RFCOMM, then connecting to HU {}",
-                NAME, hu_endpoint_hint
-            );
-        }
+        let rendezvous_mode = CarWifiRendezvousMode::parse(
+            &options.rendezvous_mode,
+            options.hu_first_connect,
+        );
+        info!(
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: rendezvous_mode={} HU endpoint {}",
+            NAME,
+            rendezvous_mode.as_str(),
+            hu_endpoint_hint
+        );
 
         // Keep the same phone-trigger behavior as the normal AA handshake path.
         // Without a local HSP HS profile, BlueZ device.connect_profile(HSP_AG) often
@@ -4436,73 +4900,56 @@ impl Bluetooth {
             hu_client_profile_session,
             hu_client_profile_handle,
             buffered_hu_frames,
-        ) = if options.hu_first_connect {
-            let hu_conn = self
-                .connect_hu_aa_wireless_proxy(options.hu_mac.trim(), options.hu_channel)
-                .await?;
-            let hu_endpoint = hu_conn.endpoint.clone();
-            let ProxyHuConnection {
-                stream: mut hu_stream,
-                endpoint: _,
-                _client_profile_session: hu_client_profile_session,
-                _client_profile_handle: hu_client_profile_handle,
-            } = hu_conn;
+        ) = match rendezvous_mode {
+            CarWifiRendezvousMode::HuFirst => {
+                info!(
+                    "{} 🧪 bt-wireless-proxy car-wifi-mitm: strict HU-first rendezvous selected",
+                    NAME
+                );
+                self.car_wifi_mitm_hu_first_rendezvous(connect, &options).await?
+            }
+            CarWifiRendezvousMode::PhoneFirst => {
+                info!(
+                    "{} 🧪 bt-wireless-proxy car-wifi-mitm: strict phone-first rendezvous selected",
+                    NAME
+                );
+                self.car_wifi_mitm_phone_first_rendezvous(connect, &options, &hu_endpoint_hint).await?
+            }
+            CarWifiRendezvousMode::Auto => {
+                info!(
+                    "{} 🧪 bt-wireless-proxy car-wifi-mitm: auto rendezvous: HU-first/hybrid only; passive phone-first and same-run phone-first fallback are disabled to avoid stale Gearhead Wi-Fi/TCP loops",
+                    NAME
+                );
 
-            info!(
-                "{} 🧪 bt-wireless-proxy car-wifi-mitm: HU-first connected to HU {}; now triggering/waiting for phone for up to {:?}",
-                NAME,
-                hu_endpoint,
-                options.hu_first_wait_phone_timeout
-            );
-            self.trigger_phone_aa_connection(connect, options.stopped).await?;
-            let hu_addr: Address = options.hu_mac.trim().parse()?;
-            let (phone_addr, phone_stream, buffered_hu_frames) = self
-                .wait_for_phone_aa_profile_while_buffering_hu(
-                    hu_addr,
-                    &mut hu_stream,
-                    options.hu_first_wait_phone_timeout,
-                )
-                .await?;
+                match self
+                    .car_wifi_mitm_hu_first_rendezvous(connect.clone(), &options)
+                    .await
+                {
+                    Ok(result) => result,
+                    Err(hu_first_err) => {
+                        let hu_first_err_msg = hu_first_err.to_string();
+                        warn!(
+                            "{} 🧪 bt-wireless-proxy car-wifi-mitm: auto rendezvous HU-first/hybrid attempt failed: {}",
+                            NAME,
+                            hu_first_err_msg
+                        );
 
-            (
-                phone_addr,
-                phone_stream,
-                hu_stream,
-                hu_endpoint,
-                hu_client_profile_session,
-                hu_client_profile_handle,
-                buffered_hu_frames,
-            )
-        } else {
-            let (phone_addr, phone_stream) = self
-                .get_aa_profile_connection(connect, options.bt_timeout, options.stopped)
-                .await?;
-
-            info!(
-                "{} 🧪 bt-wireless-proxy car-wifi-mitm: phone connected from {}; connecting to HU {}",
-                NAME, phone_addr, hu_endpoint_hint
-            );
-
-            let hu_conn = self
-                .connect_hu_aa_wireless_proxy(options.hu_mac.trim(), options.hu_channel)
-                .await?;
-            let hu_endpoint = hu_conn.endpoint.clone();
-            let ProxyHuConnection {
-                stream: hu_stream,
-                endpoint: _,
-                _client_profile_session: hu_client_profile_session,
-                _client_profile_handle: hu_client_profile_handle,
-            } = hu_conn;
-
-            (
-                phone_addr,
-                phone_stream,
-                hu_stream,
-                hu_endpoint,
-                hu_client_profile_session,
-                hu_client_profile_handle,
-                Vec::new(),
-            )
+                        // Do not try a phone-first fallback in the same run. The latest phone
+                        // logcat shows Gearhead can jump to a cached Wi-Fi/WPP TCP path
+                        // (DK / 192.168.43.43:22977) without ever opening PHONE AA RFCOMM.
+                        // Re-triggering the phone in that state only produces repeated
+                        // connect/refused/disconnect loops. Reset to START so the fake/real HU
+                        // and the phone are both forced through a fresh HU-first Bluetooth
+                        // bootstrap attempt.
+                        self.disconnect_triggered_phone_devices(&connect, "auto HU-first/hybrid failure").await;
+                        return Err(format!(
+                            "auto rendezvous HU-first/hybrid failed; resetting Bluetooth/Wi-Fi bootstrap to initial START state instead of passive/phone-first fallback: {}",
+                            hu_first_err_msg
+                        )
+                        .into());
+                    }
+                }
+            }
         };
         let _hu_client_profile_guard = (hu_client_profile_session, hu_client_profile_handle);
 
@@ -4751,6 +5198,10 @@ impl Bluetooth {
         info!(
             "{} 🧪 bt-wireless-proxy car-wifi-mitm: TCP relay ended phone->HU={} bytes HU->phone={} bytes",
             NAME, phone_to_hu, hu_to_phone
+        );
+        info!(
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: wireless session ended; dropping transient RFCOMM/TCP state so the next run starts from rendezvous START state",
+            NAME
         );
 
         Ok(())
