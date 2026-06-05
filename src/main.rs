@@ -101,6 +101,101 @@ struct Args {
     generate_hostapd: bool,
 }
 
+
+fn is_kernel_module_name_safe(module: &str) -> bool {
+    !module.is_empty()
+        && module
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+fn parse_preload_kernel_modules(value: &str) -> Vec<String> {
+    let mut modules = Vec::new();
+    for raw in value.split(',') {
+        let module = raw.trim();
+        if module.is_empty() {
+            continue;
+        }
+        if !modules.iter().any(|existing: &String| existing == module) {
+            modules.push(module.to_string());
+        }
+    }
+    modules
+}
+
+fn effective_preload_kernel_modules(cfg: &AppConfig) -> Vec<String> {
+    let mut modules = parse_preload_kernel_modules(&cfg.preload_kernel_modules);
+    let phone_wifi_mode = cfg.bt_wireless_proxy_phone_wifi_mode.trim().to_ascii_lowercase();
+    let external_ap = matches!(
+        phone_wifi_mode.as_str(),
+        "external_ap" | "external-ap" | "externalap" | "external_proxy_ap" | "external-proxy-ap"
+    );
+
+    if external_ap && modules.iter().any(|m| m == "rt2800usb") {
+        info!(
+            "{} 🧪 bt-wireless-proxy external_ap: rt2800usb is already present in preload_kernel_modules; not adding the default twice",
+            NAME
+        );
+    } else if external_ap {
+        info!(
+            "{} 🧪 bt-wireless-proxy external_ap: adding default USB Wi-Fi module rt2800usb to preload_kernel_modules",
+            NAME
+        );
+        modules.push("rt2800usb".to_string());
+    }
+
+    modules
+}
+
+fn preload_kernel_modules_for_config(cfg: &AppConfig) {
+    let modules = effective_preload_kernel_modules(cfg);
+    if modules.is_empty() {
+        return;
+    }
+
+    for module in modules {
+        if !is_kernel_module_name_safe(&module) {
+            warn!(
+                "{} 🧩 Skipping unsafe preload_kernel_modules entry {:?}; allowed characters are A-Z a-z 0-9 _ -",
+                NAME, module
+            );
+            continue;
+        }
+
+        info!("{} 🧩 Loading kernel module with modprobe: {}", NAME, module);
+        match Command::new("modprobe").arg(&module).output() {
+            Ok(output) if output.status.success() => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if !stdout.trim().is_empty() || !stderr.trim().is_empty() {
+                    info!(
+                        "{} 🧩 modprobe {} completed stdout={} stderr={}",
+                        NAME,
+                        module,
+                        stdout.trim(),
+                        stderr.trim()
+                    );
+                }
+            }
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                warn!(
+                    "{} 🧩 modprobe {} failed status={} stdout={} stderr={}",
+                    NAME,
+                    module,
+                    output.status,
+                    stdout.trim(),
+                    stderr.trim()
+                );
+            }
+            Err(e) => {
+                warn!("{} 🧩 failed to run modprobe {}: {}", NAME, module, e);
+            }
+        }
+    }
+}
+
 fn init_wifi_config(cfg: &AppConfig) -> Result<WifiConfig> {
     let mut ip_addr = format!("{}.1", cfg.wlan_subnet);
 
@@ -935,6 +1030,8 @@ fn main() -> Result<()> {
             NAME, config.startup_delay
         );
     }
+
+    preload_kernel_modules_for_config(&config);
 
     // notify for syncing threads
     let (restart_tx, _) = broadcast::channel(1);

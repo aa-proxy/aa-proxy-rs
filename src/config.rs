@@ -351,6 +351,9 @@ pub struct AppConfig {
     pub advertise: bool,
     pub enable_companion_bt: bool,
     pub dongle_mode: bool,
+    /// Comma-separated kernel modules to modprobe during startup.
+    /// In bt_wireless_proxy phone_wifi_mode=external_ap, rt2800usb is added unless already listed.
+    pub preload_kernel_modules: String,
     /// Experimental AA Wireless Bluetooth Proxy. Disabled by default.
     /// bridge = accept the phone AA RFCOMM connection, connect to the HU RFCOMM
     /// endpoint from the same adapter, and relay/log both directions.
@@ -438,8 +441,8 @@ pub struct AppConfig {
     pub bt_wireless_proxy_car_wifi_ap_iface: String,
     /// car-wifi-mitm mode: phone-facing Wi-Fi mode.
     /// car_ap/default forwards the HU Wi-Fi credentials to the phone.
-    /// proxy_ap joins the HU Wi-Fi on the STA interface, then restarts the aa-proxy AP
-    /// on the same channel and sends the normal aa-proxy AP credentials to the phone.
+    /// proxy_ap uses a single radio: car STA on the base iface, phone AP on a virtual AP iface.
+    /// external_ap uses two radios: phone AP on the base iface, car STA on a USB/external iface.
     pub bt_wireless_proxy_phone_wifi_mode: String,
     /// car-wifi-mitm mode: IP address to place in the phone-facing WifiStartRequest.
     /// Empty means auto-detect using `ip route get <hu_ip>` / interface IPv4.
@@ -822,6 +825,7 @@ impl Default for AppConfig {
             advertise: true,
             enable_companion_bt: true,
             dongle_mode: false,
+            preload_kernel_modules: String::new(),
             bt_wireless_proxy: false,
             bt_wireless_proxy_mode: "car-wifi-mitm".to_string(),
             bt_wireless_proxy_hu_mac: String::new(),
@@ -1121,6 +1125,7 @@ impl AppConfig {
         doc["advertise"] = value(self.advertise);
         doc["enable_companion_bt"] = value(self.enable_companion_bt);
         doc["dongle_mode"] = value(self.dongle_mode);
+        doc["preload_kernel_modules"] = value(self.preload_kernel_modules.clone());
         doc["bt_wireless_proxy"] = value(self.bt_wireless_proxy);
         doc["bt_wireless_proxy_mode"] = value(self.bt_wireless_proxy_mode.clone());
         doc["bt_wireless_proxy_hu_mac"] = value(self.bt_wireless_proxy_hu_mac.clone());
