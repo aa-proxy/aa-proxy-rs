@@ -26,11 +26,12 @@ use std::net::IpAddr;
 use std::pin::Pin;
 use std::time::{Duration, Instant};
 use tokio::io::{copy_bidirectional, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 use tokio::process::Command;
 use tokio::sync::broadcast::Receiver as BroadcastReceiver;
 use tokio::sync::broadcast::Sender as BroadcastSender;
 use tokio::sync::Notify;
+use crate::config::{TCP_DHU_PORT, TCP_SERVER_PORT};
 use tokio::time::timeout;
 
 include!(concat!(env!("OUT_DIR"), "/protos/mod.rs"));
@@ -612,6 +613,10 @@ pub struct CarWifiMitmProxyOptions {
     pub phone_ap_ip: String,
     pub rewrite_ip: String,
     pub listen_port: u16,
+    /// Notify the normal aa-proxy TCP/USB MITM loop to accept the phone-side TCP session.
+    /// car-wifi-mitm uses the same AA packet/TLS MITM path as USB by bridging the real HU TCP
+    /// socket into the local DHU-side TCP listener instead of raw-copying phone<->HU here.
+    pub tcp_start: Arc<Notify>,
     /// If HU WifiVersionRequest contains WifiProjectionProtocolInfo(ip/port) and no explicit
     /// WifiStartRequest arrives, synthesize WifiStartRequest from that endpoint.
     pub use_version_projection_fallback: bool,
@@ -5504,11 +5509,21 @@ impl Bluetooth {
             return Err("bt_wireless_proxy_hu_mac must be set for car-wifi-mitm mode".into());
         }
 
-        let listen_port = if options.listen_port == 0 {
-            5288
+        let main_mitm_listen_port = TCP_SERVER_PORT as u16;
+        let mut listen_port: u16 = if options.listen_port == 0 {
+            main_mitm_listen_port
         } else {
             options.listen_port
         };
+        if listen_port != main_mitm_listen_port {
+            warn!(
+                "{} 🧪 bt-wireless-proxy car-wifi-mitm: overriding bt_wireless_proxy_listen_port={} with main MITM MD TCP port {} so the wireless session uses the normal aa-proxy packet/TLS MITM path",
+                NAME,
+                listen_port,
+                main_mitm_listen_port
+            );
+            listen_port = main_mitm_listen_port;
+        }
         let hu_endpoint_hint = match options.hu_channel.filter(|channel| *channel > 0) {
             Some(channel) => format!("{} RFCOMM channel {}", options.hu_mac.trim(), channel),
             None => format!("{} AA Wireless SDP auto-discovery", options.hu_mac.trim()),
@@ -5886,11 +5901,11 @@ impl Bluetooth {
         }
 
         let listen_addr = format!("0.0.0.0:{}", listen_port);
-        let listener = TcpListener::bind(listen_addr.as_str()).await?;
         info!(
-            "{} 🧪 bt-wireless-proxy car-wifi-mitm: MD TCP listener bound at {}; phone will receive {}:{} instead of HU {}:{}",
-            NAME, listen_addr, rewrite_ip, listen_port, hu_tcp_ip, hu_tcp_port
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: handing phone TCP {}:{} to the main aa-proxy MITM listener at {}; HU TCP {}:{} will be bridged into local DHU port {}",
+            NAME, rewrite_ip, listen_port, listen_addr, hu_tcp_ip, hu_tcp_port, TCP_DHU_PORT
         );
+        options.tcp_start.notify_one();
 
         let mut phone_start_req = WifiStartRequest::WifiStartRequest::parse_from_bytes(&hu_start_payload)?;
         phone_start_req.set_ip_address(rewrite_ip.clone());
@@ -5957,28 +5972,29 @@ impl Bluetooth {
         .await?;
 
         let hu_tcp_addr = format!("{}:{}", hu_tcp_ip, hu_tcp_port);
+        let local_hu_tcp_addr = format!("127.0.0.1:{}", TCP_DHU_PORT);
         info!(
-            "{} 🧪 bt-wireless-proxy car-wifi-mitm: waiting for phone TCP and connecting HU TCP {}",
-            NAME, hu_tcp_addr
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: connecting real HU TCP {} and local aa-proxy HU-side TCP {}",
+            NAME, hu_tcp_addr, local_hu_tcp_addr
         );
 
-        let phone_tcp_fut = listener.accept();
         let hu_tcp_fut = TcpStream::connect(hu_tcp_addr.as_str());
-        let ((mut phone_tcp, phone_tcp_addr), mut hu_tcp) = tokio::try_join!(
-            async {
-                let (stream, addr) = timeout(Duration::from_secs(45), phone_tcp_fut).await??;
-                Ok::<_, Box<dyn std::error::Error + Send + Sync>>((stream, addr))
-            },
+        let local_hu_tcp_fut = TcpStream::connect(local_hu_tcp_addr.as_str());
+        let (mut hu_tcp, mut local_hu_tcp) = tokio::try_join!(
             async {
                 let stream = timeout(Duration::from_secs(15), hu_tcp_fut).await??;
                 Ok::<_, Box<dyn std::error::Error + Send + Sync>>(stream)
+            },
+            async {
+                let stream = timeout(Duration::from_secs(45), local_hu_tcp_fut).await??;
+                Ok::<_, Box<dyn std::error::Error + Send + Sync>>(stream)
             }
         )?;
-        phone_tcp.set_nodelay(true)?;
         hu_tcp.set_nodelay(true)?;
+        local_hu_tcp.set_nodelay(true)?;
         info!(
-            "{} 🧪 bt-wireless-proxy car-wifi-mitm: phone TCP {} connected; HU TCP {} connected",
-            NAME, phone_tcp_addr, hu_tcp_addr
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: real HU TCP {} connected; local HU-side TCP {} connected; main MITM owns phone TCP on port {}",
+            NAME, hu_tcp_addr, local_hu_tcp_addr, listen_port
         );
 
         let mut phone_rfcomm = phone_stream;
@@ -6040,10 +6056,10 @@ impl Bluetooth {
         });
 
         info!(
-            "{} 🧪 bt-wireless-proxy car-wifi-mitm: starting raw AA TCP relay phone<->HU",
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: starting HU TCP bridge into normal aa-proxy MITM path; remove_bluetooth/remove_wifi now apply exactly like USB/DHU sessions",
             NAME
         );
-        let (phone_to_hu, hu_to_phone) = copy_bidirectional(&mut phone_tcp, &mut hu_tcp).await?;
+        let (hu_to_proxy, proxy_to_hu) = copy_bidirectional(&mut hu_tcp, &mut local_hu_tcp).await?;
         if !rfcomm_status_task.is_finished() {
             rfcomm_status_task.abort();
         } else if let Ok(Err(e)) = rfcomm_status_task.await {
@@ -6053,8 +6069,8 @@ impl Bluetooth {
             );
         }
         info!(
-            "{} 🧪 bt-wireless-proxy car-wifi-mitm: TCP relay ended phone->HU={} bytes HU->phone={} bytes",
-            NAME, phone_to_hu, hu_to_phone
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: HU TCP bridge ended HU->proxy={} proxy->HU={} bytes",
+            NAME, hu_to_proxy, proxy_to_hu
         );
         info!(
             "{} 🧪 bt-wireless-proxy car-wifi-mitm: wireless session ended; dropping transient RFCOMM/TCP state so the next run starts from rendezvous START state",

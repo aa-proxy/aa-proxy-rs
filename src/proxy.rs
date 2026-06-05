@@ -703,7 +703,19 @@ pub async fn io_loop(
             }
         }
 
-        if config.dhu {
+        let bt_car_wifi_mitm_hu_tcp = config.bt_wireless_proxy
+            && matches!(
+                config.bt_wireless_proxy_mode.trim().to_ascii_lowercase().as_str(),
+                "car-wifi-mitm" | "wifi-mitm"
+            );
+
+        if config.dhu || bt_car_wifi_mitm_hu_tcp {
+            if bt_car_wifi_mitm_hu_tcp && !config.dhu {
+                info!(
+                    "{} 🧪 bt-wireless-proxy car-wifi-mitm: using DHU TCP listener as the HU-side endpoint for the normal MITM path",
+                    NAME
+                );
+            }
             info!(
                 "{} 🛰️ DHU TCP server: listening for `Desktop Head Unit` connection...",
                 NAME
