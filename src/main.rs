@@ -581,6 +581,7 @@ async fn tokio_main(
                                 phone_ap_ip: format!("{}.1", cfg.wlan_subnet),
                                 rewrite_ip: cfg.bt_wireless_proxy_rewrite_ip.clone(),
                                 listen_port: cfg.bt_wireless_proxy_listen_port,
+                                tcp_start: tcp_start.clone(),
                                 use_version_projection_fallback: cfg.bt_wireless_proxy_use_version_projection_fallback,
                                 wpactrl_socket_timeout: Duration::from_secs(cfg.bt_wireless_proxy_wpactrl_socket_timeout_secs.max(1)),
                                 wifi_association_timeout: Duration::from_secs(cfg.bt_wireless_proxy_wifi_association_timeout_secs.max(1)),
