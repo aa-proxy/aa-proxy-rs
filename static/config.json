@@ -245,13 +245,29 @@
         },
         "bt_wireless_proxy_car_wifi_sta_iface": {
           "typ": "string",
-          "description": "EXPERIMENTAL Proxy car-wifi-mitm: managed STA interface used to join HU/car Wi-Fi. Empty falls back to iface in takeover mode, or sta0 when keep_ap is true.",
+          "description": "EXPERIMENTAL Proxy car-wifi-mitm: managed STA interface used to join HU/car Wi-Fi. Empty falls back to iface in takeover mode, or sta0 when keep_ap/proxy_ap is true.",
+          "advanced": true,
+          "requires": "bt_wireless_proxy"
+        },
+        "bt_wireless_proxy_car_wifi_sta_phy": {
+          "typ": "string",
+          "description": "EXPERIMENTAL Proxy car-wifi-mitm: optional PHY used to create the managed STA interface in keep_ap/proxy_ap mode. Empty auto-detects from the AP interface. Example: phy1.",
           "advanced": true,
           "requires": "bt_wireless_proxy"
         },
         "bt_wireless_proxy_car_wifi_ap_iface": {
           "typ": "string",
           "description": "EXPERIMENTAL Proxy car-wifi-mitm: existing AP interface to keep when keep_ap is true. Empty falls back to iface.",
+          "advanced": true,
+          "requires": "bt_wireless_proxy"
+        },
+        "bt_wireless_proxy_phone_wifi_mode": {
+          "typ": "string",
+          "description": "EXPERIMENTAL Proxy car-wifi-mitm: phone-facing Wi-Fi mode. car_ap forwards HU/car Wi-Fi credentials to the phone. proxy_ap keeps the phone on the aa-proxy AP while the STA interface joins the HU/car Wi-Fi.",
+          "values": [
+            "car_ap",
+            "proxy_ap"
+          ],
           "advanced": true,
           "requires": "bt_wireless_proxy"
         },

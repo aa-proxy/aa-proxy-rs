@@ -422,13 +422,21 @@ pub struct AppConfig {
     #[serde(alias = "bt_wireless_poc_car_wifi_keep_ap")]
     pub bt_wireless_proxy_car_wifi_keep_ap: bool,
     /// car-wifi-mitm mode: managed STA interface used for joining HU/car Wi-Fi.
-    /// Empty falls back to `iface` in takeover mode, or `sta0` in keep_ap mode.
+    /// Empty falls back to `iface` in takeover mode, or `sta0` in keep_ap/proxy_ap mode.
     #[serde(alias = "bt_wireless_poc_car_wifi_sta_iface")]
     pub bt_wireless_proxy_car_wifi_sta_iface: String,
+    /// car-wifi-mitm mode: optional PHY used when creating the managed STA interface.
+    /// Empty auto-detects the PHY from the AP interface. Example: "phy1".
+    pub bt_wireless_proxy_car_wifi_sta_phy: String,
     /// car-wifi-mitm mode: existing AP interface to keep when keep_ap=true.
     /// Empty falls back to `iface`.
     #[serde(alias = "bt_wireless_poc_car_wifi_ap_iface")]
     pub bt_wireless_proxy_car_wifi_ap_iface: String,
+    /// car-wifi-mitm mode: phone-facing Wi-Fi mode.
+    /// car_ap/default forwards the HU Wi-Fi credentials to the phone.
+    /// proxy_ap joins the HU Wi-Fi on the STA interface, then restarts the aa-proxy AP
+    /// on the same channel and sends the normal aa-proxy AP credentials to the phone.
+    pub bt_wireless_proxy_phone_wifi_mode: String,
     /// car-wifi-mitm mode: IP address to place in the phone-facing WifiStartRequest.
     /// Empty means auto-detect using `ip route get <hu_ip>` / interface IPv4.
     #[serde(alias = "bt_wireless_poc_rewrite_ip")]
@@ -828,7 +836,9 @@ impl Default for AppConfig {
             bt_wireless_proxy_dhcp_timeout_secs: 30,
             bt_wireless_proxy_car_wifi_keep_ap: false,
             bt_wireless_proxy_car_wifi_sta_iface: String::new(),
+            bt_wireless_proxy_car_wifi_sta_phy: String::new(),
             bt_wireless_proxy_car_wifi_ap_iface: String::new(),
+            bt_wireless_proxy_phone_wifi_mode: "car_ap".into(),
             bt_wireless_proxy_rewrite_ip: String::new(),
             bt_wireless_proxy_listen_port: 5288,
             bt_wireless_proxy_use_version_projection_fallback: true,
@@ -1139,8 +1149,12 @@ impl AppConfig {
             value(self.bt_wireless_proxy_car_wifi_keep_ap);
         doc["bt_wireless_proxy_car_wifi_sta_iface"] =
             value(self.bt_wireless_proxy_car_wifi_sta_iface.clone());
+        doc["bt_wireless_proxy_car_wifi_sta_phy"] =
+            value(self.bt_wireless_proxy_car_wifi_sta_phy.clone());
         doc["bt_wireless_proxy_car_wifi_ap_iface"] =
             value(self.bt_wireless_proxy_car_wifi_ap_iface.clone());
+        doc["bt_wireless_proxy_phone_wifi_mode"] =
+            value(self.bt_wireless_proxy_phone_wifi_mode.clone());
         doc["bt_wireless_proxy_rewrite_ip"] = value(self.bt_wireless_proxy_rewrite_ip.clone());
         doc["bt_wireless_proxy_listen_port"] =
             value(self.bt_wireless_proxy_listen_port as i64);
