@@ -560,6 +560,11 @@ async fn tokio_main(
                         )
                         .await
                 } else if proxy_mode == "car-wifi-mitm" || proxy_mode == "wifi-mitm" {
+                    let car_wifi_base_iface = if cfg.bt_wireless_proxy_car_wifi_base_iface.trim().is_empty() {
+                        cfg.iface.clone()
+                    } else {
+                        cfg.bt_wireless_proxy_car_wifi_base_iface.clone()
+                    };
                     bluetooth
                         .aa_wireless_car_wifi_mitm_proxy(
                             cfg.connect.clone(),
@@ -567,7 +572,7 @@ async fn tokio_main(
                                 hu_mac: cfg.bt_wireless_proxy_hu_mac.clone(),
                                 hu_channel: cfg.bt_wireless_proxy_hu_channel,
                                 rendezvous_mode: cfg.bt_wireless_proxy_rendezvous_mode.clone(),
-                                iface: cfg.iface.clone(),
+                                iface: car_wifi_base_iface,
                                 join_cmd: cfg.bt_wireless_proxy_car_wifi_join_cmd.clone(),
                                 auto_join: cfg.bt_wireless_proxy_car_wifi_auto_join,
                                 join_control: cfg.bt_wireless_proxy_wifi_join_control.clone(),
@@ -583,6 +588,8 @@ async fn tokio_main(
                                 listen_port: cfg.bt_wireless_proxy_listen_port,
                                 tcp_start: tcp_start.clone(),
                                 use_version_projection_fallback: cfg.bt_wireless_proxy_use_version_projection_fallback,
+                                wpp_keepalive: cfg.bt_wireless_proxy_wpp_keepalive,
+                                wpp_keepalive_interval: Duration::from_millis(cfg.bt_wireless_proxy_wpp_keepalive_interval_ms.max(250)),
                                 wpactrl_socket_timeout: Duration::from_secs(cfg.bt_wireless_proxy_wpactrl_socket_timeout_secs.max(1)),
                                 wifi_association_timeout: Duration::from_secs(cfg.bt_wireless_proxy_wifi_association_timeout_secs.max(1)),
                                 dhcp_timeout: Duration::from_secs(cfg.bt_wireless_proxy_dhcp_timeout_secs.max(1)),

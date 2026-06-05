@@ -193,6 +193,12 @@
           "advanced": true,
           "requires": "bt_wireless_proxy"
         },
+        "bt_wireless_proxy_car_wifi_base_iface": {
+          "typ": "string",
+          "description": "EXPERIMENTAL Proxy car-wifi-mitm: base Wi-Fi interface. Empty falls back to global iface. In proxy_ap this is the car-side STA interface, usually wlan0; the phone AP is created as ap0.",
+          "advanced": true,
+          "requires": "bt_wireless_proxy"
+        },
         "bt_wireless_proxy_car_wifi_join_cmd": {
           "typ": "string",
           "description": "EXPERIMENTAL Proxy car-wifi-mitm: optional shell command template for joining the HU Wi-Fi. Placeholders: {iface}, {ssid}, {bssid}, {key}, {security}. Non-empty custom command overrides automatic nmcli/wpa_cli join.",
@@ -262,7 +268,7 @@
           "requires": "bt_wireless_proxy"
         },
         "bt_wireless_proxy_phone_wifi_mode": {
-          "typ": "string",
+          "typ": "radio",
           "description": "EXPERIMENTAL Proxy car-wifi-mitm: phone-facing Wi-Fi mode. car_ap forwards HU/car Wi-Fi credentials to the phone. proxy_ap keeps the phone on the aa-proxy AP while the STA interface joins the HU/car Wi-Fi.",
           "values": [
             "car_ap",
@@ -286,6 +292,18 @@
         "bt_wireless_proxy_use_version_projection_fallback": {
           "typ": "boolean",
           "description": "EXPERIMENTAL Proxy car-wifi-mitm: if WifiVersionRequest includes WifiProjectionProtocolInfo ip/port and HU does not send explicit WifiStartRequest, synthesize WifiStartRequest from that endpoint. Default: true.",
+          "advanced": true,
+          "requires": "bt_wireless_proxy"
+        },
+        "bt_wireless_proxy_wpp_keepalive": {
+          "typ": "boolean",
+          "description": "EXPERIMENTAL Proxy car-wifi-mitm: send synthetic WPP WifiPingRequest keepalive frames to the HU while aa-proxy is joining Wi-Fi / starting proxy_ap and waiting for phone Wi-Fi bootstrap. Default: false.",
+          "advanced": true,
+          "requires": "bt_wireless_proxy"
+        },
+        "bt_wireless_proxy_wpp_keepalive_interval_ms": {
+          "typ": "integer",
+          "description": "EXPERIMENTAL Proxy car-wifi-mitm: interval in milliseconds for synthetic HU WPP WifiPingRequest keepalives. Default: 2000; minimum used by code: 250.",
           "advanced": true,
           "requires": "bt_wireless_proxy"
         }

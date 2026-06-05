@@ -394,6 +394,10 @@ pub struct AppConfig {
     pub bt_wireless_proxy_hu_channel: Option<u8>,
     #[serde(alias = "bt_wireless_poc_tcp_probe")]
     pub bt_wireless_proxy_tcp_probe: bool,
+    /// car-wifi-mitm mode: base Wi-Fi interface. Empty falls back to global `iface`.
+    /// In proxy_ap this is the stable car-side STA interface, usually wlan0; the
+    /// phone-facing AP is created as ap0 on the same PHY/channel.
+    pub bt_wireless_proxy_car_wifi_base_iface: String,
     /// car-wifi-mitm mode: optional shell command template used to join the HU Wi-Fi.
     /// Placeholders are shell-quoted: {iface}, {ssid}, {bssid}, {key}, {security}.
     /// Non-empty custom command overrides automatic nmcli/wpa_cli join.
@@ -449,6 +453,10 @@ pub struct AppConfig {
     /// from that endpoint to avoid version-bootstrap deadlock on stricter HUs.
     #[serde(alias = "bt_wireless_poc_use_version_projection_fallback")]
     pub bt_wireless_proxy_use_version_projection_fallback: bool,
+    /// EXPERIMENTAL car-wifi-mitm: send synthetic WPP WifiPingRequest keepalive frames
+    /// to the HU while the local Wi-Fi/TCP leg is being prepared.
+    pub bt_wireless_proxy_wpp_keepalive: bool,
+    pub bt_wireless_proxy_wpp_keepalive_interval_ms: u64,
     pub debug: bool,
     /// Enable packet debug output independently from global debug logging.
     /// When enabled, pkt_debug lines are emitted at INFO level so `debug = false` can be kept.
@@ -828,6 +836,7 @@ impl Default for AppConfig {
             bt_wireless_proxy_hu_first_wait_phone_secs: 30,
             bt_wireless_proxy_hu_channel: None,
             bt_wireless_proxy_tcp_probe: true,
+            bt_wireless_proxy_car_wifi_base_iface: String::new(),
             bt_wireless_proxy_car_wifi_join_cmd: String::new(),
             bt_wireless_proxy_car_wifi_auto_join: false,
             bt_wireless_proxy_wifi_join_control: "auto".to_string(),
@@ -842,6 +851,8 @@ impl Default for AppConfig {
             bt_wireless_proxy_rewrite_ip: String::new(),
             bt_wireless_proxy_listen_port: 5288,
             bt_wireless_proxy_use_version_projection_fallback: true,
+            bt_wireless_proxy_wpp_keepalive: false,
+            bt_wireless_proxy_wpp_keepalive_interval_ms: 2000,
             debug: false,
             pkt_debug: false,
             hexdump_level: HexdumpLevel::Disabled,
@@ -1133,6 +1144,8 @@ impl AppConfig {
         doc["bt_wireless_proxy_hu_channel"] =
             value(self.bt_wireless_proxy_hu_channel.unwrap_or(0) as i64);
         doc["bt_wireless_proxy_tcp_probe"] = value(self.bt_wireless_proxy_tcp_probe);
+        doc["bt_wireless_proxy_car_wifi_base_iface"] =
+            value(self.bt_wireless_proxy_car_wifi_base_iface.clone());
         doc["bt_wireless_proxy_car_wifi_join_cmd"] =
             value(self.bt_wireless_proxy_car_wifi_join_cmd.clone());
         doc["bt_wireless_proxy_car_wifi_auto_join"] =
@@ -1160,6 +1173,9 @@ impl AppConfig {
             value(self.bt_wireless_proxy_listen_port as i64);
         doc["bt_wireless_proxy_use_version_projection_fallback"] =
             value(self.bt_wireless_proxy_use_version_projection_fallback);
+        doc["bt_wireless_proxy_wpp_keepalive"] = value(self.bt_wireless_proxy_wpp_keepalive);
+        doc["bt_wireless_proxy_wpp_keepalive_interval_ms"] =
+            value(self.bt_wireless_proxy_wpp_keepalive_interval_ms as i64);
         doc["debug"] = value(self.debug);
         doc["pkt_debug"] = value(self.pkt_debug);
         doc["hexdump_level"] = value(format!("{:?}", self.hexdump_level));

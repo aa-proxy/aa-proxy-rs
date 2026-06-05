@@ -24,13 +24,15 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::net::IpAddr;
 use std::pin::Pin;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{copy_bidirectional, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::process::Command;
 use tokio::sync::broadcast::Receiver as BroadcastReceiver;
 use tokio::sync::broadcast::Sender as BroadcastSender;
 use tokio::sync::Notify;
+use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 use crate::config::{TCP_DHU_PORT, TCP_SERVER_PORT};
 use tokio::time::timeout;
 
@@ -620,6 +622,12 @@ pub struct CarWifiMitmProxyOptions {
     /// If HU WifiVersionRequest contains WifiProjectionProtocolInfo(ip/port) and no explicit
     /// WifiStartRequest arrives, synthesize WifiStartRequest from that endpoint.
     pub use_version_projection_fallback: bool,
+    /// Send synthetic WifiPingRequest frames to the HU RFCOMM/WPP socket while
+    /// aa-proxy is busy joining Wi-Fi / starting proxy_ap and waiting for the
+    /// phone's Wi-Fi bootstrap response. This keeps impatient HUs from timing
+    /// out before the TCP leg is ready.
+    pub wpp_keepalive: bool,
+    pub wpp_keepalive_interval: Duration,
     /// Timeout for the wpa_supplicant control socket to appear in wpactrl mode.
     pub wpactrl_socket_timeout: Duration,
     /// Timeout for STA association + IPv4 readiness after a Wi-Fi join attempt.
@@ -781,8 +789,8 @@ async fn read_proxy_frame(stream: &mut Stream, direction: &'static str) -> Resul
     Ok((message_id, payload))
 }
 
-async fn send_proxy_frame_raw(
-    stream: &mut Stream,
+async fn send_proxy_frame_raw<W: AsyncWrite + Unpin + ?Sized>(
+    stream: &mut W,
     direction: &'static str,
     message_id: u16,
     payload: &[u8],
@@ -798,8 +806,8 @@ async fn send_proxy_frame_raw(
     Ok(())
 }
 
-async fn send_proxy_frame(
-    stream: &mut Stream,
+async fn send_proxy_frame<W: AsyncWrite + Unpin + ?Sized>(
+    stream: &mut W,
     direction: &'static str,
     message_id: ProxyMessageId,
     payload: &[u8],
@@ -832,6 +840,97 @@ fn wifi_start_response_status_payload(status: i32) -> Vec<u8> {
     // WifiStartResponse.status is field #3. Field #1 is ip_address, so using
     // a generic [08, 00] status payload here produces an invalid string field.
     proto_int32_status_payload(3, status)
+}
+
+fn now_millis_i64() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(i64::MAX as u128) as i64
+}
+
+fn wifi_ping_request_payload(timestamp_ms: i64) -> Vec<u8> {
+    // WifiPingRequest/PingRequest.timestamp is field #1, varint int64.
+    let mut out = Vec::with_capacity(12);
+    encode_proto_varint(0x08, &mut out);
+    encode_proto_varint(timestamp_ms as u64, &mut out);
+    out
+}
+
+struct TaskAbortGuard {
+    name: &'static str,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl TaskAbortGuard {
+    fn none(name: &'static str) -> Self {
+        Self { name, handle: None }
+    }
+
+    fn new(name: &'static str, handle: JoinHandle<()>) -> Self {
+        Self { name, handle: Some(handle) }
+    }
+
+    fn abort_now(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            info!("{} 🧪 bt-wireless-proxy car-wifi-mitm: stopping {}", NAME, self.name);
+            handle.abort();
+        }
+    }
+}
+
+impl Drop for TaskAbortGuard {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
+}
+
+fn spawn_hu_wpp_keepalive<W>(
+    hu_writer: Arc<Mutex<W>>,
+    interval: Duration,
+) -> TaskAbortGuard
+where
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    let interval = interval.max(Duration::from_millis(250));
+    let handle = tokio::spawn(async move {
+        let mut seq: u64 = 0;
+        loop {
+            tokio::time::sleep(interval).await;
+            seq = seq.saturating_add(1);
+            let ts = now_millis_i64();
+            let payload = wifi_ping_request_payload(ts);
+            let mut writer = hu_writer.lock().await;
+            match send_proxy_frame(
+                &mut *writer,
+                "POC -> HU synthetic keepalive",
+                ProxyMessageId::WifiPingRequest,
+                &payload,
+            )
+            .await
+            {
+                Ok(()) => {
+                    if seq == 1 || seq % 5 == 0 {
+                        info!(
+                            "{} 🧪 bt-wireless-proxy car-wifi-mitm: sent synthetic HU WifiPingRequest keepalive #{} timestamp={} interval={:?}",
+                            NAME, seq, ts, interval
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "{} 🧪 bt-wireless-proxy car-wifi-mitm: synthetic HU WifiPingRequest keepalive failed after #{}: {}; stopping keepalive task",
+                        NAME, seq, e
+                    );
+                    break;
+                }
+            }
+        }
+    });
+    TaskAbortGuard::new("synthetic HU WPP keepalive", handle)
 }
 
 async fn read_phone_bootstrap_frame(
@@ -1535,7 +1634,7 @@ async fn run_wifi_join_custom_cmd(
     }
 }
 
-async fn current_iw_ssid(iface: &str) -> Option<String> {
+async fn current_iw_link_text(iface: &str) -> Option<String> {
     let output = timeout(
         Duration::from_secs(3),
         Command::new("iw").args(["dev", iface, "link"]).output(),
@@ -1546,8 +1645,11 @@ async fn current_iw_ssid(iface: &str) -> Option<String> {
     if !output.status.success() {
         return None;
     }
+    Some(String::from_utf8_lossy(&output.stdout).to_string())
+}
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+async fn current_iw_ssid(iface: &str) -> Option<String> {
+    let stdout = current_iw_link_text(iface).await?;
     for line in stdout.lines() {
         let line = line.trim();
         if let Some(ssid) = line.strip_prefix("SSID:") {
@@ -1555,6 +1657,13 @@ async fn current_iw_ssid(iface: &str) -> Option<String> {
         }
     }
     None
+}
+
+async fn current_iw_connected(iface: &str) -> bool {
+    current_iw_link_text(iface)
+        .await
+        .map(|stdout| stdout.lines().any(|line| line.trim_start().starts_with("Connected to ")))
+        .unwrap_or(false)
 }
 
 async fn run_nmcli_wifi_join(
@@ -2381,8 +2490,8 @@ async fn stop_phone_ap_for_proxy_ap(ap_iface: &str) {
         NAME, ap_iface
     );
     let _ = run_shell_for_wifi(
-        "stop phone-facing hostapd",
-        "killall hostapd 2>/dev/null || true",
+        "stop phone-facing AP helpers",
+        "killall hostapd 2>/dev/null || true; killall dnsmasq 2>/dev/null || true",
         5,
     )
     .await;
@@ -2392,6 +2501,11 @@ async fn stop_phone_ap_for_proxy_ap(ap_iface: &str) {
         5,
     )
     .await;
+    // brcmfmac can keep the previous AP role busy for a short moment after
+    // hostapd exits.  Without this settle, creating ap0 next to wlan0 STA can
+    // fail with `Device or resource busy (-16)` even though the manual command
+    // sequence works.
+    tokio::time::sleep(Duration::from_millis(500)).await;
 }
 
 
@@ -2436,47 +2550,53 @@ async fn ensure_proxy_phone_ap_iface(ap_iface: &str, car_sta_iface: &str) -> Res
             index + 1,
             candidates.len()
         );
-        let _ = run_shell_for_wifi(
-            "delete stale phone AP iface",
-            &format!("iw dev {} del 2>/dev/null || true", shell_quote(ap_iface)),
-            5,
-        )
-        .await;
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        for create_attempt in 1..=3 {
+            let _ = run_shell_for_wifi(
+                "delete stale phone AP iface",
+                &format!("iw dev {} del 2>/dev/null || true", shell_quote(ap_iface)),
+                5,
+            )
+            .await;
+            tokio::time::sleep(Duration::from_millis(300 * create_attempt)).await;
 
-        match run_shell_for_wifi(
-            "create phone AP iface",
-            &format!(
-                "iw phy {phy} interface add {ap} type __ap && ip link set {ap} up",
-                phy = shell_quote(phy),
-                ap = shell_quote(ap_iface)
-            ),
-            10,
-        )
-        .await
-        {
-            Ok(()) => {
-                for attempt in 1..=5 {
-                    if iface_exists(ap_iface).await {
-                        info!(
-                            "{} 🧪 bt-wireless-proxy proxy_ap: verified phone AP iface {} exists on {} after create attempt",
-                            NAME, ap_iface, phy
-                        );
-                        return Ok(());
+            match run_shell_for_wifi(
+                "create phone AP iface",
+                &format!(
+                    "iw phy {phy} interface add {ap} type __ap && ip link set {ap} up",
+                    phy = shell_quote(phy),
+                    ap = shell_quote(ap_iface)
+                ),
+                10,
+            )
+            .await
+            {
+                Ok(()) => {
+                    for attempt in 1..=5 {
+                        if iface_exists(ap_iface).await {
+                            info!(
+                                "{} 🧪 bt-wireless-proxy proxy_ap: verified phone AP iface {} exists on {} after create attempt",
+                                NAME, ap_iface, phy
+                            );
+                            return Ok(());
+                        }
+                        tokio::time::sleep(Duration::from_millis(200 * attempt)).await;
                     }
-                    tokio::time::sleep(Duration::from_millis(200 * attempt)).await;
+                    last_error = format!(
+                        "created phone AP iface {} on {}, but the interface did not appear",
+                        ap_iface, phy
+                    );
                 }
-                last_error = format!(
-                    "created phone AP iface {} on {}, but the interface did not appear",
-                    ap_iface, phy
-                );
-            }
-            Err(e) => {
-                last_error = format!("create phone AP iface {} on {} failed: {}", ap_iface, phy, e);
-                warn!(
-                    "{} 🧪 bt-wireless-proxy proxy_ap: {}; trying next PHY candidate if available",
-                    NAME, last_error
-                );
+                Err(e) => {
+                    last_error = format!(
+                        "create phone AP iface {} on {} failed attempt {}/3: {}",
+                        ap_iface, phy, create_attempt, e
+                    );
+                    warn!(
+                        "{} 🧪 bt-wireless-proxy proxy_ap: {}; settling and retrying if possible",
+                        NAME, last_error
+                    );
+                    tokio::time::sleep(Duration::from_millis(700 * create_attempt)).await;
+                }
             }
         }
     }
@@ -2669,7 +2789,17 @@ async fn run_wpa_supplicant_wifi_join(
             associated = true;
             break;
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        if current_iw_connected(iface).await {
+            info!(
+                "{} 🧪 bt-wireless-proxy car-wifi-mitm: iface {} reports Connected in iw link but SSID parse was {:?}; proceeding to DHCP without waiting the full association timeout",
+                NAME,
+                iface,
+                current_ssid
+            );
+            associated = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
     if !associated {
         warn!(
@@ -3133,6 +3263,184 @@ async fn repair_car_side_route_after_phone_ap(
 
     install_ipv4_host_route(target_ip, iface, &src_ip).await?;
     Ok(src_ip)
+}
+
+
+async fn warm_car_side_route_for_hu(target_ip: &str, iface: &str) {
+    let target_ip = target_ip.trim();
+    let iface = iface.trim();
+    if target_ip.is_empty() || iface.is_empty() {
+        return;
+    }
+
+    // ICMP success is not required here.  The useful side effect is ARP/neighbor
+    // resolution and giving the single-radio AP+STA state a moment to settle
+    // before the real HU TCP connect.
+    let cmd = format!(
+        "ping -c 1 -W 1 -I {iface} {target} >/dev/null 2>&1 || true",
+        iface = shell_quote(iface),
+        target = shell_quote(target_ip),
+    );
+    let _ = run_shell_for_wifi("warm car-side HU route", &cmd, 2).await;
+}
+
+async fn log_car_side_route_state(target_ip: &str, iface: &str, context: &str) {
+    let target_ip = target_ip.trim();
+    let iface = iface.trim();
+    if target_ip.is_empty() {
+        return;
+    }
+
+    if let Ok(Ok(output)) = timeout(
+        Duration::from_secs(2),
+        Command::new("ip")
+            .args(["-4", "route", "get", target_ip])
+            .output(),
+    )
+    .await
+    {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if output.status.success() {
+            info!(
+                "{} 🧪 bt-wireless-proxy car-wifi-mitm: route to HU {}: {}",
+                NAME,
+                context,
+                stdout.trim()
+            );
+        } else {
+            warn!(
+                "{} 🧪 bt-wireless-proxy car-wifi-mitm: route to HU {} failed status={} stdout={} stderr={}",
+                NAME,
+                context,
+                output.status,
+                stdout.trim(),
+                stderr.trim()
+            );
+        }
+    }
+
+    if !iface.is_empty() {
+        let ssid = current_iw_ssid(iface).await;
+        let ip = iface_ipv4(iface).await;
+        info!(
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: car-side iface state {} iface={} ssid={:?} ip={:?}",
+            NAME,
+            context,
+            iface,
+            ssid,
+            ip
+        );
+    }
+}
+
+async fn connect_real_hu_tcp_with_route_retry(
+    hu_tcp_addr: &str,
+    hu_tcp_ip: &str,
+    iface: &str,
+    expected_ssid: &str,
+    src_ip_hint: &str,
+    dhcp_timeout: Duration,
+) -> Result<TcpStream> {
+    let mut last_error = String::new();
+    let max_attempts = 5usize;
+
+    for attempt in 1..=max_attempts {
+        if attempt > 1 {
+            let delay = Duration::from_millis(750 * attempt as u64);
+            info!(
+                "{} 🧪 bt-wireless-proxy car-wifi-mitm: delaying {:?} before HU TCP retry {}/{}",
+                NAME,
+                delay,
+                attempt,
+                max_attempts
+            );
+            tokio::time::sleep(delay).await;
+        }
+
+        match repair_car_side_route_after_phone_ap(
+            hu_tcp_ip,
+            iface,
+            expected_ssid,
+            src_ip_hint,
+            dhcp_timeout,
+        )
+        .await
+        {
+            Ok(src) => {
+                debug!(
+                    "{} 🧪 bt-wireless-proxy car-wifi-mitm: HU TCP attempt {}/{} route repaired via {} src {}",
+                    NAME,
+                    attempt,
+                    max_attempts,
+                    iface,
+                    src
+                );
+            }
+            Err(e) => {
+                warn!(
+                    "{} 🧪 bt-wireless-proxy car-wifi-mitm: HU TCP attempt {}/{} could not fully repair route before connect: {}",
+                    NAME,
+                    attempt,
+                    max_attempts,
+                    e
+                );
+            }
+        }
+
+        log_car_side_route_state(hu_tcp_ip, iface, "before HU TCP connect attempt").await;
+        warm_car_side_route_for_hu(hu_tcp_ip, iface).await;
+
+        info!(
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: connecting real HU TCP {} attempt {}/{}",
+            NAME,
+            hu_tcp_addr,
+            attempt,
+            max_attempts
+        );
+        match timeout(Duration::from_secs(5), TcpStream::connect(hu_tcp_addr)).await {
+            Ok(Ok(stream)) => {
+                info!(
+                    "{} 🧪 bt-wireless-proxy car-wifi-mitm: real HU TCP {} connected on attempt {}/{}",
+                    NAME,
+                    hu_tcp_addr,
+                    attempt,
+                    max_attempts
+                );
+                return Ok(stream);
+            }
+            Ok(Err(e)) => {
+                last_error = e.to_string();
+                warn!(
+                    "{} 🧪 bt-wireless-proxy car-wifi-mitm: real HU TCP {} connect attempt {}/{} failed: {}",
+                    NAME,
+                    hu_tcp_addr,
+                    attempt,
+                    max_attempts,
+                    last_error
+                );
+            }
+            Err(_) => {
+                last_error = "timed out after 5s".to_string();
+                warn!(
+                    "{} 🧪 bt-wireless-proxy car-wifi-mitm: real HU TCP {} connect attempt {}/{} timed out after 5s",
+                    NAME,
+                    hu_tcp_addr,
+                    attempt,
+                    max_attempts
+                );
+            }
+        }
+    }
+
+    log_car_side_route_state(hu_tcp_ip, iface, "after HU TCP connect retries failed").await;
+    Err(format!(
+        "real HU TCP {} failed after {} attempts; last error: {}",
+        hu_tcp_addr,
+        max_attempts,
+        last_error
+    )
+    .into())
 }
 
 async fn discover_rewrite_ip(target_ip: &str, iface: &str, override_ip: &str, dhcp_timeout: Duration) -> Result<String> {
@@ -5667,6 +5975,19 @@ impl Bluetooth {
         }
         let hu_wifi_info = WifiInfoResponse::WifiInfoResponse::parse_from_bytes(&hu_info_payload)?;
 
+        let (_hu_rfcomm_read, hu_rfcomm_write) = hu_stream.into_split();
+        let hu_rfcomm_writer = Arc::new(Mutex::new(hu_rfcomm_write));
+        let mut hu_wpp_keepalive = if options.wpp_keepalive {
+            info!(
+                "{} 🧪 bt-wireless-proxy car-wifi-mitm: starting synthetic HU WifiPingRequest keepalive every {:?} after HU WifiInfoResponse while Wi-Fi/TCP bootstrap completes",
+                NAME,
+                options.wpp_keepalive_interval
+            );
+            spawn_hu_wpp_keepalive(hu_rfcomm_writer.clone(), options.wpp_keepalive_interval)
+        } else {
+            TaskAbortGuard::none("synthetic HU WPP keepalive")
+        };
+
         let phone_wifi_mode = options.phone_wifi_mode.trim().to_ascii_lowercase();
         let proxy_phone_ap = matches!(phone_wifi_mode.as_str(), "proxy_ap" | "proxy-ap" | "proxyap" | "ap_proxy");
         let base_iface = options.iface.trim();
@@ -5728,6 +6049,27 @@ impl Bluetooth {
                 "{} 🧪 bt-wireless-proxy proxy_ap: using inverted single-radio layout phone_ap_iface={} car_sta_iface={} (car joins first, phone AP starts after channel is known)",
                 NAME, effective_ap_iface, effective_sta_iface
             );
+        } else {
+            // car_ap means the phone will join the HU/car AP. aa-proxy must also
+            // join that same car AP on the base interface and expose its car-side
+            // IP to the phone. Keeping aa-proxy's own AP alive via sta0 is both
+            // unnecessary and unstable on single-radio Pi setups, and it broke the
+            // car_ap path when bt_wireless_proxy_car_wifi_keep_ap was left true in
+            // old configs. Treat keep_ap/sta_iface as proxy_ap-only internals.
+            if effective_keep_ap || effective_sta_iface.starts_with("sta") {
+                info!(
+                    "{} 🧪 bt-wireless-proxy car_ap: forcing takeover layout car_sta_iface={} and ignoring keep_ap/sta_iface config for this mode",
+                    NAME,
+                    if base_iface.is_empty() { "wlan0" } else { base_iface }
+                );
+            }
+            effective_keep_ap = false;
+            effective_ap_iface = String::new();
+            effective_sta_iface = if base_iface.is_empty() {
+                "wlan0".to_string()
+            } else {
+                base_iface.to_string()
+            };
         }
 
         let effective_join_control = if proxy_phone_ap
@@ -5813,7 +6155,7 @@ impl Bluetooth {
         };
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        let car_side_rewrite_ip = discover_rewrite_ip(&hu_tcp_ip, &join_iface, &options.rewrite_ip, options.dhcp_timeout).await?;
+        let mut car_side_rewrite_ip = discover_rewrite_ip(&hu_tcp_ip, &join_iface, &options.rewrite_ip, options.dhcp_timeout).await?;
         let mut rewrite_ip = car_side_rewrite_ip.clone();
         let mut phone_wifi_info_payload = hu_info_payload.clone();
 
@@ -5846,6 +6188,7 @@ impl Bluetooth {
                 options.dhcp_timeout,
             )
             .await?;
+            car_side_rewrite_ip = car_side_route_src_ip.clone();
             info!(
                 "{} 🧪 bt-wireless-proxy proxy_ap: car-side HU route is ready via {} src {} after phone AP restart",
                 NAME,
@@ -5963,33 +6306,34 @@ impl Bluetooth {
                 ProxyMessageId::name(phone_start_resp_id)
             );
         }
-        send_proxy_frame_raw(
-            &mut hu_stream,
-            "POC -> HU",
-            phone_start_resp_id,
-            &phone_start_resp_payload,
-        )
-        .await?;
-
+        {
+            let mut hu_writer = hu_rfcomm_writer.lock().await;
+            send_proxy_frame_raw(
+                &mut *hu_writer,
+                "POC -> HU",
+                phone_start_resp_id,
+                &phone_start_resp_payload,
+            )
+            .await?;
+        }
         let hu_tcp_addr = format!("{}:{}", hu_tcp_ip, hu_tcp_port);
         let local_hu_tcp_addr = format!("127.0.0.1:{}", TCP_DHU_PORT);
         info!(
-            "{} 🧪 bt-wireless-proxy car-wifi-mitm: connecting real HU TCP {} and local aa-proxy HU-side TCP {}",
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: connecting real HU TCP {} and local aa-proxy HU-side TCP {}; keeping synthetic WPP keepalive alive until TCP bridge is ready",
             NAME, hu_tcp_addr, local_hu_tcp_addr
         );
 
-        let hu_tcp_fut = TcpStream::connect(hu_tcp_addr.as_str());
-        let local_hu_tcp_fut = TcpStream::connect(local_hu_tcp_addr.as_str());
-        let (mut hu_tcp, mut local_hu_tcp) = tokio::try_join!(
-            async {
-                let stream = timeout(Duration::from_secs(15), hu_tcp_fut).await??;
-                Ok::<_, Box<dyn std::error::Error + Send + Sync>>(stream)
-            },
-            async {
-                let stream = timeout(Duration::from_secs(45), local_hu_tcp_fut).await??;
-                Ok::<_, Box<dyn std::error::Error + Send + Sync>>(stream)
-            }
-        )?;
+        let mut hu_tcp = connect_real_hu_tcp_with_route_retry(
+            &hu_tcp_addr,
+            &hu_tcp_ip,
+            &join_iface,
+            hu_wifi_info.ssid(),
+            &car_side_rewrite_ip,
+            options.dhcp_timeout,
+        )
+        .await?;
+        let mut local_hu_tcp = timeout(Duration::from_secs(45), TcpStream::connect(local_hu_tcp_addr.as_str())).await??;
+        hu_wpp_keepalive.abort_now();
         hu_tcp.set_nodelay(true)?;
         local_hu_tcp.set_nodelay(true)?;
         info!(
@@ -5998,7 +6342,7 @@ impl Bluetooth {
         );
 
         let mut phone_rfcomm = phone_stream;
-        let mut hu_rfcomm = hu_stream;
+        let hu_rfcomm_writer_for_status = hu_rfcomm_writer.clone();
         let rfcomm_status_task = tokio::spawn(async move {
             match timeout(
                 Duration::from_secs(20),
@@ -6015,8 +6359,9 @@ impl Bluetooth {
                             ProxyMessageId::name(phone_status_id)
                         );
                     }
+                    let mut hu_rfcomm = hu_rfcomm_writer_for_status.lock().await;
                     send_proxy_frame_raw(
-                        &mut hu_rfcomm,
+                        &mut *hu_rfcomm,
                         "POC -> HU",
                         phone_status_id,
                         &phone_status_payload,
@@ -6029,8 +6374,9 @@ impl Bluetooth {
                         NAME, e
                     );
                     let status_payload = wifi_connect_status_payload(0);
+                    let mut hu_rfcomm = hu_rfcomm_writer_for_status.lock().await;
                     send_proxy_frame(
-                        &mut hu_rfcomm,
+                        &mut *hu_rfcomm,
                         "POC -> HU",
                         ProxyMessageId::WifiConnectStatus,
                         &status_payload,
@@ -6043,8 +6389,9 @@ impl Bluetooth {
                         NAME
                     );
                     let status_payload = wifi_connect_status_payload(0);
+                    let mut hu_rfcomm = hu_rfcomm_writer_for_status.lock().await;
                     send_proxy_frame(
-                        &mut hu_rfcomm,
+                        &mut *hu_rfcomm,
                         "POC -> HU",
                         ProxyMessageId::WifiConnectStatus,
                         &status_payload,
