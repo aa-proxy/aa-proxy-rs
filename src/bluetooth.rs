@@ -608,7 +608,8 @@ pub struct CarWifiMitmProxyOptions {
     /// phy for creating sta_iface. Example: wlan0.
     pub ap_iface: String,
     /// Phone-facing Wi-Fi mode: car_ap forwards HU Wi-Fi credentials to phone;
-    /// proxy_ap sends normal aa-proxy AP credentials and uses STA only for the HU/car side.
+    /// proxy_ap sends normal aa-proxy AP credentials using a single radio (car STA + virtual phone AP);
+    /// external_ap sends normal aa-proxy AP credentials using a second/external STA interface for HU Wi-Fi.
     pub phone_wifi_mode: String,
     pub phone_ap_ssid: String,
     pub phone_ap_key: String,
@@ -1975,6 +1976,151 @@ async fn iface_exists(iface: &str) -> bool {
         .await,
         Ok(Ok(output)) if output.status.success()
     )
+}
+
+
+async fn wait_for_iface_exists(iface: &str, wait: Duration) -> bool {
+    let iface = iface.trim();
+    if iface.is_empty() {
+        return false;
+    }
+    let deadline = Instant::now() + wait;
+    loop {
+        if iface_exists(iface).await {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+async fn usb_wlan_ifaces(exclude_iface: &str) -> Vec<String> {
+    let exclude_iface = exclude_iface.trim().to_string();
+    match tokio::task::spawn_blocking(move || {
+        let mut out = Vec::<String>::new();
+        let Ok(devices) = std::fs::read_dir("/sys/bus/usb/devices") else {
+            return out;
+        };
+        for dev in devices.flatten() {
+            let net_dir = dev.path().join("net");
+            let Ok(entries) = std::fs::read_dir(net_dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let iface = entry.file_name().to_string_lossy().trim().to_string();
+                if iface.is_empty() || iface == exclude_iface {
+                    continue;
+                }
+                if iface.starts_with("wl") && !out.contains(&iface) {
+                    out.push(iface);
+                }
+            }
+        }
+        out.sort();
+        out
+    })
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(
+                "{} 🧪 bt-wireless-proxy external_ap: failed to scan USB WLAN interfaces: {}",
+                NAME, e
+            );
+            Vec::new()
+        }
+    }
+}
+
+async fn resolve_external_car_sta_iface(configured_sta_iface: &str, phone_ap_iface: &str) -> Result<String> {
+    let configured_sta_iface = configured_sta_iface.trim();
+    let phone_ap_iface = phone_ap_iface.trim();
+
+    if !configured_sta_iface.is_empty() {
+        if wait_for_iface_exists(configured_sta_iface, Duration::from_secs(8)).await {
+            info!(
+                "{} 🧪 bt-wireless-proxy external_ap: using configured car STA iface {}",
+                NAME, configured_sta_iface
+            );
+            return Ok(configured_sta_iface.to_string());
+        }
+        return Err(format!(
+            "external_ap configured car STA iface {} did not appear after module preload",
+            configured_sta_iface
+        )
+        .into());
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        let usb_ifaces = usb_wlan_ifaces(phone_ap_iface).await;
+        if let Some(iface) = usb_ifaces.first() {
+            info!(
+                "{} 🧪 bt-wireless-proxy external_ap: auto-detected USB car STA iface {} (phone AP iface is {})",
+                NAME, iface, phone_ap_iface
+            );
+            return Ok(iface.clone());
+        }
+
+        if phone_ap_iface != "wlan1" && iface_exists("wlan1").await {
+            info!(
+                "{} 🧪 bt-wireless-proxy external_ap: using wlan1 fallback as car STA iface",
+                NAME
+            );
+            return Ok("wlan1".to_string());
+        }
+
+        if Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
+    Err(format!(
+        "external_ap could not find a USB/external Wi-Fi STA interface; set bt_wireless_proxy_car_wifi_sta_iface or check preload_kernel_modules/modprobe"
+    )
+    .into())
+}
+
+async fn ensure_existing_phone_ap_ready(ap_iface: &str, ip: &str) -> Result<()> {
+    let ap_iface = ap_iface.trim();
+    let ip = ip.trim();
+    if ap_iface.is_empty() {
+        return Err("external_ap needs a non-empty phone AP interface".into());
+    }
+    if !iface_exists(ap_iface).await {
+        return Err(format!(
+            "external_ap phone AP iface {} does not exist; set bt_wireless_proxy_car_wifi_base_iface or iface",
+            ap_iface
+        )
+        .into());
+    }
+    if !ip.is_empty() && iface_ipv4(ap_iface).await.as_deref() != Some(ip) {
+        info!(
+            "{} 🧪 bt-wireless-proxy external_ap: ensuring phone AP iface {} has IPv4 {}",
+            NAME, ap_iface, ip
+        );
+        let _ = run_shell_for_wifi(
+            "ensure external_ap phone AP IPv4",
+            &format!(
+                "ip link set {iface} up; ip -4 addr show dev {iface} | grep -q 'inet {ip}/' || ip addr add {ip}/24 dev {iface} 2>/dev/null || true",
+                iface = shell_quote(ap_iface),
+                ip = shell_quote(ip)
+            ),
+            5,
+        )
+        .await;
+    } else {
+        let _ = run_shell_for_wifi(
+            "ensure external_ap phone AP iface up",
+            &format!("ip link set {} up", shell_quote(ap_iface)),
+            5,
+        )
+        .await;
+    }
+    Ok(())
 }
 
 async fn run_shell_for_wifi(label: &str, command: &str, timeout_secs: u64) -> Result<()> {
@@ -5989,7 +6135,9 @@ impl Bluetooth {
         };
 
         let phone_wifi_mode = options.phone_wifi_mode.trim().to_ascii_lowercase();
-        let proxy_phone_ap = matches!(phone_wifi_mode.as_str(), "proxy_ap" | "proxy-ap" | "proxyap" | "ap_proxy");
+        let external_phone_ap = matches!(phone_wifi_mode.as_str(), "external_ap" | "external-ap" | "externalap" | "external_proxy_ap" | "external-proxy-ap");
+        let proxy_phone_ap = external_phone_ap
+            || matches!(phone_wifi_mode.as_str(), "proxy_ap" | "proxy-ap" | "proxyap" | "ap_proxy");
         let base_iface = options.iface.trim();
         let mut effective_keep_ap = options.keep_ap;
         let mut proxy_ap_uses_virtual_ap_iface = false;
@@ -6011,7 +6159,24 @@ impl Bluetooth {
         } else {
             options.sta_iface.trim().to_string()
         };
-        if proxy_phone_ap {
+        if external_phone_ap {
+            let phone_ap_iface = if !options.ap_iface.trim().is_empty() {
+                options.ap_iface.trim().to_string()
+            } else if base_iface.is_empty() {
+                "wlan0".to_string()
+            } else {
+                base_iface.to_string()
+            };
+            let car_sta_iface = resolve_external_car_sta_iface(&options.sta_iface, &phone_ap_iface).await?;
+            effective_ap_iface = phone_ap_iface;
+            effective_sta_iface = car_sta_iface;
+            effective_keep_ap = false;
+            proxy_ap_uses_virtual_ap_iface = false;
+            info!(
+                "{} 🧪 bt-wireless-proxy external_ap: using two-radio layout phone_ap_iface={} car_sta_iface={} (external/USB STA joins HU Wi-Fi; phone stays on aa-proxy AP)",
+                NAME, effective_ap_iface, effective_sta_iface
+            );
+        } else if proxy_phone_ap {
             // On Raspberry Pi's single-radio brcmfmac setup the natural-looking layout
             // (wlan0 as phone AP, sta0 as virtual car STA) is unstable: wpa_supplicant
             // can make the virtual sta0 disappear while associating. Manual testing
@@ -6076,8 +6241,9 @@ impl Bluetooth {
             && matches!(options.join_control.trim().to_ascii_lowercase().as_str(), "" | "auto" | "wpactrl")
         {
             info!(
-                "{} 🧪 bt-wireless-proxy proxy_ap: forcing Wi-Fi join control=wpa_supplicant for virtual STA iface; wpactrl control socket is unreliable on short-lived sta ifaces",
-                NAME
+                "{} 🧪 bt-wireless-proxy {}: forcing Wi-Fi join control=wpa_supplicant for car STA iface",
+                NAME,
+                if external_phone_ap { "external_ap" } else { "proxy_ap" }
             );
             "wpa_supplicant".to_string()
         } else {
@@ -6107,7 +6273,7 @@ impl Bluetooth {
 
         let join_iface = match join_attempt {
             Ok(iface) => iface,
-            Err(e) if proxy_phone_ap && e.to_string().contains("disappeared before association") => {
+            Err(e) if !external_phone_ap && proxy_phone_ap && e.to_string().contains("disappeared before association") => {
                 warn!(
                     "{} 🧪 bt-wireless-proxy proxy_ap: car STA iface {} disappeared during virtual-STA join: {}; falling back to inverted single-radio mode: wlan0 as car STA, ap0 as phone AP",
                     NAME,
@@ -6160,26 +6326,36 @@ impl Bluetooth {
         let mut phone_wifi_info_payload = hu_info_payload.clone();
 
         if proxy_phone_ap {
-            let channel = current_iw_channel(&join_iface)
-                .await
-                .ok_or_else(|| format!("proxy_ap could not determine car STA channel from iface {}", join_iface))?;
             let phone_ap_ip = if options.phone_ap_ip.trim().is_empty() {
                 "10.0.0.1".to_string()
             } else {
                 options.phone_ap_ip.trim().to_string()
             };
-            if proxy_ap_uses_virtual_ap_iface {
-                ensure_proxy_phone_ap_iface(&effective_ap_iface, &join_iface).await?;
-            }
-            start_proxy_phone_ap(
-                &effective_ap_iface,
-                &options.phone_ap_ssid,
-                &options.phone_ap_key,
-                &phone_ap_ip,
-                channel,
-            )
-            .await?;
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            let channel = if external_phone_ap {
+                ensure_existing_phone_ap_ready(&effective_ap_iface, &phone_ap_ip).await?;
+                let mut channel = current_iw_channel(&effective_ap_iface).await;
+                if channel.is_none() {
+                    channel = current_iw_channel(&join_iface).await;
+                }
+                channel.unwrap_or(0)
+            } else {
+                let channel = current_iw_channel(&join_iface)
+                    .await
+                    .ok_or_else(|| format!("proxy_ap could not determine car STA channel from iface {}", join_iface))?;
+                if proxy_ap_uses_virtual_ap_iface {
+                    ensure_proxy_phone_ap_iface(&effective_ap_iface, &join_iface).await?;
+                }
+                start_proxy_phone_ap(
+                    &effective_ap_iface,
+                    &options.phone_ap_ssid,
+                    &options.phone_ap_key,
+                    &phone_ap_ip,
+                    channel,
+                )
+                .await?;
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                channel
+            };
             let car_side_route_src_ip = repair_car_side_route_after_phone_ap(
                 &hu_tcp_ip,
                 &join_iface,
@@ -6190,8 +6366,9 @@ impl Bluetooth {
             .await?;
             car_side_rewrite_ip = car_side_route_src_ip.clone();
             info!(
-                "{} 🧪 bt-wireless-proxy proxy_ap: car-side HU route is ready via {} src {} after phone AP restart",
+                "{} 🧪 bt-wireless-proxy {}: car-side HU route is ready via {} src {} after phone AP preparation",
                 NAME,
+                if external_phone_ap { "external_ap" } else { "proxy_ap" },
                 join_iface,
                 car_side_route_src_ip
             );
@@ -6207,14 +6384,16 @@ impl Bluetooth {
                 .unwrap_or_default();
             if phone_ap_bssid.is_empty() {
                 warn!(
-                    "{} 🧪 bt-wireless-proxy proxy_ap: could not read BSSID/MAC for phone AP iface {}; WifiInfoResponse will contain an empty bssid and the phone may not attempt Wi-Fi connect",
+                    "{} 🧪 bt-wireless-proxy {}: could not read BSSID/MAC for phone AP iface {}; WifiInfoResponse will contain an empty bssid and the phone may not attempt Wi-Fi connect",
                     NAME,
+                    if external_phone_ap { "external_ap" } else { "proxy_ap" },
                     effective_ap_iface
                 );
             } else {
                 info!(
-                    "{} 🧪 bt-wireless-proxy proxy_ap: using phone AP BSSID {} from iface {} for WifiInfoResponse",
+                    "{} 🧪 bt-wireless-proxy {}: using phone AP BSSID {} from iface {} for WifiInfoResponse",
                     NAME,
+                    if external_phone_ap { "external_ap" } else { "proxy_ap" },
                     phone_ap_bssid,
                     effective_ap_iface
                 );
@@ -6227,8 +6406,9 @@ impl Bluetooth {
             phone_wifi_info_payload = phone_wifi_info.write_to_bytes()?;
             rewrite_ip = phone_ap_ip;
             info!(
-                "{} 🧪 bt-wireless-proxy proxy_ap: car side is {} via {}; phone side will receive AP ssid={} bssid={} ip={}:{} on iface={} channel={} instead of HU Wi-Fi ssid={} {}:{}",
+                "{} 🧪 bt-wireless-proxy {}: car side is {} via {}; phone side will receive AP ssid={} bssid={} ip={}:{} on iface={} channel={} instead of HU Wi-Fi ssid={} {}:{}",
                 NAME,
+                if external_phone_ap { "external_ap" } else { "proxy_ap" },
                 car_side_rewrite_ip,
                 join_iface,
                 options.phone_ap_ssid,

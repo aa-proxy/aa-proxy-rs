@@ -46,6 +46,11 @@
           "description": "WLAN / Wi-Fi hotspot interface (for obtaining IP and BSSID)",
           "advanced": true
         },
+        "preload_kernel_modules": {
+          "typ": "string",
+          "description": "Comma-separated kernel modules to modprobe during startup. In bt_wireless_proxy phone_wifi_mode=external_ap, rt2800usb is automatically added unless it is already listed. Example: rt2800usb,mt76x2u.",
+          "advanced": true
+        },
         "wlan_subnet": {
           "typ": "string",
           "description": "Internal Wi-Fi hotspot subnet (first three octets). The device IP will be <subnet>.1, DHCP pool <subnet>.2–<subnet>.20. Change only if this conflicts with another network in your car. Default: 10.0.0",
@@ -195,7 +200,7 @@
         },
         "bt_wireless_proxy_car_wifi_base_iface": {
           "typ": "string",
-          "description": "EXPERIMENTAL Proxy car-wifi-mitm: base Wi-Fi interface. Empty falls back to global iface. In proxy_ap this is the car-side STA interface, usually wlan0; the phone AP is created as ap0.",
+          "description": "EXPERIMENTAL Proxy car-wifi-mitm: base Wi-Fi interface. Empty falls back to global iface. In proxy_ap this starts as the base/single-radio interface; in external_ap this is the phone-facing AP interface, usually wlan0.",
           "advanced": true,
           "requires": "bt_wireless_proxy"
         },
@@ -251,7 +256,7 @@
         },
         "bt_wireless_proxy_car_wifi_sta_iface": {
           "typ": "string",
-          "description": "EXPERIMENTAL Proxy car-wifi-mitm: managed STA interface used to join HU/car Wi-Fi. Empty falls back to iface in takeover mode, or sta0 when keep_ap/proxy_ap is true.",
+          "description": "EXPERIMENTAL Proxy car-wifi-mitm: managed STA interface used to join HU/car Wi-Fi. In external_ap, empty auto-detects a USB WLAN interface and falls back to wlan1.",
           "advanced": true,
           "requires": "bt_wireless_proxy"
         },
@@ -269,10 +274,11 @@
         },
         "bt_wireless_proxy_phone_wifi_mode": {
           "typ": "radio",
-          "description": "EXPERIMENTAL Proxy car-wifi-mitm: phone-facing Wi-Fi mode. car_ap forwards HU/car Wi-Fi credentials to the phone. proxy_ap keeps the phone on the aa-proxy AP while the STA interface joins the HU/car Wi-Fi.",
+          "description": "EXPERIMENTAL Proxy car-wifi-mitm: phone-facing Wi-Fi mode. car_ap forwards HU/car Wi-Fi credentials to the phone. proxy_ap uses a single radio and creates a virtual phone AP. external_ap keeps the phone on the base aa-proxy AP while an external/USB STA joins the HU/car Wi-Fi.",
           "values": [
             "car_ap",
-            "proxy_ap"
+            "proxy_ap",
+            "external_ap"
           ],
           "advanced": true,
           "requires": "bt_wireless_proxy"
