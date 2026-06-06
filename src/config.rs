@@ -352,8 +352,11 @@ pub struct AppConfig {
     pub enable_companion_bt: bool,
     pub dongle_mode: bool,
     /// Comma-separated kernel modules to modprobe during startup.
-    /// In bt_wireless_proxy phone_wifi_mode=external_ap, rt2800usb is added unless already listed.
+    /// No driver is added automatically; list any USB Wi-Fi driver explicitly, e.g. rt2800usb.
     pub preload_kernel_modules: String,
+    /// Optional firmware search directory for kernel modules that need firmware blobs.
+    /// If present and non-empty, it is written to /sys/module/firmware_class/parameters/path before preload_kernel_modules are modprobed.
+    pub kernel_module_path: String,
     /// Experimental AA Wireless Bluetooth Proxy. Disabled by default.
     /// bridge = accept the phone AA RFCOMM connection, connect to the HU RFCOMM
     /// endpoint from the same adapter, and relay/log both directions.
@@ -826,6 +829,7 @@ impl Default for AppConfig {
             enable_companion_bt: true,
             dongle_mode: false,
             preload_kernel_modules: String::new(),
+            kernel_module_path: "/data/aa-proxy-rs/firmware".to_string(),
             bt_wireless_proxy: false,
             bt_wireless_proxy_mode: "car-wifi-mitm".to_string(),
             bt_wireless_proxy_hu_mac: String::new(),
@@ -1126,6 +1130,7 @@ impl AppConfig {
         doc["enable_companion_bt"] = value(self.enable_companion_bt);
         doc["dongle_mode"] = value(self.dongle_mode);
         doc["preload_kernel_modules"] = value(self.preload_kernel_modules.clone());
+        doc["kernel_module_path"] = value(self.kernel_module_path.clone());
         doc["bt_wireless_proxy"] = value(self.bt_wireless_proxy);
         doc["bt_wireless_proxy_mode"] = value(self.bt_wireless_proxy_mode.clone());
         doc["bt_wireless_proxy_hu_mac"] = value(self.bt_wireless_proxy_hu_mac.clone());

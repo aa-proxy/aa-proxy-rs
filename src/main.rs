@@ -74,7 +74,7 @@ const UMTPRD_CONF_OUT: &str = "/var/run/umtprd.conf";
 const GADGET_INIT_IN: &str = "/etc/S92usb_gadget.in";
 const GADGET_INIT_OUT: &str = "/var/run/S92usb_gadget";
 const REBOOT_CMD: &str = "/sbin/reboot";
-const DATA_FIRMWARE_DIR: &str = "/data/aa-proxy-rs/firmware";
+const DEFAULT_KERNEL_MODULE_PATH: &str = "/data/aa-proxy-rs/firmware";
 const FIRMWARE_CLASS_PATH_PARAM: &str = "/sys/module/firmware_class/parameters/path";
 
 
@@ -106,9 +106,22 @@ struct Args {
 
 
 
-fn configure_data_firmware_search_path() {
-    let firmware_dir = std::path::Path::new(DATA_FIRMWARE_DIR);
+fn configure_kernel_module_path_for_config(cfg: &AppConfig) {
+    let configured_path = cfg.kernel_module_path.trim();
+    let kernel_module_path = if configured_path.is_empty() {
+        DEFAULT_KERNEL_MODULE_PATH
+    } else {
+        configured_path
+    };
+
+    let firmware_dir = std::path::Path::new(kernel_module_path);
     if !firmware_dir.is_dir() {
+        if !configured_path.is_empty() {
+            warn!(
+                "{} 🧩 configured kernel_module_path {} is not a directory; kernel firmware search path was not changed",
+                NAME, kernel_module_path
+            );
+        }
         return;
     }
 
@@ -116,54 +129,52 @@ fn configure_data_firmware_search_path() {
         Ok(entries) => entries.flatten().any(|entry| entry.path().is_file()),
         Err(e) => {
             warn!(
-                "{} 🧩 failed to read firmware directory {}: {}",
-                NAME, DATA_FIRMWARE_DIR, e
+                "{} 🧩 failed to read kernel_module_path {}: {}",
+                NAME, kernel_module_path, e
             );
             false
         }
     };
 
     if !has_firmware_files {
+        if !configured_path.is_empty() {
+            warn!(
+                "{} 🧩 configured kernel_module_path {} has no files; kernel firmware search path was not changed",
+                NAME, kernel_module_path
+            );
+        }
         return;
     }
 
     let firmware_param = std::path::Path::new(FIRMWARE_CLASS_PATH_PARAM);
     if !firmware_param.exists() {
         warn!(
-            "{} 🧩 firmware directory {} exists, but kernel firmware_class path parameter {} is not available",
-            NAME, DATA_FIRMWARE_DIR, FIRMWARE_CLASS_PATH_PARAM
+            "{} 🧩 kernel_module_path {} exists, but kernel firmware_class path parameter {} is not available",
+            NAME, kernel_module_path, FIRMWARE_CLASS_PATH_PARAM
         );
         return;
     }
 
     let current = fs::read_to_string(firmware_param).unwrap_or_default();
-    if current.trim() == DATA_FIRMWARE_DIR {
+    if current.trim() == kernel_module_path {
         info!(
-            "{} 🧩 kernel firmware search path already points to {}",
-            NAME, DATA_FIRMWARE_DIR
+            "{} 🧩 kernel firmware search path already points to kernel_module_path {}",
+            NAME, kernel_module_path
         );
         return;
     }
 
-    match fs::write(firmware_param, DATA_FIRMWARE_DIR) {
+    match fs::write(firmware_param, kernel_module_path) {
         Ok(()) => {
-            let rt2870 = firmware_dir.join("rt2870.bin");
-            if rt2870.is_file() {
-                info!(
-                    "{} 🧩 kernel firmware search path set to {} (rt2870.bin available for rt2800usb)",
-                    NAME, DATA_FIRMWARE_DIR
-                );
-            } else {
-                info!(
-                    "{} 🧩 kernel firmware search path set to {}",
-                    NAME, DATA_FIRMWARE_DIR
-                );
-            }
+            info!(
+                "{} 🧩 kernel firmware search path set to kernel_module_path {}",
+                NAME, kernel_module_path
+            );
         }
         Err(e) => {
             warn!(
-                "{} 🧩 failed to set kernel firmware search path {} to {}: {}",
-                NAME, FIRMWARE_CLASS_PATH_PARAM, DATA_FIRMWARE_DIR, e
+                "{} 🧩 failed to set kernel firmware search path {} to kernel_module_path {}: {}",
+                NAME, FIRMWARE_CLASS_PATH_PARAM, kernel_module_path, e
             );
         }
     }
@@ -199,23 +210,7 @@ fn is_external_ap_phone_wifi_mode(value: &str) -> bool {
 }
 
 fn effective_preload_kernel_modules(cfg: &AppConfig) -> Vec<String> {
-    let mut modules = parse_preload_kernel_modules(&cfg.preload_kernel_modules);
-    let external_ap = is_external_ap_phone_wifi_mode(&cfg.bt_wireless_proxy_phone_wifi_mode);
-
-    if external_ap && modules.iter().any(|m| m == "rt2800usb") {
-        info!(
-            "{} 🧪 bt-wireless-proxy external_ap: rt2800usb is already present in preload_kernel_modules; not adding the default twice",
-            NAME
-        );
-    } else if external_ap {
-        info!(
-            "{} 🧪 bt-wireless-proxy external_ap: adding default USB Wi-Fi module rt2800usb to preload_kernel_modules",
-            NAME
-        );
-        modules.push("rt2800usb".to_string());
-    }
-
-    modules
+    parse_preload_kernel_modules(&cfg.preload_kernel_modules)
 }
 
 fn preload_kernel_modules_for_config(cfg: &AppConfig) {
@@ -440,7 +435,7 @@ fn bring_external_ap_sta_iface_up_for_config(cfg: &AppConfig) {
         );
     } else {
         warn!(
-            "{} 🧪 bt-wireless-proxy external_ap: configured car STA iface {} was detected but could not be brought up during early startup; if this is rt2800usb, ensure rt2870.bin is present under /data/aa-proxy-rs/firmware",
+            "{} 🧪 bt-wireless-proxy external_ap: configured car STA iface {} was detected but could not be brought up during early startup; ensure the required firmware is present under kernel_module_path or the system firmware directory",
             NAME, last_iface
         );
     }
@@ -1282,7 +1277,7 @@ fn main() -> Result<()> {
         );
     }
 
-    configure_data_firmware_search_path();
+    configure_kernel_module_path_for_config(&config);
     preload_kernel_modules_for_config(&config);
     bring_external_ap_sta_iface_up_for_config(&config);
 
