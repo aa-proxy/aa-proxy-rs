@@ -844,7 +844,7 @@ impl Default for AppConfig {
             bt_wireless_proxy_hu_first_wait_phone_secs: 30,
             bt_wireless_proxy_hu_channel: None,
             bt_wireless_proxy_tcp_probe: true,
-            bt_wireless_proxy_car_wifi_base_iface: String::new(),
+            bt_wireless_proxy_car_wifi_base_iface: "wlan0".to_string(),
             bt_wireless_proxy_car_wifi_join_cmd: String::new(),
             bt_wireless_proxy_car_wifi_auto_join: false,
             bt_wireless_proxy_wifi_join_control: "auto".to_string(),
