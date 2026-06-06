@@ -48,7 +48,7 @@
         },
         "preload_kernel_modules": {
           "typ": "string",
-          "description": "Comma-separated kernel modules to modprobe during startup. No driver is added automatically; list any USB Wi-Fi driver explicitly, for example: rt2800usb,mt76x2u.",
+          "description": "Comma-separated kernel modules to modprobe during startup. For example: rt2800usb,mt76x2u.",
           "advanced": true
         },
         "kernel_module_path": {
@@ -128,6 +128,17 @@
           "advanced": true,
           "requires": "bt_wireless_proxy"
         },
+        "bt_wireless_proxy_phone_wifi_mode": {
+          "typ": "radio",
+          "description": "EXPERIMENTAL Proxy car-wifi-mitm: phone-facing Wi-Fi mode. car_ap forwards HU/car Wi-Fi credentials to the phone. proxy_ap uses a single radio and creates a virtual phone AP. external_ap keeps the phone on the base aa-proxy AP while an external/USB STA joins the HU/car Wi-Fi.",
+          "values": [
+            "car_ap",
+            "proxy_ap",
+            "external_ap"
+          ],
+          "advanced": true,
+          "requires": "bt_wireless_proxy"
+        },
         "bt_wireless_proxy_pairing_window_secs": {
           "typ": "integer",
           "description": "AA Wireless proxy: if the configured HU is not paired/trusted, keep aa-proxy pairable/discoverable for this many seconds and auto-accept pairing only from bt_wireless_proxy_hu_mac. Default: 120.",
@@ -176,12 +187,6 @@
             "hu_first",
             "phone_first"
           ],
-          "advanced": true,
-          "requires": "bt_wireless_proxy"
-        },
-        "bt_wireless_proxy_hu_first_connect": {
-          "typ": "boolean",
-          "description": "LEGACY Proxy car-wifi-mitm: old HU-first switch. With rendezvous_mode=auto this is treated as auto/hybrid, not strict HU-first. Use rendezvous_mode=hu_first for strict old behavior.",
           "advanced": true,
           "requires": "bt_wireless_proxy"
         },
@@ -274,17 +279,6 @@
         "bt_wireless_proxy_car_wifi_ap_iface": {
           "typ": "string",
           "description": "EXPERIMENTAL Proxy car-wifi-mitm: existing AP interface to keep when keep_ap is true. Empty falls back to iface.",
-          "advanced": true,
-          "requires": "bt_wireless_proxy"
-        },
-        "bt_wireless_proxy_phone_wifi_mode": {
-          "typ": "radio",
-          "description": "EXPERIMENTAL Proxy car-wifi-mitm: phone-facing Wi-Fi mode. car_ap forwards HU/car Wi-Fi credentials to the phone. proxy_ap uses a single radio and creates a virtual phone AP. external_ap keeps the phone on the base aa-proxy AP while an external/USB STA joins the HU/car Wi-Fi.",
-          "values": [
-            "car_ap",
-            "proxy_ap",
-            "external_ap"
-          ],
           "advanced": true,
           "requires": "bt_wireless_proxy"
         },
