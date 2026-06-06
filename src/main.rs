@@ -74,6 +74,9 @@ const UMTPRD_CONF_OUT: &str = "/var/run/umtprd.conf";
 const GADGET_INIT_IN: &str = "/etc/S92usb_gadget.in";
 const GADGET_INIT_OUT: &str = "/var/run/S92usb_gadget";
 const REBOOT_CMD: &str = "/sbin/reboot";
+const DATA_FIRMWARE_DIR: &str = "/data/aa-proxy-rs/firmware";
+const FIRMWARE_CLASS_PATH_PARAM: &str = "/sys/module/firmware_class/parameters/path";
+
 
 /// AndroidAuto wired/wireless proxy
 #[derive(Parser, Debug)]
@@ -102,6 +105,70 @@ struct Args {
 }
 
 
+
+fn configure_data_firmware_search_path() {
+    let firmware_dir = std::path::Path::new(DATA_FIRMWARE_DIR);
+    if !firmware_dir.is_dir() {
+        return;
+    }
+
+    let has_firmware_files = match fs::read_dir(firmware_dir) {
+        Ok(entries) => entries.flatten().any(|entry| entry.path().is_file()),
+        Err(e) => {
+            warn!(
+                "{} 🧩 failed to read firmware directory {}: {}",
+                NAME, DATA_FIRMWARE_DIR, e
+            );
+            false
+        }
+    };
+
+    if !has_firmware_files {
+        return;
+    }
+
+    let firmware_param = std::path::Path::new(FIRMWARE_CLASS_PATH_PARAM);
+    if !firmware_param.exists() {
+        warn!(
+            "{} 🧩 firmware directory {} exists, but kernel firmware_class path parameter {} is not available",
+            NAME, DATA_FIRMWARE_DIR, FIRMWARE_CLASS_PATH_PARAM
+        );
+        return;
+    }
+
+    let current = fs::read_to_string(firmware_param).unwrap_or_default();
+    if current.trim() == DATA_FIRMWARE_DIR {
+        info!(
+            "{} 🧩 kernel firmware search path already points to {}",
+            NAME, DATA_FIRMWARE_DIR
+        );
+        return;
+    }
+
+    match fs::write(firmware_param, DATA_FIRMWARE_DIR) {
+        Ok(()) => {
+            let rt2870 = firmware_dir.join("rt2870.bin");
+            if rt2870.is_file() {
+                info!(
+                    "{} 🧩 kernel firmware search path set to {} (rt2870.bin available for rt2800usb)",
+                    NAME, DATA_FIRMWARE_DIR
+                );
+            } else {
+                info!(
+                    "{} 🧩 kernel firmware search path set to {}",
+                    NAME, DATA_FIRMWARE_DIR
+                );
+            }
+        }
+        Err(e) => {
+            warn!(
+                "{} 🧩 failed to set kernel firmware search path {} to {}: {}",
+                NAME, FIRMWARE_CLASS_PATH_PARAM, DATA_FIRMWARE_DIR, e
+            );
+        }
+    }
+}
+
 fn is_kernel_module_name_safe(module: &str) -> bool {
     !module.is_empty()
         && module
@@ -123,13 +190,17 @@ fn parse_preload_kernel_modules(value: &str) -> Vec<String> {
     modules
 }
 
-fn effective_preload_kernel_modules(cfg: &AppConfig) -> Vec<String> {
-    let mut modules = parse_preload_kernel_modules(&cfg.preload_kernel_modules);
-    let phone_wifi_mode = cfg.bt_wireless_proxy_phone_wifi_mode.trim().to_ascii_lowercase();
-    let external_ap = matches!(
+fn is_external_ap_phone_wifi_mode(value: &str) -> bool {
+    let phone_wifi_mode = value.trim().to_ascii_lowercase();
+    matches!(
         phone_wifi_mode.as_str(),
         "external_ap" | "external-ap" | "externalap" | "external_proxy_ap" | "external-proxy-ap"
-    );
+    )
+}
+
+fn effective_preload_kernel_modules(cfg: &AppConfig) -> Vec<String> {
+    let mut modules = parse_preload_kernel_modules(&cfg.preload_kernel_modules);
+    let external_ap = is_external_ap_phone_wifi_mode(&cfg.bt_wireless_proxy_phone_wifi_mode);
 
     if external_ap && modules.iter().any(|m| m == "rt2800usb") {
         info!(
@@ -193,6 +264,185 @@ fn preload_kernel_modules_for_config(cfg: &AppConfig) {
                 warn!("{} 🧩 failed to run modprobe {}: {}", NAME, module, e);
             }
         }
+    }
+}
+
+fn iface_exists_sync(iface: &str) -> bool {
+    let iface = iface.trim();
+    if iface.is_empty() {
+        return false;
+    }
+    matches!(
+        Command::new("ip")
+            .args(["link", "show", "dev", iface])
+            .output(),
+        Ok(output) if output.status.success()
+    )
+}
+
+fn push_unique_iface(out: &mut Vec<String>, iface: &str, exclude_iface: &str) {
+    let iface = iface.trim();
+    if iface.is_empty() || iface == exclude_iface || !iface.starts_with("wl") {
+        return;
+    }
+    if !iface_exists_sync(iface) {
+        return;
+    }
+    if !out.iter().any(|existing| existing == iface) {
+        out.push(iface.to_string());
+    }
+}
+
+fn iface_device_path_looks_usb(iface: &str) -> bool {
+    let path = std::path::Path::new("/sys/class/net").join(iface).join("device");
+    match fs::canonicalize(path) {
+        Ok(real) => real.to_string_lossy().contains("/usb"),
+        Err(_) => false,
+    }
+}
+
+fn usb_wlan_ifaces_sync(exclude_iface: &str) -> Vec<String> {
+    let exclude_iface = exclude_iface.trim();
+    let mut out = Vec::<String>::new();
+
+    if let Ok(entries) = fs::read_dir("/sys/class/net") {
+        for entry in entries.flatten() {
+            let iface = entry.file_name().to_string_lossy().trim().to_string();
+            if iface_device_path_looks_usb(&iface) {
+                push_unique_iface(&mut out, &iface, exclude_iface);
+            }
+        }
+    }
+
+    if let Ok(devices) = fs::read_dir("/sys/bus/usb/devices") {
+        for dev in devices.flatten() {
+            let net_dir = dev.path().join("net");
+            let Ok(entries) = fs::read_dir(net_dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let iface = entry.file_name().to_string_lossy().trim().to_string();
+                push_unique_iface(&mut out, &iface, exclude_iface);
+            }
+        }
+    }
+
+    out.sort();
+    out
+}
+
+fn external_ap_phone_ap_iface_for_config(cfg: &AppConfig) -> String {
+    let configured_ap = cfg.bt_wireless_proxy_car_wifi_ap_iface.trim();
+    if !configured_ap.is_empty() {
+        return configured_ap.to_string();
+    }
+
+    let base_iface = cfg.bt_wireless_proxy_car_wifi_base_iface.trim();
+    if !base_iface.is_empty() {
+        return base_iface.to_string();
+    }
+
+    let global_iface = cfg.iface.trim();
+    if !global_iface.is_empty() {
+        global_iface.to_string()
+    } else {
+        "wlan0".to_string()
+    }
+}
+
+fn external_ap_startup_sta_iface(cfg: &AppConfig) -> Option<String> {
+    let configured = cfg.bt_wireless_proxy_car_wifi_sta_iface.trim();
+    if !configured.is_empty() {
+        return Some(configured.to_string());
+    }
+
+    let phone_ap_iface = external_ap_phone_ap_iface_for_config(cfg);
+    usb_wlan_ifaces_sync(&phone_ap_iface).into_iter().next()
+}
+
+fn bring_external_ap_sta_iface_up_for_config(cfg: &AppConfig) {
+    if !is_external_ap_phone_wifi_mode(&cfg.bt_wireless_proxy_phone_wifi_mode) {
+        return;
+    }
+
+    let configured_sta_iface = cfg.bt_wireless_proxy_car_wifi_sta_iface.trim().to_string();
+    let mut last_iface = String::new();
+
+    for attempt in 1..=40 {
+        let Some(iface) = external_ap_startup_sta_iface(cfg) else {
+            thread::sleep(Duration::from_millis(250));
+            continue;
+        };
+        last_iface = iface.clone();
+
+        if !configured_sta_iface.is_empty() && !iface_exists_sync(&iface) {
+            thread::sleep(Duration::from_millis(250));
+            continue;
+        }
+
+        if attempt == 1 {
+            info!(
+                "{} 🧪 bt-wireless-proxy external_ap: early bring-up for car STA iface {}",
+                NAME, iface
+            );
+        } else {
+            info!(
+                "{} 🧪 bt-wireless-proxy external_ap: early bring-up for car STA iface {} after detect attempt {}",
+                NAME, iface, attempt
+            );
+        }
+
+        match Command::new("ip")
+            .args(["link", "set", "dev", iface.as_str(), "up"])
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                info!(
+                    "{} 🧪 bt-wireless-proxy external_ap: car STA iface {} is up",
+                    NAME, iface
+                );
+                return;
+            }
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                warn!(
+                    "{} 🧪 bt-wireless-proxy external_ap: failed to bring car STA iface {} up on attempt {} status={} stdout={} stderr={}",
+                    NAME,
+                    iface,
+                    attempt,
+                    output.status,
+                    stdout.trim(),
+                    stderr.trim()
+                );
+            }
+            Err(e) => {
+                warn!(
+                    "{} 🧪 bt-wireless-proxy external_ap: failed to run ip link for car STA iface {}: {}",
+                    NAME, iface, e
+                );
+                return;
+            }
+        }
+
+        thread::sleep(Duration::from_millis(250));
+    }
+
+    if configured_sta_iface.is_empty() {
+        warn!(
+            "{} 🧪 bt-wireless-proxy external_ap: no stable USB car STA iface found during early startup; Bluetooth bootstrap will auto-detect later",
+            NAME
+        );
+    } else if last_iface.is_empty() {
+        warn!(
+            "{} 🧪 bt-wireless-proxy external_ap: configured car STA iface {} was not visible during early startup",
+            NAME, configured_sta_iface
+        );
+    } else {
+        warn!(
+            "{} 🧪 bt-wireless-proxy external_ap: configured car STA iface {} was detected but could not be brought up during early startup; if this is rt2800usb, ensure rt2870.bin is present under /data/aa-proxy-rs/firmware",
+            NAME, last_iface
+        );
     }
 }
 
@@ -679,6 +929,7 @@ async fn tokio_main(
                                 phone_ap_ssid: cfg.ssid.clone(),
                                 phone_ap_key: cfg.wpa_passphrase.clone(),
                                 phone_ap_ip: format!("{}.1", cfg.wlan_subnet),
+                                phone_ap_channel: cfg.channel,
                                 rewrite_ip: cfg.bt_wireless_proxy_rewrite_ip.clone(),
                                 listen_port: cfg.bt_wireless_proxy_listen_port,
                                 tcp_start: tcp_start.clone(),
@@ -1031,7 +1282,9 @@ fn main() -> Result<()> {
         );
     }
 
+    configure_data_firmware_search_path();
     preload_kernel_modules_for_config(&config);
+    bring_external_ap_sta_iface_up_for_config(&config);
 
     // notify for syncing threads
     let (restart_tx, _) = broadcast::channel(1);
