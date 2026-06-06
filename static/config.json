@@ -48,7 +48,12 @@
         },
         "preload_kernel_modules": {
           "typ": "string",
-          "description": "Comma-separated kernel modules to modprobe during startup. In bt_wireless_proxy phone_wifi_mode=external_ap, rt2800usb is automatically added unless it is already listed. Example: rt2800usb,mt76x2u.",
+          "description": "Comma-separated kernel modules to modprobe during startup. No driver is added automatically; list any USB Wi-Fi driver explicitly, for example: rt2800usb,mt76x2u.",
+          "advanced": true
+        },
+        "kernel_module_path": {
+          "typ": "string",
+          "description": "Optional firmware search directory for kernel modules that need firmware blobs. If the directory exists and contains files, it is written to /sys/module/firmware_class/parameters/path before preload_kernel_modules are modprobed. Example: /data/aa-proxy-rs/firmware",
           "advanced": true
         },
         "wlan_subnet": {
