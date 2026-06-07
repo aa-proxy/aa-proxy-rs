@@ -76,8 +76,6 @@ struct DisplayProfile {
     touch_height: i32,
     input_touchscreen: bool,
     input_source: bool,
-    content_insets: Option<crate::sdr_ui::SdrUiInsets>,
-    stable_content_insets: Option<crate::sdr_ui::SdrUiInsets>,
 }
 
 fn injected_display_label(display_type: DisplayType) -> &'static str {
@@ -123,8 +121,6 @@ fn profile_from_config(profile: &InjectDisplayProfile, display_id: u32) -> Displ
         touch_height: profile.touch_height,
         input_touchscreen: profile.input_touchscreen,
         input_source: profile.input_source,
-        content_insets: profile.content_insets.clone(),
-        stable_content_insets: profile.stable_content_insets.clone(),
     }
 }
 
