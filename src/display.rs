@@ -1,5 +1,5 @@
 use crate::config::AppConfig;
-use crate::inject_displays::{read_inject_displays_file_sync, InjectDisplayProfile};
+use crate::inject_displays::{read_inject_displays_file_sync, InjectDisplayInsets, InjectDisplayProfile};
 pub use crate::media_tap::{
     media_tcp_server, AudioStreamConfig, MediaSink, MediaStreamInfo, MediaStreamKind,
 };
@@ -68,6 +68,8 @@ struct DisplayProfile {
     initial_content_keycode: Option<KeyCode>,
     width_margin: u32,
     height_margin: u32,
+    content_insets: Option<InjectDisplayInsets>,
+    stable_content_insets: Option<InjectDisplayInsets>,
     density: u32,
     viewing_distance: u32,
     touch_width: i32,
@@ -111,6 +113,8 @@ fn profile_from_config(profile: &InjectDisplayProfile, display_id: u32) -> Displ
         },
         width_margin: profile.width_margin,
         height_margin: profile.height_margin,
+        content_insets: profile.content_insets.clone(),
+        stable_content_insets: profile.stable_content_insets.clone(),
         density: profile.density,
         viewing_distance: profile.viewing_distance,
         touch_width: profile.touch_width,
@@ -158,6 +162,17 @@ fn next_service_id(msg: &ServiceDiscoveryResponse) -> i32 {
     msg.services.iter().map(|s| s.id()).max().unwrap_or(0) + 1
 }
 
+fn insets_from_profile(value: Option<&InjectDisplayInsets>) -> Insets {
+    let mut insets = Insets::new();
+    if let Some(value) = value {
+        insets.set_top(value.top);
+        insets.set_bottom(value.bottom);
+        insets.set_left(value.left);
+        insets.set_right(value.right);
+    }
+    insets
+}
+
 fn create_media_sink_service(id: i32, profile: DisplayProfile) -> Service {
     let mut margins = Insets::new();
     margins.set_top(profile.height_margin / 2);
@@ -167,8 +182,8 @@ fn create_media_sink_service(id: i32, profile: DisplayProfile) -> Service {
 
     let mut ui_config = UiConfig::new();
     ui_config.margins = Some(margins).into();
-    ui_config.content_insets = Some(Insets::new()).into();
-    ui_config.stable_content_insets = Some(Insets::new()).into();
+    ui_config.content_insets = Some(insets_from_profile(profile.content_insets.as_ref())).into();
+    ui_config.stable_content_insets = Some(insets_from_profile(profile.stable_content_insets.as_ref())).into();
     ui_config.set_ui_theme(UiTheme::UI_THEME_AUTOMATIC);
 
     let mut video_cfg = VideoConfiguration::new();
