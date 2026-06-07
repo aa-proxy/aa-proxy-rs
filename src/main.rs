@@ -41,7 +41,7 @@ use std::fs;
 use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread;
@@ -590,6 +590,8 @@ async fn tokio_main(
     config_json: SharedConfigJson,
     restart_tx: BroadcastSender<Option<Action>>,
     tcp_start: Arc<Notify>,
+    tcp_phone_connected: Arc<Notify>,
+    tcp_phone_connection_seq: Arc<AtomicU64>,
     config_file: PathBuf,
     tx: Arc<Mutex<Option<Sender<Packet>>>>,
     sensor_channel: Arc<Mutex<Option<u8>>>,
@@ -928,6 +930,8 @@ async fn tokio_main(
                                 rewrite_ip: cfg.bt_wireless_proxy_rewrite_ip.clone(),
                                 listen_port: cfg.bt_wireless_proxy_listen_port,
                                 tcp_start: tcp_start.clone(),
+                                tcp_phone_connected: tcp_phone_connected.clone(),
+                                tcp_phone_connection_seq: tcp_phone_connection_seq.clone(),
                                 use_version_projection_fallback: cfg.bt_wireless_proxy_use_version_projection_fallback,
                                 wpp_keepalive: cfg.bt_wireless_proxy_wpp_keepalive,
                                 wpp_keepalive_interval: Duration::from_millis(cfg.bt_wireless_proxy_wpp_keepalive_interval_ms.max(250)),
@@ -1285,6 +1289,10 @@ fn main() -> Result<()> {
     let (restart_tx, _) = broadcast::channel(1);
     let tcp_start = Arc::new(Notify::new());
     let tcp_start_cloned = tcp_start.clone();
+    let tcp_phone_connected = Arc::new(Notify::new());
+    let tcp_phone_connected_cloned = tcp_phone_connected.clone();
+    let tcp_phone_connection_seq = Arc::new(AtomicU64::new(0));
+    let tcp_phone_connection_seq_cloned = tcp_phone_connection_seq.clone();
     #[cfg(feature = "wasm-scripting")]
     let wasm_hooks_dir = config.wasm_hooks_dir.clone();
     let config = Arc::new(RwLock::new(config));
@@ -1345,6 +1353,8 @@ fn main() -> Result<()> {
             config_json.clone(),
             restart_tx_cloned,
             tcp_start,
+            tcp_phone_connected,
+            tcp_phone_connection_seq,
             args.config.clone(),
             tx_cloned,
             sensor_channel_cloned,
@@ -1372,6 +1382,8 @@ fn main() -> Result<()> {
         io_loop(
             restart_tx,
             tcp_start_cloned,
+            tcp_phone_connected_cloned,
+            tcp_phone_connection_seq_cloned,
             config,
             tx,
             sensor_channel,

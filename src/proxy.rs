@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 #[cfg(feature = "io-uring")]
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::fs::File as TokioFile;
@@ -546,6 +546,8 @@ async fn tcp_connect_to_aa_server(addr: &str) -> Result<NativeTcpStream> {
 pub async fn io_loop(
     need_restart: BroadcastSender<Option<Action>>,
     tcp_start: Arc<Notify>,
+    tcp_phone_connected: Arc<Notify>,
+    tcp_phone_connection_seq: Arc<AtomicU64>,
     config: SharedConfig,
     tx: Arc<Mutex<Option<Sender<Packet>>>>,
     sensor_channel: Arc<Mutex<Option<u8>>>,
@@ -669,6 +671,13 @@ pub async fn io_loop(
                         md_tcp = Some(s);
                         client_mac = mac_from_ipv4(ip).await.unwrap_or(None);
                         bridge_cancel = Some(cancel);
+                        let seq = tcp_phone_connection_seq.fetch_add(1, Ordering::Relaxed) + 1;
+                        info!(
+                            "{} 🧪 bt-wireless-proxy car-wifi-mitm: PHONE TCP accepted on MD listener; commit barrier seq={}",
+                            NAME,
+                            seq
+                        );
+                        tcp_phone_connected.notify_one();
                     } else {
                         let _ = need_restart.send(None);
                         continue;
@@ -696,6 +705,13 @@ pub async fn io_loop(
                 client_mac = mac_from_ipv4(ip).await.unwrap_or(None);
                 usb_connected.store(false, Ordering::Relaxed);
                 bridge_cancel = Some(cancel);
+                let seq = tcp_phone_connection_seq.fetch_add(1, Ordering::Relaxed) + 1;
+                info!(
+                    "{} 🧪 bt-wireless-proxy car-wifi-mitm: PHONE TCP accepted on MD listener; commit barrier seq={}",
+                    NAME,
+                    seq
+                );
+                tcp_phone_connected.notify_one();
             } else {
                 // notify main loop to restart
                 let _ = need_restart.send(None);
