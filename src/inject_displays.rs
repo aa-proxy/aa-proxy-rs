@@ -235,6 +235,10 @@ pub struct InjectDisplayProfile {
     #[serde(default)]
     pub input_touchscreen: bool,
     pub input_source: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_insets: Option<crate::sdr_ui::SdrUiInsets>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stable_content_insets: Option<crate::sdr_ui::SdrUiInsets>,
 }
 
 impl Default for InjectDisplayProfile {
@@ -257,6 +261,8 @@ impl Default for InjectDisplayProfile {
             touch_height: default_touch_height(),
             input_touchscreen: false,
             input_source: false,
+            content_insets: None,
+            stable_content_insets: None,
         }
     }
 }

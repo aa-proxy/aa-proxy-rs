@@ -1001,11 +1001,12 @@ async fn tokio_main(
                             restart_tx.subscribe(),
                             restart_tx.clone(),
                             profile_connected.clone(),
+                            config.clone(),
                         )
                         .await
                     {
                         error!("{} bluetooth AA handshake error: {}", NAME, e);
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                         continue;
                     }
                 } else {
@@ -1034,7 +1035,7 @@ async fn tokio_main(
                 "{} 📵 TCP/USB connection closed or not started, trying again...",
                 NAME
             );
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         } else {
             info!(
                 "{} 📵 TCP/USB connection closed or not started, quick restart...",

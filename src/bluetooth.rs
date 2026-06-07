@@ -1,4 +1,5 @@
 use crate::config::Action;
+use crate::config::SharedConfig;
 use crate::config::WifiConfig;
 use crate::config::IDENTITY_NAME;
 use crate::config_types::BluetoothAddressList;
@@ -5687,7 +5688,7 @@ impl Bluetooth {
         if let Some(sess) = hsp_session {
             info!("{} 🎧 Headset Profile (HSP): unregistering ...", NAME);
             drop(sess);
-            tokio::time::sleep(Duration::from_millis(80)).await;
+            tokio::time::sleep(Duration::from_millis(300)).await;
             info!("{} 🎧 Headset Profile (HSP): unregistered", NAME);
         }
     }
@@ -6981,6 +6982,7 @@ impl Bluetooth {
         mut need_restart: BroadcastReceiver<Option<Action>>,
         restart_tx: BroadcastSender<Option<Action>>,
         profile_connected: Arc<AtomicBool>,
+        shared_config: SharedConfig,
     ) -> Result<()> {
         if bt_poweroff {
             let _ = self.adapter.set_powered(true).await;
@@ -7088,6 +7090,13 @@ impl Bluetooth {
         // Record this device as a known-good AA device (only when using wildcard connect)
         if is_wildcard_connect {
             save_known_device(address);
+        }
+        // Clear Stop flag here — after BT handshake succeeds but before the proxy loop
+        // is notified. The proxy checks action_requested on every iteration; leaving Stop
+        // set would cause it to kill the session immediately (~20ms).
+        if stopped {
+            info!("{} 🔄 User-stop cleared, phone reconnected manually", NAME);
+            shared_config.write().await.action_requested = None;
         }
         tcp_start.notify_one();
 
@@ -7235,7 +7244,7 @@ impl Bluetooth {
                 if let Some(sess) = _held_hsp_session {
                     info!("{} 🎧 Headset Profile (HSP): unregistering ...", NAME);
                     drop(sess);
-                    tokio::time::sleep(Duration::from_millis(80)).await;
+                    tokio::time::sleep(Duration::from_millis(300)).await;
                     info!("{} 🎧 Headset Profile (HSP): unregistered", NAME);
                 }
 

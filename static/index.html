@@ -146,12 +146,15 @@
 
             <div>
               <p><strong>D-Pad</strong></p>
-              <div class="dpad-grid">
-                <span></span>
+              <div
+                class="dpad-grid"
+                title="Use scroll wheel or drag corners to send rotary events"
+              >
+                <span><span>↻</span></span>
                 <button type="button" onclick="sendKeyTap(19, 'DPAD_UP')">
                   ▲
                 </button>
-                <span></span>
+                <span><span>↺</span></span>
                 <button type="button" onclick="sendKeyTap(21, 'DPAD_LEFT')">
                   ◀
                 </button>
@@ -165,24 +168,33 @@
                 <button type="button" onclick="sendKeyTap(22, 'DPAD_RIGHT')">
                   ▶
                 </button>
-                <span></span>
+                <span><span>↻</span></span>
                 <button type="button" onclick="sendKeyTap(20, 'DPAD_DOWN')">
                   ▼
                 </button>
-                <span></span>
+                <span><span>↺</span></span>
               </div>
             </div>
           </div>
 
-          <div class="wide-grid">
+          <div class="wide-grid-3">
+            <button type="button" onclick="sendKeyTap(65537, 'MEDIA')">
+              🎵 Media
+            </button>
+            <button type="button" onclick="sendKeyTap(65538, 'NAVIGATION')">
+              🗺️ Nav
+            </button>
+            <button type="button" onclick="sendKeyTap(65539, 'RADIO')">
+              📻 Car radio
+            </button>
+            <button type="button" onclick="sendKeyTap(65540, 'TEL')">
+              🔢 Dialer
+            </button>
             <button type="button" onclick="sendKeyTap(5, 'CALL')">
               📞 Call
             </button>
             <button type="button" onclick="sendKeyTap(6, 'ENDCALL')">
               📴 End Call
-            </button>
-            <button type="button" onclick="sendKeyTap(85, 'MEDIA_PLAY_PAUSE')">
-              ⏯ Play/Pause
             </button>
             <button type="button" onclick="sendKeyTap(127, 'MEDIA_PAUSE')">
               ⏸ Pause
@@ -196,17 +208,20 @@
             <button type="button" onclick="sendKeyTap(88, 'MEDIA_PREVIOUS')">
               ⏮ Previous
             </button>
+            <button type="button" onclick="sendKeyTap(85, 'MEDIA_PLAY_PAUSE')">
+              ⏯ Play/Pause
+            </button>
             <button type="button" onclick="sendKeyTap(87, 'MEDIA_NEXT')">
               ⏭ Next
-            </button>
-            <button type="button" onclick="sendKeyTap(24, 'VOLUME_UP')">
-              🔊 Volume +
             </button>
             <button type="button" onclick="sendKeyTap(25, 'VOLUME_DOWN')">
               🔉 Volume -
             </button>
             <button type="button" onclick="sendKeyTap(164, 'MUTE')">
               🔇 Mute
+            </button>
+            <button type="button" onclick="sendKeyTap(24, 'VOLUME_UP')">
+              🔊 Volume +
             </button>
             <button type="button" onclick="sendKeyTap(4, 'BACK')">
               ↩ Back
@@ -308,6 +323,84 @@
             fileInput.value = "";
             fileInput.addEventListener("change", handler, { once: true });
             fileInput.click();
+          });
+        });
+
+        // rotary input
+        const STEPS_PER_ROTATION = 8;
+        document.querySelectorAll(".dpad-grid").forEach((dpad) => {
+          let angle = 0;
+          let pointerId = null;
+          let visual = null;
+
+          function onPointerMove(event) {
+            if (event.pointerId !== pointerId) return;
+
+            var rect = dpad.getBoundingClientRect();
+            var x = event.clientX - rect.left - rect.width / 2;
+            var y = event.clientY - rect.top - rect.height / 2;
+            var newAngle = Math.atan2(y, x);
+            var delta =
+              (((newAngle - angle) / 2 / Math.PI) * STEPS_PER_ROTATION) ^ 0; // rounds towards 0
+            if (delta > STEPS_PER_ROTATION / 2) delta -= STEPS_PER_ROTATION;
+            if (delta < -STEPS_PER_ROTATION / 2) delta += STEPS_PER_ROTATION;
+
+            if (delta != 0) {
+              angle = newAngle;
+              sendRotary(delta);
+              visual.style.transform = `rotate(${angle}rad)`;
+            }
+
+            event.preventDefault();
+            return false;
+          }
+          function onPointerUp(event) {
+            dpad.releasePointerCapture(event.pointerId);
+            dpad.style.cursor = "";
+            pointerId = null;
+            if (visual) {
+              visual.parentNode.removeChild(visual);
+              visual = null;
+            }
+          }
+
+          dpad.addEventListener(
+            "pointerdown",
+            (event) => {
+              if (event.target.nodeName.toLowerCase() == "button") return;
+
+              if (pointerId === null) {
+                var rect = dpad.getBoundingClientRect();
+                var x = event.clientX - rect.left - rect.width / 2;
+                var y = event.clientY - rect.top - rect.height / 2;
+                angle = Math.atan2(y, x);
+
+                pointerId = event.pointerId;
+                dpad.setPointerCapture(pointerId);
+                dpad.style.cursor = "grabbing";
+                window.addEventListener("pointermove", onPointerMove, {
+                  passive: false,
+                });
+                if (!visual) {
+                  visual = dpad.appendChild(document.createElement("div"));
+                  visual.className = "rotary-visual";
+                  visual.style.transform = `rotate(${angle}rad)`;
+                }
+              }
+
+              event.preventDefault();
+            },
+            { passive: false },
+          );
+          dpad.addEventListener("pointercancel", onPointerUp);
+          dpad.addEventListener("pointerup", onPointerUp);
+
+          dpad.addEventListener("wheel", (event) => {
+            let wheelDelta = event.deltaX != 0 ? event.deltaX : event.deltaY;
+            let delta = wheelDelta > 0 ? 1 : -1;
+            sendRotary(delta);
+            event.preventDefault();
+            return false;
           });
         });
 
@@ -557,6 +650,24 @@
         } catch (error) {
           console.error(`Failed to send key '${label}' (${keycode}):`, error);
           alert(`❌ Failed to send key '${label}' (${keycode}).`);
+        }
+      }
+
+      async function sendRotary(delta) {
+        try {
+          const response = await fetch("/inject_rotary", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ delta }),
+          });
+
+          if (!response.ok) {
+            const body = await response.text();
+            throw new Error(`${response.status}: ${body}`);
+          }
+        } catch (error) {
+          console.error(`Failed to send rotary event '${delta}':`, error);
+          alert(`❌ Failed to send rotary event '${delta}'.`);
         }
       }
 

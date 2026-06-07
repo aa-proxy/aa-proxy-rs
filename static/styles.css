@@ -685,12 +685,28 @@ input[type="checkbox"]:not(.multi-select-dropdown input):checked::after {
     gap: 0.35rem;
     grid-template-columns: repeat(3, minmax(0, 1fr));
     justify-items: stretch;
+    aspect-ratio: 1;
+    cursor: grab;
+    position: relative;
+}
+.dpad-grid > .rotary-visual {
+    pointer-events: none;
+    touch-action: none;
+    position: absolute;
+    left: -5%;
+    top: -5%;
+    width: 110%;
+    height: 110%;
+    background: radial-gradient(circle at 75% 50%, rgba(18, 31, 58, 0.99) 0%, rgba(10, 12, 18, 0.99) 30%);
+    border-radius: 50%;
+    border: 1px solid rgba(20, 184, 166, 0.2);
 }
 
 /* All dpad buttons stretch to fill their grid cell so the arrow keys
    match the width of the phone-keypad buttons next to them. */
 .dpad-grid > button {
     width: 100%;
+    cursor: pointer;
 }
 
 .dpad-center {
@@ -701,6 +717,14 @@ input[type="checkbox"]:not(.multi-select-dropdown input):checked::after {
     display: grid;
     gap: 0.35rem;
     grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.wide-grid-3 {
+    display: grid;
+    gap: 0.35rem;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.controller-drawer-body .wide-grid-3 button {
+    font-size: 0.9rem;
 }
 
 /* Small accent-coloured group label above each keypad / dpad / wide
@@ -747,7 +771,14 @@ input[type="checkbox"]:not(.multi-select-dropdown input):checked::after {
 
 /* Empty spacers in the dpad grid shouldn't take button visual space. */
 .dpad-grid > span {
+    display: flex;
+    
+    /* for rotary input */
+    touch-action: none;
+}
+.dpad-grid > span > span{
     display: block;
+    margin: auto;
 }
 
 @media (min-width: 900px) {
