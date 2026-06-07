@@ -1014,6 +1014,52 @@ async fn read_phone_bootstrap_frame(
     }
 }
 
+fn is_retriable_phone_bootstrap_disconnect(err: &str) -> bool {
+    err.contains("Connection reset by peer")
+        || err.contains("Software caused connection abort")
+        || err.contains("Broken pipe")
+        || err.contains("Transport endpoint is not connected")
+        || err.contains("peer closed")
+        || err.contains("unexpected end of file")
+        || err.contains("early eof")
+}
+
+async fn reconnect_phone_aa_rfcomm_for_car_wifi_mitm(
+    bluetooth: &mut Bluetooth,
+    connect: BluetoothAddressList,
+    options: &CarWifiMitmProxyOptions,
+    attempt: u8,
+    max_attempts: u8,
+    previous_error: &str,
+) -> Result<(Address, Stream)> {
+    warn!(
+        "{} 🧪 bt-wireless-proxy car-wifi-mitm: PHONE AA RFCOMM dropped during Wi-Fi bootstrap attempt {}/{} ({}); keeping HU RFCOMM/WPP alive and re-triggering phone AA RFCOMM",
+        NAME,
+        attempt,
+        max_attempts,
+        previous_error
+    );
+
+    // Give Android Auto/Gearhead a small breath before re-triggering. This is
+    // intentionally shorter than the outer recovery path because the HU RFCOMM
+    // socket is still alive and synthetic WPP keepalive is keeping MBUX from
+    // timing out.
+    tokio::time::sleep(Duration::from_millis(900)).await;
+
+    let retry_timeout = options.bt_timeout.min(Duration::from_secs(45));
+    let (addr, stream) = bluetooth
+        .get_aa_profile_connection(connect, retry_timeout, options.stopped)
+        .await?;
+    info!(
+        "{} 🧪 bt-wireless-proxy car-wifi-mitm: PHONE AA RFCOMM reconnected from {} for Wi-Fi bootstrap retry {}/{}",
+        NAME,
+        addr,
+        attempt + 1,
+        max_attempts
+    );
+    Ok((addr, stream))
+}
+
 async fn wait_for_phone_tcp_accept_barrier(
     notify: Arc<Notify>,
     seq: Arc<AtomicU64>,
@@ -5940,12 +5986,26 @@ impl Bluetooth {
         );
         self.disconnect_triggered_phone_devices(connect, reason).await;
         self.disconnect_hu_device_for_recovery(hu_mac, reason).await;
+        let cooldown = if reason.contains("could not find RFCOMM channel")
+            || reason.contains("attrs=3500")
+            || reason.contains("internal SDP discovery failed")
+        {
+            Duration::from_secs(25)
+        } else if reason.contains("Connection reset by peer")
+            || reason.contains("Software caused connection abort")
+            || reason.contains("Transport endpoint is not connected")
+        {
+            Duration::from_secs(12)
+        } else {
+            Duration::from_secs(7)
+        };
         info!(
-            "{} 🧪 bt-wireless-proxy car-wifi-mitm: cooldown after {}; giving phone/HU AA stacks time to return to initial START state",
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: cooldown {:?} after {}; giving phone/HU AA stacks time to return to initial START state",
             NAME,
+            cooldown,
             reason
         );
-        tokio::time::sleep(Duration::from_secs(7)).await;
+        tokio::time::sleep(cooldown).await;
     }
 
     async fn car_wifi_mitm_phone_first_rendezvous(
@@ -6030,7 +6090,7 @@ impl Bluetooth {
         let _hsp_session = self.register_hsp_trigger_profile(false).await;
 
         let (
-            phone_addr,
+            mut phone_addr,
             mut phone_stream,
             mut hu_stream,
             hu_endpoint,
@@ -6043,14 +6103,14 @@ impl Bluetooth {
                     "{} 🧪 bt-wireless-proxy car-wifi-mitm: strict HU-first rendezvous selected",
                     NAME
                 );
-                self.car_wifi_mitm_hu_first_rendezvous(connect, &options).await?
+                self.car_wifi_mitm_hu_first_rendezvous(connect.clone(), &options).await?
             }
             CarWifiRendezvousMode::PhoneFirst => {
                 info!(
                     "{} 🧪 bt-wireless-proxy car-wifi-mitm: strict phone-first rendezvous selected",
                     NAME
                 );
-                self.car_wifi_mitm_phone_first_rendezvous(connect, &options, &hu_endpoint_hint).await?
+                self.car_wifi_mitm_phone_first_rendezvous(connect.clone(), &options, &hu_endpoint_hint).await?
             }
             CarWifiRendezvousMode::Auto => {
                 info!(
@@ -6472,57 +6532,162 @@ impl Bluetooth {
         phone_start_req.set_ip_address(rewrite_ip.clone());
         phone_start_req.set_port(listen_port as i32);
         let phone_start_payload = phone_start_req.write_to_bytes()?;
-        send_proxy_frame(
-            &mut phone_stream,
-            "POC -> PHONE",
-            ProxyMessageId::WifiStartRequest,
-            &phone_start_payload,
-        )
-        .await?;
+        let max_phone_bootstrap_attempts: u8 = 3;
+        let mut phone_start_resp_id: u16 = 0;
+        let mut phone_start_resp_payload: Vec<u8> = Vec::new();
+        let mut phone_bootstrap_ok = false;
+        let mut last_phone_bootstrap_error = String::new();
 
-        let (phone_info_req_id, _phone_info_req_payload) = read_phone_bootstrap_frame(
-            &mut phone_stream,
-            ProxyMessageId::WifiInfoRequest,
-            None,
-            Duration::from_secs(30),
-        )
-        .await?;
-        if phone_info_req_id != ProxyMessageId::WifiInfoRequest as u16 {
-            warn!(
-                "{} 🧪 bt-wireless-proxy car-wifi-mitm: continuing after unexpected PHONE frame while waiting for WifiInfoRequest: {} ({})",
+        for phone_bootstrap_attempt in 1..=max_phone_bootstrap_attempts {
+            if phone_bootstrap_attempt > 1 {
+                let (new_phone_addr, new_phone_stream) = reconnect_phone_aa_rfcomm_for_car_wifi_mitm(
+                    self,
+                    connect.clone(),
+                    &options,
+                    phone_bootstrap_attempt - 1,
+                    max_phone_bootstrap_attempts,
+                    &last_phone_bootstrap_error,
+                )
+                .await?;
+                phone_addr = new_phone_addr;
+                phone_stream = new_phone_stream;
+            }
+
+            info!(
+                "{} 🧪 bt-wireless-proxy car-wifi-mitm: PHONE Wi-Fi bootstrap attempt {}/{} over AA RFCOMM from {}",
                 NAME,
-                phone_info_req_id,
-                ProxyMessageId::name(phone_info_req_id)
+                phone_bootstrap_attempt,
+                max_phone_bootstrap_attempts,
+                phone_addr
             );
+            // Ensure the main MD TCP listener is awake for every retry. The
+            // previous attempt may have timed out its accept deadline while the
+            // phone AA RFCOMM was being re-triggered.
+            options.tcp_start.notify_one();
+
+            if let Err(e) = send_proxy_frame(
+                &mut phone_stream,
+                "POC -> PHONE",
+                ProxyMessageId::WifiStartRequest,
+                &phone_start_payload,
+            )
+            .await
+            {
+                let err = e.to_string();
+                if is_retriable_phone_bootstrap_disconnect(&err)
+                    && phone_bootstrap_attempt < max_phone_bootstrap_attempts
+                {
+                    last_phone_bootstrap_error = format!(
+                        "send WifiStartRequest failed: {}",
+                        err
+                    );
+                    continue;
+                }
+                return Err(e);
+            }
+
+            let (phone_info_req_id, _phone_info_req_payload) = match read_phone_bootstrap_frame(
+                &mut phone_stream,
+                ProxyMessageId::WifiInfoRequest,
+                None,
+                Duration::from_secs(30),
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    let err = e.to_string();
+                    if is_retriable_phone_bootstrap_disconnect(&err)
+                        && phone_bootstrap_attempt < max_phone_bootstrap_attempts
+                    {
+                        last_phone_bootstrap_error = format!(
+                            "waiting for WifiInfoRequest failed: {}",
+                            err
+                        );
+                        continue;
+                    }
+                    return Err(e);
+                }
+            };
+            if phone_info_req_id != ProxyMessageId::WifiInfoRequest as u16 {
+                warn!(
+                    "{} 🧪 bt-wireless-proxy car-wifi-mitm: continuing after unexpected PHONE frame while waiting for WifiInfoRequest: {} ({})",
+                    NAME,
+                    phone_info_req_id,
+                    ProxyMessageId::name(phone_info_req_id)
+                );
+            }
+            info!(
+                "{} 🧪 bt-wireless-proxy car-wifi-mitm: consumed PHONE WifiInfoRequest locally; sending {} WifiInfoResponse to phone",
+                NAME,
+                if proxy_phone_ap { "proxy_ap phone-facing" } else { "cached HU" }
+            );
+
+            if let Err(e) = send_proxy_frame(
+                &mut phone_stream,
+                "POC -> PHONE",
+                ProxyMessageId::WifiInfoResponse,
+                &phone_wifi_info_payload,
+            )
+            .await
+            {
+                let err = e.to_string();
+                if is_retriable_phone_bootstrap_disconnect(&err)
+                    && phone_bootstrap_attempt < max_phone_bootstrap_attempts
+                {
+                    last_phone_bootstrap_error = format!(
+                        "send WifiInfoResponse failed: {}",
+                        err
+                    );
+                    continue;
+                }
+                return Err(e);
+            }
+
+            let start_resp = match read_phone_bootstrap_frame(
+                &mut phone_stream,
+                ProxyMessageId::WifiStartResponse,
+                Some(&phone_wifi_info_payload),
+                Duration::from_secs(45),
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    let err = e.to_string();
+                    if is_retriable_phone_bootstrap_disconnect(&err)
+                        && phone_bootstrap_attempt < max_phone_bootstrap_attempts
+                    {
+                        last_phone_bootstrap_error = format!(
+                            "waiting for WifiStartResponse failed: {}",
+                            err
+                        );
+                        continue;
+                    }
+                    return Err(e);
+                }
+            };
+            phone_start_resp_id = start_resp.0;
+            phone_start_resp_payload = start_resp.1;
+            if phone_start_resp_id != ProxyMessageId::WifiStartResponse as u16 {
+                warn!(
+                    "{} 🧪 bt-wireless-proxy car-wifi-mitm: expected PHONE WifiStartResponse, got {} ({})",
+                    NAME,
+                    phone_start_resp_id,
+                    ProxyMessageId::name(phone_start_resp_id)
+                );
+            }
+            phone_bootstrap_ok = true;
+            break;
         }
-        debug!(
-            "{} 🧪 bt-wireless-proxy car-wifi-mitm: consumed PHONE WifiInfoRequest locally; sending {} WifiInfoResponse to phone",
-            NAME,
-            if proxy_phone_ap { "proxy_ap phone-facing" } else { "cached HU" }
-        );
 
-        send_proxy_frame(
-            &mut phone_stream,
-            "POC -> PHONE",
-            ProxyMessageId::WifiInfoResponse,
-            &phone_wifi_info_payload,
-        )
-        .await?;
-
-        let (phone_start_resp_id, phone_start_resp_payload) = read_phone_bootstrap_frame(
-            &mut phone_stream,
-            ProxyMessageId::WifiStartResponse,
-            Some(&phone_wifi_info_payload),
-            Duration::from_secs(45),
-        )
-        .await?;
-        if phone_start_resp_id != ProxyMessageId::WifiStartResponse as u16 {
-            warn!(
-                "{} 🧪 bt-wireless-proxy car-wifi-mitm: expected PHONE WifiStartResponse, got {} ({})",
-                NAME,
-                phone_start_resp_id,
-                ProxyMessageId::name(phone_start_resp_id)
-            );
+        if !phone_bootstrap_ok {
+            return Err(format!(
+                "PHONE Wi-Fi bootstrap failed after {} AA RFCOMM attempt(s) while keeping HU RFCOMM alive; last error: {}",
+                max_phone_bootstrap_attempts,
+                last_phone_bootstrap_error
+            )
+            .into());
         }
         let mut phone_rfcomm = phone_stream;
         let phone_status_task = tokio::spawn(async move {

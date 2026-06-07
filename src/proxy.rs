@@ -178,16 +178,89 @@ async fn flatten<T>(handle: &mut JoinHandle<Result<T>>) -> Result<T> {
     }
 }
 
-async fn tcp_bridge(remote_addr: &str, local_addr: &str, cancel: CancellationToken) {
+async fn tcp_bridge(
+    label: &'static str,
+    remote_addr: &str,
+    local_addr: &str,
+    cancel: CancellationToken,
+    require_local_before_remote: bool,
+) {
+    let mut remote_attempts: u64 = 0;
+    let mut local_unavailable_attempts: u64 = 0;
+
     loop {
-        debug!(
-            "{} tcp_bridge: before connect, local={} remote={}",
-            NAME, local_addr, remote_addr
-        );
+        if require_local_before_remote {
+            let local_probe = tokio::select! {
+                _ = cancel.cancelled() => {
+                    debug!("{} tcp_bridge[{}]: cancelled before local preflight ({})", NAME, label, local_addr);
+                    return;
+                }
+                result = timeout(Duration::from_millis(500), TokioTcpStream::connect(local_addr)) => result,
+            };
+
+            match local_probe {
+                Ok(Ok(_probe)) => {
+                    if local_unavailable_attempts > 0 {
+                        info!(
+                            "{} tcp_bridge[{}]: local server {} is available again after {} skipped attempt(s); remote bridge will resume",
+                            NAME, label, local_addr, local_unavailable_attempts
+                        );
+                    }
+                    local_unavailable_attempts = 0;
+                }
+                Err(_) => {
+                    local_unavailable_attempts += 1;
+                    if local_unavailable_attempts == 1 || local_unavailable_attempts % 6 == 0 {
+                        warn!(
+                            "{} tcp_bridge[{}]: local server {} is not reachable yet; skipping remote {} connect to avoid reconnect loop (skipped={})",
+                            NAME, label, local_addr, remote_addr, local_unavailable_attempts
+                        );
+                    }
+                    tokio::select! {
+                        _ = cancel.cancelled() => {
+                            debug!("{} tcp_bridge[{}]: cancelled during local-unavailable backoff ({})", NAME, label, local_addr);
+                            return;
+                        }
+                        _ = tokio::time::sleep(Duration::from_secs(10)) => {}
+                    }
+                    continue;
+                }
+                Ok(Err(e)) => {
+                    local_unavailable_attempts += 1;
+                    if local_unavailable_attempts == 1 || local_unavailable_attempts % 6 == 0 {
+                        warn!(
+                            "{} tcp_bridge[{}]: local server {} unavailable ({}); skipping remote {} connect to avoid reconnect loop (skipped={})",
+                            NAME, label, local_addr, e, remote_addr, local_unavailable_attempts
+                        );
+                    }
+                    tokio::select! {
+                        _ = cancel.cancelled() => {
+                            debug!("{} tcp_bridge[{}]: cancelled during local-unavailable backoff ({})", NAME, label, local_addr);
+                            return;
+                        }
+                        _ = tokio::time::sleep(Duration::from_secs(10)) => {}
+                    }
+                    continue;
+                }
+            }
+        }
+
+        remote_attempts += 1;
+        if remote_attempts == 1 || remote_attempts % 10 == 0 {
+            info!(
+                "{} tcp_bridge[{}]: connecting remote={} local={}",
+                NAME, label, remote_addr, local_addr
+            );
+        } else {
+            debug!(
+                "{} tcp_bridge[{}]: connecting remote={} local={}",
+                NAME, label, remote_addr, local_addr
+            );
+        }
 
         let connect_result = tokio::select! {
             _ = cancel.cancelled() => {
-                debug!("{} tcp_bridge: cancelled before connect ({})", NAME, remote_addr);
+                debug!("{} tcp_bridge[{}]: cancelled before remote connect ({})", NAME, label, remote_addr);
                 return;
             }
             result = timeout(Duration::from_secs(3), TokioTcpStream::connect(remote_addr)) => result,
@@ -195,26 +268,40 @@ async fn tcp_bridge(remote_addr: &str, local_addr: &str, cancel: CancellationTok
 
         match connect_result {
             Err(_) => {
-                debug!(
-                    "{} tcp_bridge: timeout connecting to remote server {}",
-                    NAME, remote_addr
-                );
+                if remote_attempts == 1 || remote_attempts % 10 == 0 {
+                    info!(
+                        "{} tcp_bridge[{}]: timeout connecting to remote server {}",
+                        NAME, label, remote_addr
+                    );
+                } else {
+                    debug!(
+                        "{} tcp_bridge[{}]: timeout connecting to remote server {}",
+                        NAME, label, remote_addr
+                    );
+                }
             }
             Ok(Err(e)) => {
-                debug!(
-                    "{} tcp_bridge: failed to connect to remote server {}: {}",
-                    NAME, remote_addr, e
-                );
+                if remote_attempts == 1 || remote_attempts % 10 == 0 {
+                    info!(
+                        "{} tcp_bridge[{}]: failed to connect to remote server {}: {}",
+                        NAME, label, remote_addr, e
+                    );
+                } else {
+                    debug!(
+                        "{} tcp_bridge[{}]: failed to connect to remote server {}: {}",
+                        NAME, label, remote_addr, e
+                    );
+                }
             }
             Ok(Ok(mut remote)) => {
-                debug!(
-                    "{} tcp_bridge: remote side connected: ({})",
-                    NAME, remote_addr
+                info!(
+                    "{} tcp_bridge[{}]: remote connected: {}",
+                    NAME, label, remote_addr
                 );
 
                 let local_result = tokio::select! {
                     _ = cancel.cancelled() => {
-                        debug!("{} tcp_bridge: cancelled before local connect ({})", NAME, local_addr);
+                        debug!("{} tcp_bridge[{}]: cancelled before local connect ({})", NAME, label, local_addr);
                         return;
                     }
                     result = timeout(Duration::from_secs(3), TokioTcpStream::connect(local_addr)) => result,
@@ -222,38 +309,37 @@ async fn tcp_bridge(remote_addr: &str, local_addr: &str, cancel: CancellationTok
 
                 match local_result {
                     Err(_) => {
-                        debug!(
-                            "{} tcp_bridge: timeout connecting to local server {}",
-                            NAME, local_addr
+                        warn!(
+                            "{} tcp_bridge[{}]: timeout connecting to local server {} after remote connected",
+                            NAME, label, local_addr
                         );
                     }
                     Ok(Err(e)) => {
-                        debug!(
-                            "{} tcp_bridge: failed to connect to local server {}: {}",
-                            NAME, local_addr, e
+                        warn!(
+                            "{} tcp_bridge[{}]: failed to connect to local server {} after remote connected: {}",
+                            NAME, label, local_addr, e
                         );
                     }
                     Ok(Ok(mut local)) => {
-                        debug!(
-                            "{} tcp_bridge: local side connected: ({})",
-                            NAME, local_addr
+                        info!(
+                            "{} tcp_bridge[{}]: local connected: {}; starting bidirectional transfer",
+                            NAME, label, local_addr
                         );
-                        info!("{} Connected to companion app TCP server ({}), starting bidirectional transfer...", NAME, local_addr);
                         tokio::select! {
                             _ = cancel.cancelled() => {
-                                debug!("{} tcp_bridge: cancelled during transfer ({})", NAME, remote_addr);
+                                debug!("{} tcp_bridge[{}]: cancelled during transfer ({})", NAME, label, remote_addr);
                                 return;
                             }
                             res = copy_bidirectional(&mut remote, &mut local) => {
                                 match res {
                                     Ok((from_remote, from_local)) => {
-                                        debug!(
-                                            "{} tcp_bridge: Connection closed: remote->local={} local->remote={}",
-                                            NAME, from_remote, from_local
+                                        info!(
+                                            "{} tcp_bridge[{}]: closed, remote->local={} local->remote={}",
+                                            NAME, label, from_remote, from_local
                                         );
                                     }
                                     Err(e) => {
-                                        error!("{} Error during bidirectional copy: {}", NAME, e);
+                                        warn!("{} tcp_bridge[{}]: error during bidirectional copy: {}", NAME, label, e);
                                     }
                                 }
                             }
@@ -263,13 +349,19 @@ async fn tcp_bridge(remote_addr: &str, local_addr: &str, cancel: CancellationTok
             }
         }
 
-        // Wait before retry, but bail immediately if cancelled
+        // Wait before retry, but bail immediately if cancelled. SWUPDATE is optional and
+        // may have no local 8080 server, so keep its retry cadence much lower.
+        let retry_sleep = if require_local_before_remote {
+            Duration::from_secs(10)
+        } else {
+            Duration::from_secs(1)
+        };
         tokio::select! {
             _ = cancel.cancelled() => {
-                debug!("{} tcp_bridge: cancelled during retry wait ({})", NAME, remote_addr);
+                debug!("{} tcp_bridge[{}]: cancelled during retry wait ({})", NAME, label, remote_addr);
                 return;
             }
-            _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+            _ = tokio::time::sleep(retry_sleep) => {}
         }
     }
 }
@@ -418,16 +510,20 @@ macro_rules! impl_tcp_wait_for_connection {
             let c = cancel.clone();
             tokio::spawn(async move {
                 info!(
-                    "{} starting TCP reverse connection, Android IP: {}",
+                    "{} starting companion reverse bridge HTTP, Android IP: {}, remote={}:{} local=127.0.0.1:80",
                     NAME,
-                    addr.ip()
+                    addr.ip(),
+                    addr.ip(),
+                    COMP_APP_TCP_PORT
                 );
                 // FIXME use port configured by user for webserver
                 // or ignore when webserver disabled...
                 tcp_bridge(
+                    "HTTP",
                     &format!("{}:{}", addr.ip(), COMP_APP_TCP_PORT),
                     "127.0.0.1:80",
                     c,
+                    false,
                 )
                 .await;
             });
@@ -441,16 +537,20 @@ macro_rules! impl_tcp_wait_for_connection {
         let c = cancel.clone();
         tokio::spawn(async move {
             info!(
-                "{} starting TCP reverse connection for WS, Android IP: {}",
+                "{} starting companion reverse bridge WS, Android IP: {}, remote={}:{} local=127.0.0.1:80",
                 NAME,
-                addr.ip()
+                addr.ip(),
+                addr.ip(),
+                COMP_APP_TCP_PORT_WS
             );
             // FIXME use port configured by user for webserver
             // or ignore when webserver disabled...
             tcp_bridge(
+                "WS",
                 &format!("{}:{}", addr.ip(), COMP_APP_TCP_PORT_WS),
                 "127.0.0.1:80",
                 c,
+                false,
             )
             .await;
         });
@@ -458,16 +558,20 @@ macro_rules! impl_tcp_wait_for_connection {
         let c = cancel.clone();
         tokio::spawn(async move {
             info!(
-                "{} starting TCP reverse connection for SWUpdate, Android IP: {}",
+                "{} starting companion reverse bridge SWUPDATE, Android IP: {}, remote={}:{} local=127.0.0.1:8080",
                 NAME,
-                addr.ip()
+                addr.ip(),
+                addr.ip(),
+                COMP_APP_TCP_PORT_SWUPDATE
             );
             // FIXME use port configured by user for webserver
             // or ignore when webserver disabled...
             tcp_bridge(
+                "SWUPDATE",
                 &format!("{}:{}", addr.ip(), COMP_APP_TCP_PORT_SWUPDATE),
                 "127.0.0.1:8080",
                 c,
+                true,
             )
             .await;
         });
