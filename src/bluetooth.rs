@@ -18,7 +18,7 @@ use bluer::{
 };
 use futures::{FutureExt, Stream as FuturesStream, StreamExt};
 use simplelog::*;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::net::IpAddr;
@@ -614,6 +614,12 @@ pub struct CarWifiMitmProxyOptions {
     /// car-wifi-mitm uses the same AA packet/TLS MITM path as USB by bridging the real HU TCP
     /// socket into the local DHU-side TCP listener instead of raw-copying phone<->HU here.
     pub tcp_start: Arc<Notify>,
+    /// Raised by the normal TCP MITM loop after the phone-side TCP connection has actually
+    /// been accepted.  This is the commit barrier for strict HUs: do not tell the real HU
+    /// Wi-Fi bootstrap succeeded, and do not open the real HU TCP leg, until the phone is
+    /// already connected to aa-proxy.
+    pub tcp_phone_connected: Arc<Notify>,
+    pub tcp_phone_connection_seq: Arc<AtomicU64>,
     /// If HU WifiVersionRequest contains WifiProjectionProtocolInfo(ip/port) and no explicit
     /// WifiStartRequest arrives, synthesize WifiStartRequest from that endpoint.
     pub use_version_projection_fallback: bool,
@@ -1004,6 +1010,47 @@ async fn read_phone_bootstrap_frame(
             ProxyMessageId::name(phone_id)
         );
         return Ok((phone_id, phone_payload));
+    }
+}
+
+async fn wait_for_phone_tcp_accept_barrier(
+    notify: Arc<Notify>,
+    seq: Arc<AtomicU64>,
+    seq_before: u64,
+    timeout_duration: Duration,
+) -> Result<u64> {
+    let start = Instant::now();
+    loop {
+        let current = seq.load(Ordering::Relaxed);
+        if current > seq_before {
+            return Ok(current);
+        }
+
+        let elapsed = start.elapsed();
+        if elapsed >= timeout_duration {
+            return Err(format!(
+                "timed out after {:?} waiting for PHONE TCP accept barrier (seq_before={}, current={})",
+                timeout_duration,
+                seq_before,
+                current
+            )
+            .into());
+        }
+
+        let remaining = timeout_duration - elapsed;
+        match timeout(remaining, notify.notified()).await {
+            Ok(()) => continue,
+            Err(_) => {
+                let current = seq.load(Ordering::Relaxed);
+                return Err(format!(
+                    "timed out after {:?} waiting for PHONE TCP accept barrier (seq_before={}, current={})",
+                    timeout_duration,
+                    seq_before,
+                    current
+                )
+                .into());
+            }
+        }
     }
 }
 
@@ -6354,6 +6401,7 @@ impl Bluetooth {
             "{} 🧪 bt-wireless-proxy car-wifi-mitm: handing phone TCP {}:{} to the main aa-proxy MITM listener at {}; HU TCP {}:{} will be bridged into local DHU port {}",
             NAME, rewrite_ip, listen_port, listen_addr, hu_tcp_ip, hu_tcp_port, TCP_DHU_PORT
         );
+        let phone_tcp_seq_before = options.tcp_phone_connection_seq.load(Ordering::Relaxed);
         options.tcp_start.notify_one();
 
         let mut phone_start_req = WifiStartRequest::WifiStartRequest::parse_from_bytes(&hu_start_payload)?;
@@ -6412,6 +6460,66 @@ impl Bluetooth {
                 ProxyMessageId::name(phone_start_resp_id)
             );
         }
+        let mut phone_rfcomm = phone_stream;
+        let phone_status_task = tokio::spawn(async move {
+            match timeout(
+                Duration::from_secs(30),
+                read_proxy_frame(&mut phone_rfcomm, "PHONE -> POC"),
+            )
+            .await
+            {
+                Ok(Ok((phone_status_id, phone_status_payload))) => {
+                    if phone_status_id != ProxyMessageId::WifiConnectStatus as u16 {
+                        warn!(
+                            "{} 🧪 bt-wireless-proxy car-wifi-mitm: expected PHONE WifiConnectStatus, got {} ({})",
+                            NAME,
+                            phone_status_id,
+                            ProxyMessageId::name(phone_status_id)
+                        );
+                    }
+                    Ok::<_, Box<dyn std::error::Error + Send + Sync>>((phone_status_id, phone_status_payload))
+                }
+                Ok(Err(e)) => {
+                    warn!(
+                        "{} 🧪 bt-wireless-proxy car-wifi-mitm: failed reading PHONE WifiConnectStatus before HU commit: {}; will synthesize success for HU",
+                        NAME, e
+                    );
+                    Ok::<_, Box<dyn std::error::Error + Send + Sync>>((
+                        ProxyMessageId::WifiConnectStatus as u16,
+                        wifi_connect_status_payload(0),
+                    ))
+                }
+                Err(_) => {
+                    warn!(
+                        "{} 🧪 bt-wireless-proxy car-wifi-mitm: timed out waiting for PHONE WifiConnectStatus before HU commit; will synthesize success for HU",
+                        NAME
+                    );
+                    Ok::<_, Box<dyn std::error::Error + Send + Sync>>((
+                        ProxyMessageId::WifiConnectStatus as u16,
+                        wifi_connect_status_payload(0),
+                    ))
+                }
+            }
+        });
+
+        info!(
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: PHONE WifiStartResponse received; delaying HU WifiStartResponse and real HU TCP connect until PHONE TCP is accepted by the normal MITM listener",
+            NAME
+        );
+        let phone_tcp_seq = wait_for_phone_tcp_accept_barrier(
+            options.tcp_phone_connected.clone(),
+            options.tcp_phone_connection_seq.clone(),
+            phone_tcp_seq_before,
+            Duration::from_secs(75),
+        )
+        .await?;
+        info!(
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: PHONE TCP accept barrier passed seq={} (before={}); committing HU Wi-Fi bootstrap now",
+            NAME,
+            phone_tcp_seq,
+            phone_tcp_seq_before
+        );
+
         {
             let mut hu_writer = hu_rfcomm_writer.lock().await;
             send_proxy_frame_raw(
@@ -6422,10 +6530,12 @@ impl Bluetooth {
             )
             .await?;
         }
+
+
         let hu_tcp_addr = format!("{}:{}", hu_tcp_ip, hu_tcp_port);
         let local_hu_tcp_addr = format!("127.0.0.1:{}", TCP_DHU_PORT);
         info!(
-            "{} 🧪 bt-wireless-proxy car-wifi-mitm: connecting real HU TCP {} and local aa-proxy HU-side TCP {}; keeping synthetic WPP keepalive alive until TCP bridge is ready",
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: connecting real HU TCP {} and local aa-proxy HU-side TCP {}; PHONE TCP is already accepted, keeping synthetic WPP keepalive alive until TCP bridge is ready",
             NAME, hu_tcp_addr, local_hu_tcp_addr
         );
 
@@ -6447,64 +6557,39 @@ impl Bluetooth {
             NAME, hu_tcp_addr, local_hu_tcp_addr, listen_port
         );
 
-        let mut phone_rfcomm = phone_stream;
         let hu_rfcomm_writer_for_status = hu_rfcomm_writer.clone();
         let rfcomm_status_task = tokio::spawn(async move {
-            match timeout(
-                Duration::from_secs(20),
-                read_proxy_frame(&mut phone_rfcomm, "PHONE -> POC"),
-            )
-            .await
-            {
-                Ok(Ok((phone_status_id, phone_status_payload))) => {
-                    if phone_status_id != ProxyMessageId::WifiConnectStatus as u16 {
-                        warn!(
-                            "{} 🧪 bt-wireless-proxy car-wifi-mitm: expected PHONE WifiConnectStatus, got {} ({})",
-                            NAME,
-                            phone_status_id,
-                            ProxyMessageId::name(phone_status_id)
-                        );
-                    }
-                    let mut hu_rfcomm = hu_rfcomm_writer_for_status.lock().await;
-                    send_proxy_frame_raw(
-                        &mut *hu_rfcomm,
-                        "POC -> HU",
-                        phone_status_id,
-                        &phone_status_payload,
-                    )
-                    .await?;
-                }
+            let (phone_status_id, phone_status_payload) = match phone_status_task.await {
+                Ok(Ok(status)) => status,
                 Ok(Err(e)) => {
                     warn!(
-                        "{} 🧪 bt-wireless-proxy car-wifi-mitm: failed reading PHONE WifiConnectStatus: {}; sending success to HU",
+                        "{} 🧪 bt-wireless-proxy car-wifi-mitm: PHONE WifiConnectStatus collector failed: {}; sending success to HU",
                         NAME, e
                     );
-                    let status_payload = wifi_connect_status_payload(0);
-                    let mut hu_rfcomm = hu_rfcomm_writer_for_status.lock().await;
-                    send_proxy_frame(
-                        &mut *hu_rfcomm,
-                        "POC -> HU",
-                        ProxyMessageId::WifiConnectStatus,
-                        &status_payload,
+                    (
+                        ProxyMessageId::WifiConnectStatus as u16,
+                        wifi_connect_status_payload(0),
                     )
-                    .await?;
                 }
-                Err(_) => {
+                Err(e) => {
                     warn!(
-                        "{} 🧪 bt-wireless-proxy car-wifi-mitm: timed out waiting for PHONE WifiConnectStatus; sending success to HU",
-                        NAME
+                        "{} 🧪 bt-wireless-proxy car-wifi-mitm: PHONE WifiConnectStatus collector task join failed: {}; sending success to HU",
+                        NAME, e
                     );
-                    let status_payload = wifi_connect_status_payload(0);
-                    let mut hu_rfcomm = hu_rfcomm_writer_for_status.lock().await;
-                    send_proxy_frame(
-                        &mut *hu_rfcomm,
-                        "POC -> HU",
-                        ProxyMessageId::WifiConnectStatus,
-                        &status_payload,
+                    (
+                        ProxyMessageId::WifiConnectStatus as u16,
+                        wifi_connect_status_payload(0),
                     )
-                    .await?;
                 }
-            }
+            };
+            let mut hu_rfcomm = hu_rfcomm_writer_for_status.lock().await;
+            send_proxy_frame_raw(
+                &mut *hu_rfcomm,
+                "POC -> HU",
+                phone_status_id,
+                &phone_status_payload,
+            )
+            .await?;
             Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
         });
 
