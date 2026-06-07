@@ -175,6 +175,15 @@ impl Default for InjectDisplaysFile {
     }
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InjectDisplayInsets {
+    pub top: u32,
+    pub bottom: u32,
+    pub left: u32,
+    pub right: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct InjectDisplayProfile {
@@ -209,6 +218,10 @@ pub struct InjectDisplayProfile {
     pub initial_content_keycode: Option<KeyCode>,
     pub width_margin: u32,
     pub height_margin: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_insets: Option<InjectDisplayInsets>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stable_content_insets: Option<InjectDisplayInsets>,
     #[serde(default = "default_density")]
     pub density: u32,
     #[serde(default = "default_viewing_distance")]
@@ -240,6 +253,8 @@ impl Default for InjectDisplayProfile {
             initial_content_keycode: None,
             width_margin: 0,
             height_margin: 0,
+            content_insets: None,
+            stable_content_insets: None,
             density: default_density(),
             viewing_distance: default_viewing_distance(),
             touch_width: default_touch_width(),
