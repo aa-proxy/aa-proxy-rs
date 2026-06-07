@@ -672,7 +672,7 @@ async fn battery_status_handler(State(state): State<Arc<AppState>>) -> impl Into
     let data = state.last_battery_data.read().await;
     match &*data {
         Some(d) => Json(serde_json::to_value(d).unwrap()).into_response(),
-        None => (StatusCode::NO_CONTENT, "No battery data yet").into_response(),
+        None => StatusCode::NO_CONTENT.into_response(),
     }
 }
 
