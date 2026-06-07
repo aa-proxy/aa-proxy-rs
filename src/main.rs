@@ -957,8 +957,19 @@ async fn tokio_main(
                 };
 
                 if let Err(e) = result {
-                    error!("{} bt_wireless_proxy error: {}", NAME, e);
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    let err_msg = e.to_string();
+                    error!("{} bt_wireless_proxy error: {}", NAME, err_msg);
+                    if proxy_mode == "car-wifi-mitm" || proxy_mode == "wifi-mitm" {
+                        bluetooth
+                            .recover_after_car_wifi_mitm_error(
+                                &cfg.connect,
+                                &cfg.bt_wireless_proxy_hu_mac,
+                                &err_msg,
+                            )
+                            .await;
+                    } else {
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    }
                     continue;
                 }
             } else {

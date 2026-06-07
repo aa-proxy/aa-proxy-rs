@@ -5885,6 +5885,69 @@ impl Bluetooth {
         tokio::time::sleep(Duration::from_millis(750)).await;
     }
 
+    async fn disconnect_hu_device_for_recovery(&self, hu_mac: &str, reason: &str) {
+        let trimmed = hu_mac.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let Ok(addr) = trimmed.parse::<Address>() else {
+            debug!(
+                "{} 🧪 bt-wireless-proxy car-wifi-mitm: cannot parse HU MAC '{}' for stale-state disconnect after {}",
+                NAME,
+                trimmed,
+                reason
+            );
+            return;
+        };
+        match self.adapter.device(addr) {
+            Ok(device) => match device.disconnect().await {
+                Ok(_) => info!(
+                    "{} 🧪 bt-wireless-proxy car-wifi-mitm: disconnected HU {} after {}",
+                    NAME,
+                    addr,
+                    reason
+                ),
+                Err(e) => debug!(
+                    "{} 🧪 bt-wireless-proxy car-wifi-mitm: HU {} disconnect after {} returned: {}",
+                    NAME,
+                    addr,
+                    reason,
+                    e
+                ),
+            },
+            Err(e) => debug!(
+                "{} 🧪 bt-wireless-proxy car-wifi-mitm: cannot get HU device {} for stale-state disconnect after {}: {}",
+                NAME,
+                addr,
+                reason,
+                e
+            ),
+        }
+    }
+
+    pub async fn recover_after_car_wifi_mitm_error(
+        &self,
+        connect: &BluetoothAddressList,
+        hu_mac: &str,
+        reason: &str,
+    ) {
+        let reason = reason.trim();
+        let reason = if reason.is_empty() { "car-wifi-mitm error" } else { reason };
+        warn!(
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: recovery cleanup after {}; closing stale HU/phone Bluetooth state before retry",
+            NAME,
+            reason
+        );
+        self.disconnect_triggered_phone_devices(connect, reason).await;
+        self.disconnect_hu_device_for_recovery(hu_mac, reason).await;
+        info!(
+            "{} 🧪 bt-wireless-proxy car-wifi-mitm: cooldown after {}; giving phone/HU AA stacks time to return to initial START state",
+            NAME,
+            reason
+        );
+        tokio::time::sleep(Duration::from_secs(7)).await;
+    }
+
     async fn car_wifi_mitm_phone_first_rendezvous(
         &mut self,
         connect: BluetoothAddressList,
