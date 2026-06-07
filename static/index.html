@@ -274,6 +274,14 @@
         <div class="config-grid">{CONFIG_VALUES}</div>
       </form>
     </main>
+    <div
+      id="snackbar"
+      class="snackbar"
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+      hidden
+    ></div>
     <script>
       document.addEventListener("DOMContentLoaded", () => {
         const fileInput = document.getElementById("file-input");
@@ -998,6 +1006,26 @@
         evaluateRequires();
       }
 
+      let snackbarTimer = null;
+
+      function showSnackbar(message, type = "success") {
+        const snackbar = document.getElementById("snackbar");
+        if (!snackbar) return;
+
+        if (snackbarTimer) clearTimeout(snackbarTimer);
+        snackbar.textContent = message;
+        snackbar.className = `snackbar snackbar-${type}`;
+        snackbar.hidden = false;
+        requestAnimationFrame(() => snackbar.classList.add("show"));
+
+        snackbarTimer = setTimeout(() => {
+          snackbar.classList.remove("show");
+          snackbarTimer = setTimeout(() => {
+            snackbar.hidden = true;
+          }, 220);
+        }, 2600);
+      }
+
       async function saveConfig() {
         const out = {};
         for (const id of CONFIG_IDS) out[id] = getValue(id);
@@ -1009,10 +1037,12 @@
           });
           if (!res.ok) {
             const t = await res.text();
-            alert("Save failed: " + t);
+            showSnackbar("Save failed: " + t, "error");
+            return;
           }
+          showSnackbar("Configuration saved.", "success");
         } catch (e) {
-          alert("Save failed: " + e.message);
+          showSnackbar("Save failed: " + e.message, "error");
         }
       }
     </script>
