@@ -350,6 +350,12 @@ fn flatten_config_data_section(
 pub struct AppConfig {
     pub advertise: bool,
     pub enable_companion_bt: bool,
+    /// Require application-level HMAC auth for Classic Bluetooth companion transport.
+    /// Pairing/pairable behavior is unchanged; auth gates companion commands after RFCOMM connect.
+    pub companion_bt_auth_required: bool,
+    /// Shared companion BT auth token. Empty + auth_required enables provisioning mode: only
+    /// AUTH_STATUS/AUTH_SET_TOKEN are accepted until the companion app provisions a token.
+    pub companion_bt_auth_token: String,
     pub dongle_mode: bool,
     /// Comma-separated kernel modules to modprobe during startup.
     /// No driver is added automatically; list any USB Wi-Fi driver explicitly, e.g. rt2800usb.
@@ -823,6 +829,8 @@ impl Default for AppConfig {
         Self {
             advertise: true,
             enable_companion_bt: true,
+            companion_bt_auth_required: true,
+            companion_bt_auth_token: String::new(),
             dongle_mode: false,
             preload_kernel_modules: String::new(),
             kernel_module_path: "/data/aa-proxy-rs/firmware".to_string(),
@@ -1123,6 +1131,8 @@ impl AppConfig {
 
         doc["advertise"] = value(self.advertise);
         doc["enable_companion_bt"] = value(self.enable_companion_bt);
+        doc["companion_bt_auth_required"] = value(self.companion_bt_auth_required);
+        doc["companion_bt_auth_token"] = value(self.companion_bt_auth_token.clone());
         doc["dongle_mode"] = value(self.dongle_mode);
         doc["preload_kernel_modules"] = value(self.preload_kernel_modules.clone());
         doc["kernel_module_path"] = value(self.kernel_module_path.clone());

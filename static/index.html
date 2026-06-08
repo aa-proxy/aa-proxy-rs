@@ -471,6 +471,8 @@
         document.addEventListener("input", evaluateRequires);
         document.addEventListener("change", evaluateRequires);
 
+        setupMobileLongPressLabels();
+
         // Controller-panel drawer: toggle via rail button, close via X
         // button, scrim click, or Esc.
         const drawer = document.getElementById("controller-drawer");
@@ -498,6 +500,105 @@
 
         loadConfig();
       });
+
+
+      function setupMobileLongPressLabels() {
+        const isTouchDevice =
+          (window.matchMedia &&
+            window.matchMedia("(pointer: coarse)").matches) ||
+          navigator.maxTouchPoints > 0;
+
+        if (!isTouchDevice) return;
+
+        let longPressTimer = null;
+        let activeButton = null;
+        let activePointerId = null;
+
+        const clearLongPressTimer = () => {
+          if (longPressTimer) {
+            clearTimeout(longPressTimer);
+            longPressTimer = null;
+          }
+        };
+
+        const pointerInsideButton = (event, button) => {
+          const rect = button.getBoundingClientRect();
+          return (
+            event.clientX >= rect.left &&
+            event.clientX <= rect.right &&
+            event.clientY >= rect.top &&
+            event.clientY <= rect.bottom
+          );
+        };
+
+        const showLongPressLabel = (label) => {
+          if (!label) return;
+
+          let toast = document.getElementById("rail-label-toast");
+          if (!toast) {
+            toast = document.createElement("div");
+            toast.id = "rail-label-toast";
+            toast.className = "rail-label-toast";
+            toast.setAttribute("role", "status");
+            toast.setAttribute("aria-live", "polite");
+            document.body.appendChild(toast);
+          }
+
+          toast.textContent = label;
+          toast.hidden = false;
+          requestAnimationFrame(() => toast.classList.add("show"));
+
+          if (toast._hideTimer) clearTimeout(toast._hideTimer);
+          toast._hideTimer = setTimeout(() => {
+            toast.classList.remove("show");
+            toast._hideTimer = setTimeout(() => {
+              toast.hidden = true;
+            }, 180);
+          }, 2400);
+        };
+
+        document.addEventListener("pointerdown", (event) => {
+          if (event.pointerType === "mouse") return;
+
+          const button = event.target.closest("button[data-label]");
+          if (!button) return;
+
+          clearLongPressTimer();
+          activeButton = button;
+          activePointerId = event.pointerId;
+
+          longPressTimer = setTimeout(() => {
+            showLongPressLabel(button.getAttribute("data-label"));
+            longPressTimer = null;
+          }, 650);
+        });
+
+        document.addEventListener("pointermove", (event) => {
+          if (!activeButton || event.pointerId !== activePointerId) return;
+          if (!longPressTimer) return;
+          if (pointerInsideButton(event, activeButton)) return;
+
+          clearLongPressTimer();
+        });
+
+        const clearActivePointer = (event) => {
+          if (activePointerId !== null && event.pointerId !== activePointerId) {
+            return;
+          }
+          clearLongPressTimer();
+          activeButton = null;
+          activePointerId = null;
+        };
+
+        document.addEventListener("pointerup", clearActivePointer);
+        document.addEventListener("pointercancel", clearActivePointer);
+
+        document.addEventListener("contextmenu", (event) => {
+          const button = event.target.closest("button[data-label]");
+          if (!button) return;
+          event.preventDefault();
+        });
+      }
 
       async function uploadTarGzFile(fileInputEl, endpoint) {
         const file = fileInputEl.files[0];
