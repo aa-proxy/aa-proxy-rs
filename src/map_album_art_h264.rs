@@ -1,6 +1,6 @@
 use crate::config::AppConfig;
 use crate::map_album_art::{global_album_art_store, validate_png, MapAlbumArtSource};
-use log::{info, warn};
+use log::{debug, info, warn};
 use rust_h264::decoder::{Decoder, Frame};
 use rust_h264::nal::parse_annex_b;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -454,7 +454,7 @@ fn h264_worker(rx: Receiver<H264ArtCommand>) {
                         let version =
                             global_album_art_store().set_png(RUST_H264_SOURCE, captured.png);
                         last_emit_at = Some(Instant::now());
-                        info!(
+                        debug!(
                             "map album art h264: captured decoded frame as PNG ({} bytes, version={}, frame={}x{}, crop=x{} y{} w{} h{}, output={}x{}, nals={}, au_idr={}, seen={} AUs, decoded={} frames, idrs={})",
                             bytes,
                             version,
@@ -508,20 +508,40 @@ fn maybe_log_h264_status(
         return;
     }
 
-    // Keep this at info while diagnosing intermittent DHU/phone startup issues.
-    // It is throttled to avoid per-frame spam.
-    info!(
-        "map album art h264: status synced={} AUs={} idrs={} decoded={} codec_config_age={} last_au={} last_idr={} last_decoded={} last_png={}",
-        synced_to_idr,
-        access_units_seen,
-        idr_frames_seen,
-        decoded_frames_seen,
-        elapsed_label(Some(codec_config_received_at)),
-        elapsed_label(last_au_at),
-        elapsed_label(last_idr_at),
-        elapsed_label(last_decoded_at),
-        elapsed_label(last_emit_at)
-    );
+    let stream_stalled = synced_to_idr
+        && last_au_at
+            .map(|instant| instant.elapsed() >= Duration::from_secs(3))
+            .unwrap_or(false);
+
+    if stream_stalled {
+        info!(
+            "map album art h264: status synced={} stalled={} AUs={} idrs={} decoded={} codec_config_age={} last_au={} last_idr={} last_decoded={} last_png={}",
+            synced_to_idr,
+            stream_stalled,
+            access_units_seen,
+            idr_frames_seen,
+            decoded_frames_seen,
+            elapsed_label(Some(codec_config_received_at)),
+            elapsed_label(last_au_at),
+            elapsed_label(last_idr_at),
+            elapsed_label(last_decoded_at),
+            elapsed_label(last_emit_at)
+        );
+    } else {
+        debug!(
+            "map album art h264: status synced={} stalled={} AUs={} idrs={} decoded={} codec_config_age={} last_au={} last_idr={} last_decoded={} last_png={}",
+            synced_to_idr,
+            stream_stalled,
+            access_units_seen,
+            idr_frames_seen,
+            decoded_frames_seen,
+            elapsed_label(Some(codec_config_received_at)),
+            elapsed_label(last_au_at),
+            elapsed_label(last_idr_at),
+            elapsed_label(last_decoded_at),
+            elapsed_label(last_emit_at)
+        );
+    }
     *last_status_log_at = Some(Instant::now());
 }
 

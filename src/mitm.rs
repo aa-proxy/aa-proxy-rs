@@ -676,6 +676,33 @@ fn should_emit_pending_map_album_art_metadata(
         && is_complete_frame_boundary(pkt.flags)
 }
 
+fn find_media_playback_channel_from_sdr(msg: &ServiceDiscoveryResponse) -> Option<u8> {
+    msg.services.iter().find_map(|svc| {
+        if svc.media_playback_service.is_some() {
+            u8::try_from(svc.id()).ok()
+        } else {
+            None
+        }
+    })
+}
+
+fn update_map_album_art_media_playback_channel_from_sdr(
+    proxy_type: ProxyType,
+    ctx: &mut ModifyContext,
+    msg: &ServiceDiscoveryResponse,
+) {
+    let channel = find_media_playback_channel_from_sdr(msg);
+    if channel != ctx.map_album_art_injector.media_playback_channel() {
+        info!(
+            "{} map album art: SDR MediaPlaybackStatusService channel/service_id resolved as {:?}",
+            get_name(proxy_type),
+            channel
+        );
+    }
+    ctx.map_album_art_injector
+        .set_media_playback_channel(channel);
+}
+
 /// rust-openssl doesn't support BIO_s_mem
 /// This SslMemBuf is about to provide `Read` and `Write` implementations
 /// to be used with `openssl::ssl::SslStream`
@@ -1094,6 +1121,7 @@ pub async fn pkt_modify_hook(
 
     // message_id is the first 2 bytes of payload
     let message_id: i32 = u16::from_be_bytes(pkt.payload[0..=1].try_into()?).into();
+    let data = &pkt.payload[2..]; // start of message data
 
     // Optional map-preview album art injection.
     // This runs on the phone -> proxy ingress path. Fragmented metadata is buffered,
@@ -1115,8 +1143,6 @@ pub async fn pkt_modify_hook(
             ctx.map_album_art_injector.clear();
         }
     }
-
-    let data = &pkt.payload[2..]; // start of message data
 
     // handling data on sensor channel
     if let Some(ch) = ctx.sensor_channel {
@@ -1644,6 +1670,15 @@ pub async fn pkt_modify_hook(
             };
 
             let service_id = msg.service_id() as u8;
+
+            if ctx.map_album_art_injector.media_playback_channel() == Some(service_id) {
+                info!(
+                    "{} map album art: MediaPlaybackStatusService channel open observed flow={:?} service_id/channel={:#04x}",
+                    get_name(proxy_type),
+                    flow,
+                    service_id
+                );
+            }
 
             // display code
             let injected = ctx.injected_service_ids.contains(&msg.service_id());
@@ -2249,6 +2284,7 @@ pub async fn pkt_modify_hook(
             // Refresh channel kinds after all SDR mutations, especially after adding
             // injected vendor/display services.
             update_debug_channel_kinds(ctx, &msg);
+            update_map_album_art_media_playback_channel_from_sdr(proxy_type, ctx, &msg);
 
             // Populate media tap channels from the final rewritten SDR. Ports are opened
             // lazily and only for the media sinks actually present in this SDR.
@@ -2296,6 +2332,17 @@ pub async fn pkt_modify_hook(
             if let Ok(msg) = ServiceDiscoveryUpdate::parse_from_bytes(data) {
                 if let Some(service) = msg.service.as_ref() {
                     let sid = service.id();
+                    if service.media_playback_service.is_some() {
+                        if let Ok(channel) = u8::try_from(sid) {
+                            info!(
+                                "{} map album art: SDU MediaPlaybackStatusService channel/service_id resolved as {:#04x}",
+                                get_name(proxy_type),
+                                channel
+                            );
+                            ctx.map_album_art_injector
+                                .set_media_playback_channel(Some(channel));
+                        }
+                    }
                     let injected = ctx.injected_service_ids.contains(&sid);
                     let hu_advertised = ctx.hu_service_ids.contains(&sid);
 

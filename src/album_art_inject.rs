@@ -1,24 +1,61 @@
 use crate::config::AppConfig;
 use crate::map_album_art::replacement_png_for_config;
-use crate::mitm::{Packet, FRAME_TYPE_FIRST, FRAME_TYPE_LAST, FRAME_TYPE_MASK};
+use crate::mitm::{Packet, ENCRYPTED, FRAME_TYPE_FIRST, FRAME_TYPE_LAST, FRAME_TYPE_MASK};
 use crate::packet_fragment::{
     clamp_first_fragment_payload_bytes, fragment_plain_payload, frame_base_flags,
     openauto_continuation_fragment_payload_bytes, PlainPayloadFragmentOptions,
     DEFAULT_FIRST_FRAGMENT_PAYLOAD_BYTES, MAX_FIRST_FRAGMENT_PAYLOAD_BYTES,
     MIN_FIRST_FRAGMENT_PAYLOAD_BYTES,
 };
-use log::{info, warn};
+use log::{debug, info, warn};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 
 /// MediaPlaybackStatusMessageId::MEDIA_PLAYBACK_METADATA.
 /// Kept as a constant here so this helper only needs raw packet/protobuf bytes.
 const MEDIA_PLAYBACK_METADATA_ID: i32 = 0x8003;
+const NO_MEDIA_PLAYBACK_CHANNEL: u16 = u16::MAX;
+
+static GLOBAL_MEDIA_PLAYBACK_CHANNEL: AtomicU16 = AtomicU16::new(NO_MEDIA_PLAYBACK_CHANNEL);
+static GLOBAL_MEDIA_PLAYBACK_CHANNEL_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+fn encode_channel(channel: Option<u8>) -> u16 {
+    channel.map(u16::from).unwrap_or(NO_MEDIA_PLAYBACK_CHANNEL)
+}
+
+fn decode_channel(channel: u16) -> Option<u8> {
+    if channel == NO_MEDIA_PLAYBACK_CHANNEL {
+        None
+    } else {
+        u8::try_from(channel).ok()
+    }
+}
+
+fn global_media_playback_channel() -> Option<u8> {
+    decode_channel(GLOBAL_MEDIA_PLAYBACK_CHANNEL.load(Ordering::SeqCst))
+}
+
+fn global_media_playback_channel_generation() -> u64 {
+    GLOBAL_MEDIA_PLAYBACK_CHANNEL_GENERATION.load(Ordering::SeqCst)
+}
+
+fn set_global_media_playback_channel(channel: Option<u8>) -> u64 {
+    let encoded = encode_channel(channel);
+    let previous = GLOBAL_MEDIA_PLAYBACK_CHANNEL.swap(encoded, Ordering::SeqCst);
+    if previous != encoded {
+        GLOBAL_MEDIA_PLAYBACK_CHANNEL_GENERATION.fetch_add(1, Ordering::SeqCst) + 1
+    } else {
+        global_media_playback_channel_generation()
+    }
+}
 
 #[derive(Default)]
 pub(crate) struct MapAlbumArtInjector {
     states: HashMap<u8, AlbumArtRewriteState>,
     observe_states: HashMap<u8, MetadataObserveState>,
     last_metadata: Option<CachedMetadata>,
+    media_playback_channel: Option<u8>,
+    media_playback_channel_generation: u64,
     last_emitted_art_version: u64,
     last_missing_template_log_version: u64,
     duration_tick_flip: bool,
@@ -67,6 +104,49 @@ impl MapAlbumArtInjector {
         self.observe_states.clear();
     }
 
+    pub(crate) fn set_media_playback_channel(&mut self, channel: Option<u8>) {
+        self.sync_media_playback_channel_from_global();
+
+        if self.media_playback_channel == channel && global_media_playback_channel() == channel {
+            return;
+        }
+
+        info!(
+            "map album art: media playback metadata channel changed from {:?} to {:?}; clearing cached metadata template",
+            self.media_playback_channel, channel
+        );
+        self.media_playback_channel_generation = set_global_media_playback_channel(channel);
+        self.media_playback_channel = channel;
+        self.last_metadata = None;
+        self.last_missing_template_log_version = 0;
+        self.clear();
+    }
+
+    pub(crate) fn media_playback_channel(&self) -> Option<u8> {
+        self.media_playback_channel
+            .or_else(global_media_playback_channel)
+    }
+
+    fn sync_media_playback_channel_from_global(&mut self) {
+        let generation = global_media_playback_channel_generation();
+        if self.media_playback_channel_generation == generation {
+            return;
+        }
+
+        let channel = global_media_playback_channel();
+        if self.media_playback_channel != channel {
+            info!(
+                "map album art: media playback metadata channel synchronized from shared route {:?} -> {:?}; clearing cached metadata template",
+                self.media_playback_channel, channel
+            );
+            self.media_playback_channel = channel;
+            self.last_metadata = None;
+            self.last_missing_template_log_version = 0;
+            self.clear();
+        }
+        self.media_playback_channel_generation = generation;
+    }
+
     /// Build a synthetic MediaPlaybackMetadata packet from the last metadata seen
     /// on the phone side when the runtime artwork store changes (for example via
     /// POST /map-album-art). The packets are plaintext/application payloads and
@@ -77,6 +157,8 @@ impl MapAlbumArtInjector {
             self.clear();
             return None;
         }
+
+        self.sync_media_playback_channel_from_global();
 
         let replacement = match load_png_replacement(cfg) {
             Some(replacement) => replacement,
@@ -93,12 +175,41 @@ impl MapAlbumArtInjector {
             return None;
         }
 
-        let cached = match self.last_metadata.clone() {
-            Some(cached) => cached,
+        if let Some(cached) = self.last_metadata.clone() {
+            match self.build_rewritten_packets(
+                cached.channel,
+                cached.base_flags,
+                &cached.payload,
+                &replacement.png,
+                cfg,
+            ) {
+                Ok((packets, rewritten_payload_len)) => {
+                    self.last_emitted_art_version = replacement.version;
+                    debug!(
+                        "map album art: emitted cached MEDIA_PLAYBACK_METADATA after artwork update (source={} version={} channel={:#04x} payload={} replacement_png={} fragments={})",
+                        replacement.source,
+                        replacement.version,
+                        cached.channel,
+                        rewritten_payload_len,
+                        replacement.png.len(),
+                        packets.len()
+                    );
+                    return Some(packets);
+                }
+                Err(RewriteError::Malformed) => {
+                    warn!(
+                        "map album art: cached MEDIA_PLAYBACK_METADATA is malformed; falling back to synthetic artwork metadata"
+                    );
+                }
+            }
+        }
+
+        let channel = match self.media_playback_channel {
+            Some(channel) => channel,
             None => {
                 if self.last_missing_template_log_version != replacement.version {
                     info!(
-                        "map album art: runtime artwork version {} is pending but no MEDIA_PLAYBACK_METADATA template has been cached yet",
+                        "map album art: runtime artwork version {} is pending but no MEDIA_PLAYBACK_METADATA template/channel has been cached from SDR yet",
                         replacement.version
                     );
                     self.last_missing_template_log_version = replacement.version;
@@ -107,34 +218,31 @@ impl MapAlbumArtInjector {
             }
         };
 
-        match self.build_rewritten_packets(
-            cached.channel,
-            cached.base_flags,
-            &cached.payload,
+        let duration_tick = self.take_duration_tick(cfg);
+        let synthetic_payload = build_synthetic_metadata_payload(
             &replacement.png,
+            cfg.map_album_art_duration_tick_enabled,
+            duration_tick,
+        );
+        let rewritten_payload_len = synthetic_payload.len();
+        let packets = self.fragment_metadata(
+            channel,
+            frame_base_flags(ENCRYPTED | FRAME_TYPE_FIRST | FRAME_TYPE_LAST),
+            &synthetic_payload,
             cfg,
-        ) {
-            Ok((packets, rewritten_payload_len)) => {
-                self.last_emitted_art_version = replacement.version;
-                info!(
-                    "map album art: emitted cached MEDIA_PLAYBACK_METADATA after artwork update (source={} version={} channel={:#04x} payload={} replacement_png={} fragments={})",
-                    replacement.source,
-                    replacement.version,
-                    cached.channel,
-                    rewritten_payload_len,
-                    replacement.png.len(),
-                    packets.len()
-                );
-                Some(packets)
-            }
-            Err(RewriteError::Malformed) => {
-                warn!(
-                    "map album art: cached MEDIA_PLAYBACK_METADATA is malformed; cannot emit artwork update"
-                );
-                self.last_emitted_art_version = replacement.version;
-                None
-            }
-        }
+        );
+        self.last_emitted_art_version = replacement.version;
+        debug!(
+            "map album art: emitted synthetic MEDIA_PLAYBACK_METADATA artwork update (source={} version={} channel={:#04x} payload={} replacement_png={} fragments={} duration_tick={})",
+            replacement.source,
+            replacement.version,
+            channel,
+            rewritten_payload_len,
+            replacement.png.len(),
+            packets.len(),
+            cfg.map_album_art_duration_tick_enabled
+        );
+        Some(packets)
     }
 
     pub(crate) fn process_packet(
@@ -148,11 +256,17 @@ impl MapAlbumArtInjector {
             return AlbumArtProcessResult::Forward;
         }
 
+        self.sync_media_playback_channel_from_global();
+
         let frame_kind = pkt.flags & FRAME_TYPE_MASK;
         let is_first =
             frame_kind == FRAME_TYPE_FIRST || frame_kind == (FRAME_TYPE_FIRST | FRAME_TYPE_LAST);
         let is_last =
             frame_kind == FRAME_TYPE_LAST || frame_kind == (FRAME_TYPE_FIRST | FRAME_TYPE_LAST);
+
+        if self.media_playback_channel != Some(pkt.channel) {
+            return AlbumArtProcessResult::Forward;
+        }
 
         if is_first {
             // A new fragmented/standalone message starts on this channel. If an old
@@ -263,15 +377,33 @@ impl MapAlbumArtInjector {
 
     fn cache_metadata_template(&mut self, channel: u8, base_flags: u8, payload: Vec<u8>) {
         let payload_len = payload.len();
+        let summary = summarize_metadata_payload(&payload);
         self.last_metadata = Some(CachedMetadata {
             channel,
             base_flags,
             payload,
         });
-        info!(
-            "map album art: cached MEDIA_PLAYBACK_METADATA template channel={:#04x} payload={}",
-            channel, payload_len
-        );
+
+        if let Some(summary) = summary {
+            info!(
+                "map album art: cached REAL MEDIA_PLAYBACK_METADATA template channel={:#04x} payload={} song={:?} artist={:?} album={:?} playlist={:?} duration={:?} rating={:?} has_art={} art_bytes={:?}",
+                channel,
+                payload_len,
+                summary.song,
+                summary.artist,
+                summary.album,
+                summary.playlist,
+                summary.duration_seconds,
+                summary.rating,
+                summary.has_album_art,
+                summary.album_art_bytes
+            );
+        } else {
+            info!(
+                "map album art: cached REAL MEDIA_PLAYBACK_METADATA template channel={:#04x} payload={} summary=parse_failed",
+                channel, payload_len
+            );
+        }
     }
 
     fn finish_rewrite(
@@ -379,6 +511,26 @@ impl MapAlbumArtInjector {
     }
 }
 
+fn build_synthetic_metadata_payload(
+    replacement: &[u8],
+    duration_tick_enabled: bool,
+    duration_tick: bool,
+) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(replacement.len().saturating_add(16));
+    payload.push(((MEDIA_PLAYBACK_METADATA_ID as u16) >> 8) as u8);
+    payload.push(((MEDIA_PLAYBACK_METADATA_ID as u16) & 0xff) as u8);
+
+    if duration_tick_enabled {
+        write_varint((6 << 3) | 0, &mut payload);
+        write_varint(if duration_tick { 1 } else { 0 }, &mut payload);
+    }
+
+    write_varint((4 << 3) | 2, &mut payload);
+    write_varint(replacement.len() as u64, &mut payload);
+    payload.extend_from_slice(replacement);
+    payload
+}
+
 fn load_png_replacement(cfg: &AppConfig) -> Option<crate::map_album_art::ResolvedAlbumArt> {
     replacement_png_for_config(cfg)
 }
@@ -398,6 +550,83 @@ fn effective_chunk_bytes(cfg: &AppConfig) -> usize {
         );
     }
     clamped
+}
+
+#[derive(Debug, Default)]
+struct MetadataSummary {
+    song: Option<String>,
+    artist: Option<String>,
+    album: Option<String>,
+    playlist: Option<String>,
+    duration_seconds: Option<u64>,
+    rating: Option<u64>,
+    has_album_art: bool,
+    album_art_bytes: Option<usize>,
+}
+
+fn summarize_metadata_payload(payload: &[u8]) -> Option<MetadataSummary> {
+    if payload.len() < 2 {
+        return None;
+    }
+
+    let mut summary = MetadataSummary::default();
+    let data = &payload[2..];
+    let mut pos = 0usize;
+
+    while pos < data.len() {
+        let key = read_varint(data, &mut pos).ok()?;
+        if key == 0 {
+            return None;
+        }
+        let field_no = key >> 3;
+        let wire_type = key & 0x07;
+
+        match wire_type {
+            0 => {
+                let value = read_varint(data, &mut pos).ok()?;
+                match field_no {
+                    6 => summary.duration_seconds = Some(value),
+                    7 => summary.rating = Some(value),
+                    _ => {}
+                }
+            }
+            1 => {
+                if data.len().saturating_sub(pos) < 8 {
+                    return None;
+                }
+                pos += 8;
+            }
+            2 => {
+                let len = read_varint(data, &mut pos).ok()? as usize;
+                if data.len().saturating_sub(pos) < len {
+                    return None;
+                }
+                let value = &data[pos..pos + len];
+                pos += len;
+
+                match field_no {
+                    1 => summary.song = String::from_utf8(value.to_vec()).ok(),
+                    2 => summary.artist = String::from_utf8(value.to_vec()).ok(),
+                    3 => summary.album = String::from_utf8(value.to_vec()).ok(),
+                    4 => {
+                        summary.has_album_art = true;
+                        summary.album_art_bytes = Some(len);
+                    }
+                    5 => summary.playlist = String::from_utf8(value.to_vec()).ok(),
+                    _ => {}
+                }
+            }
+            5 => {
+                if data.len().saturating_sub(pos) < 4 {
+                    return None;
+                }
+                pos += 4;
+            }
+            _ => return None,
+        }
+    }
+
+    Some(summary)
 }
 
 fn read_varint(data: &[u8], pos: &mut usize) -> Result<u64, RewriteError> {
