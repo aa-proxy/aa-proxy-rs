@@ -533,20 +533,22 @@ async fn map_album_art_upload_handler(
     let cfg = state.config.read().await.clone();
     let max_bytes = cfg.map_album_art_max_bytes;
 
-    if let Some(len) = headers
-        .get(header::CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<usize>().ok())
-    {
-        if len > max_bytes {
-            return (
-                StatusCode::PAYLOAD_TOO_LARGE,
-                format!(
-                    "PNG is larger than map_album_art_max_bytes ({} > {})",
-                    len, max_bytes
-                ),
-            )
-                .into_response();
+    if max_bytes > 0 {
+        if let Some(len) = headers
+            .get(header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<usize>().ok())
+        {
+            if len > max_bytes {
+                return (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    format!(
+                        "PNG is larger than map_album_art_max_bytes ({} > {})",
+                        len, max_bytes
+                    ),
+                )
+                    .into_response();
+            }
         }
     }
 
@@ -562,7 +564,7 @@ async fn map_album_art_upload_handler(
     };
 
     if let Err(e) = validate_png(&bytes, max_bytes) {
-        let status = if bytes.len() > max_bytes {
+        let status = if max_bytes > 0 && bytes.len() > max_bytes {
             StatusCode::PAYLOAD_TOO_LARGE
         } else {
             StatusCode::BAD_REQUEST

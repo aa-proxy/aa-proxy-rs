@@ -1,9 +1,9 @@
 use crate::config::AppConfig;
 use crate::map_album_art::{global_album_art_store, validate_png, MapAlbumArtSource};
-use log::{debug, info, warn};
+use log::{info, warn};
 use rust_h264::decoder::{Decoder, Frame};
 use rust_h264::nal::parse_annex_b;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -236,7 +236,7 @@ pub(crate) fn maybe_feed_media_frame(
                 .is_ok()
                 && is_idr
             {
-                debug!(
+                info!(
                     "map album art h264: queued IDR sync frame from display={} ch={:#04x} match={} ({} bytes)",
                     matched_display,
                     channel,
@@ -255,11 +255,36 @@ fn h264_worker(rx: Receiver<H264ArtCommand>) {
     let mut synced_to_idr = false;
     let mut last_emit_at: Option<Instant> = None;
     let mut last_warn_at: Option<Instant> = None;
+    let mut last_status_log_at: Option<Instant> = None;
+    let mut codec_config_received_at: Option<Instant> = None;
+    let mut last_au_at: Option<Instant> = None;
+    let mut last_idr_at: Option<Instant> = None;
+    let mut last_decoded_at: Option<Instant> = None;
     let mut access_units_seen: u64 = 0;
     let mut decoded_frames_seen: u64 = 0;
     let mut idr_frames_seen: u64 = 0;
 
-    while let Ok(cmd) = rx.recv() {
+    loop {
+        let cmd = match rx.recv_timeout(Duration::from_secs(1)) {
+            Ok(cmd) => cmd,
+            Err(RecvTimeoutError::Timeout) => {
+                maybe_log_h264_status(
+                    &mut last_status_log_at,
+                    codec_config_received_at,
+                    last_au_at,
+                    last_idr_at,
+                    last_decoded_at,
+                    last_emit_at,
+                    synced_to_idr,
+                    access_units_seen,
+                    idr_frames_seen,
+                    decoded_frames_seen,
+                );
+                continue;
+            }
+            Err(RecvTimeoutError::Disconnected) => break,
+        };
+
         match cmd {
             H264ArtCommand::CodecConfig { data } => {
                 decoder = Decoder::new();
@@ -268,6 +293,11 @@ fn h264_worker(rx: Receiver<H264ArtCommand>) {
                 decoded_frames_seen = 0;
                 idr_frames_seen = 0;
                 last_emit_at = None;
+                codec_config_received_at = Some(Instant::now());
+                last_au_at = None;
+                last_idr_at = None;
+                last_decoded_at = None;
+                last_status_log_at = None;
 
                 let nal_count = match feed_codec_config_to_decoder(&mut decoder, &data) {
                     Ok(nal_count) => nal_count,
@@ -294,6 +324,10 @@ fn h264_worker(rx: Receiver<H264ArtCommand>) {
                 is_idr,
             } => {
                 access_units_seen = access_units_seen.saturating_add(1);
+                last_au_at = Some(Instant::now());
+                if is_idr {
+                    last_idr_at = last_au_at;
+                }
 
                 let Some(codec_config) = codec_config.as_ref() else {
                     throttle_warn(
@@ -306,10 +340,23 @@ fn h264_worker(rx: Receiver<H264ArtCommand>) {
                 if !synced_to_idr && !is_idr {
                     if access_units_seen == 1 || access_units_seen % 256 == 0 {
                         info!(
-                            "map album art h264: waiting for first IDR before feeding P-frames (seen={} AUs)",
-                            access_units_seen
+                            "map album art h264: waiting for first IDR before feeding P-frames (seen={} AUs, last_au_bytes={})",
+                            access_units_seen,
+                            data.len()
                         );
                     }
+                    maybe_log_h264_status(
+                        &mut last_status_log_at,
+                        codec_config_received_at,
+                        last_au_at,
+                        last_idr_at,
+                        last_decoded_at,
+                        last_emit_at,
+                        synced_to_idr,
+                        access_units_seen,
+                        idr_frames_seen,
+                        decoded_frames_seen,
+                    );
                     continue;
                 }
 
@@ -329,14 +376,14 @@ fn h264_worker(rx: Receiver<H264ArtCommand>) {
                     }
 
                     if synced_to_idr {
-                        debug!(
+                        info!(
                             "map album art h264: IDR resync observed (idr_count={}, seen={} AUs, decoded={} frames)",
                             idr_frames_seen,
                             access_units_seen,
                             decoded_frames_seen
                         );
                     } else {
-                        debug!(
+                        info!(
                             "map album art h264: first IDR sync observed after {} AUs; starting continuous decode",
                             access_units_seen
                         );
@@ -362,9 +409,28 @@ fn h264_worker(rx: Receiver<H264ArtCommand>) {
                 };
 
                 let Some(frame) = decoded else {
+                    maybe_log_h264_status(
+                        &mut last_status_log_at,
+                        codec_config_received_at,
+                        last_au_at,
+                        last_idr_at,
+                        last_decoded_at,
+                        last_emit_at,
+                        synced_to_idr,
+                        access_units_seen,
+                        idr_frames_seen,
+                        decoded_frames_seen,
+                    );
                     continue;
                 };
                 decoded_frames_seen = decoded_frames_seen.saturating_add(1);
+                last_decoded_at = Some(Instant::now());
+                if decoded_frames_seen == 1 {
+                    info!(
+                        "map album art h264: first decoded frame ({}x{}, seen={} AUs, idrs={})",
+                        frame.width, frame.height, access_units_seen, idr_frames_seen
+                    );
+                }
 
                 let interval = Duration::from_millis(options.capture_interval_ms);
                 if options.capture_interval_ms > 0 {
@@ -388,7 +454,7 @@ fn h264_worker(rx: Receiver<H264ArtCommand>) {
                         let version =
                             global_album_art_store().set_png(RUST_H264_SOURCE, captured.png);
                         last_emit_at = Some(Instant::now());
-                        debug!(
+                        info!(
                             "map album art h264: captured decoded frame as PNG ({} bytes, version={}, frame={}x{}, crop=x{} y{} w{} h{}, output={}x{}, nals={}, au_idr={}, seen={} AUs, decoded={} frames, idrs={})",
                             bytes,
                             version,
@@ -416,6 +482,53 @@ fn h264_worker(rx: Receiver<H264ArtCommand>) {
                 }
             }
         }
+    }
+}
+
+fn maybe_log_h264_status(
+    last_status_log_at: &mut Option<Instant>,
+    codec_config_received_at: Option<Instant>,
+    last_au_at: Option<Instant>,
+    last_idr_at: Option<Instant>,
+    last_decoded_at: Option<Instant>,
+    last_emit_at: Option<Instant>,
+    synced_to_idr: bool,
+    access_units_seen: u64,
+    idr_frames_seen: u64,
+    decoded_frames_seen: u64,
+) {
+    let Some(codec_config_received_at) = codec_config_received_at else {
+        return;
+    };
+
+    let should_log = last_status_log_at
+        .map(|instant| instant.elapsed() >= Duration::from_secs(5))
+        .unwrap_or(true);
+    if !should_log {
+        return;
+    }
+
+    // Keep this at info while diagnosing intermittent DHU/phone startup issues.
+    // It is throttled to avoid per-frame spam.
+    info!(
+        "map album art h264: status synced={} AUs={} idrs={} decoded={} codec_config_age={} last_au={} last_idr={} last_decoded={} last_png={}",
+        synced_to_idr,
+        access_units_seen,
+        idr_frames_seen,
+        decoded_frames_seen,
+        elapsed_label(Some(codec_config_received_at)),
+        elapsed_label(last_au_at),
+        elapsed_label(last_idr_at),
+        elapsed_label(last_decoded_at),
+        elapsed_label(last_emit_at)
+    );
+    *last_status_log_at = Some(Instant::now());
+}
+
+fn elapsed_label(instant: Option<Instant>) -> String {
+    match instant {
+        Some(instant) => format!("{}ms", instant.elapsed().as_millis()),
+        None => "never".to_string(),
     }
 }
 

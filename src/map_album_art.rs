@@ -164,7 +164,7 @@ pub(crate) fn validate_png(data: &[u8], max_bytes: usize) -> Result<(), String> 
     if data.is_empty() {
         return Err("PNG body is empty".to_string());
     }
-    if data.len() > max_bytes {
+    if max_bytes > 0 && data.len() > max_bytes {
         return Err(format!(
             "PNG is larger than map_album_art_max_bytes ({} > {})",
             data.len(),
@@ -189,7 +189,7 @@ pub(crate) fn resolve_album_art(cfg: &AppConfig) -> Option<ResolvedAlbumArt> {
 
     if let Some(entry) = store.get() {
         if source.accepts_memory_source(&entry.source) {
-            if entry.png.len() <= cfg.map_album_art_max_bytes {
+            if cfg.map_album_art_max_bytes == 0 || entry.png.len() <= cfg.map_album_art_max_bytes {
                 return Some(ResolvedAlbumArt {
                     source: entry.source,
                     png: entry.png,

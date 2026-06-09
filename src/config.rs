@@ -602,7 +602,7 @@ pub struct AppConfig {
     pub map_album_art_source: String,
     /// PNG file used as replacement album art when map_album_art_source=file.
     pub map_album_art_file: PathBuf,
-    /// Maximum replacement PNG size accepted by all album-art providers.
+    /// Maximum replacement PNG size accepted by all album-art providers. 0 disables the limit.
     pub map_album_art_max_bytes: usize,
     /// Plaintext payload size for FIRST fragments when re-fragmenting rewritten album-art metadata.
     /// Continuation fragments use this value + 4, matching the observed AA/OpenAuto layout.
@@ -627,6 +627,10 @@ pub struct AppConfig {
     pub map_album_art_crop_w: u32,
     /// Crop height. Interpreted as percent or pixels according to map_album_art_crop_mode.
     pub map_album_art_crop_h: u32,
+    /// Optional compatibility workaround: alternate MediaPlaybackMetadata.duration_seconds
+    /// by +0/+1 on outbound rewritten metadata so strict HUs notice artwork-only updates.
+    /// The cached phone metadata template is never modified.
+    pub map_album_art_duration_tick_enabled: bool,
     pub collect_speed: bool,
     pub disable_driving_status: bool,
     /// Optional shell command invoked on HU media-key long press.
@@ -968,7 +972,7 @@ impl Default for AppConfig {
             map_album_art_enabled: false,
             map_album_art_source: "file".to_string(),
             map_album_art_file: DEFAULT_MAP_ALBUM_ART_FILE.into(),
-            map_album_art_max_bytes: 262_144,
+            map_album_art_max_bytes: 0,
             map_album_art_chunk_bytes: 16_120,
             map_album_art_video_display_id: "aux-1".to_string(),
             map_album_art_capture_interval_ms: 2_000,
@@ -979,6 +983,7 @@ impl Default for AppConfig {
             map_album_art_crop_y: 20,
             map_album_art_crop_w: 40,
             map_album_art_crop_h: 40,
+            map_album_art_duration_tick_enabled: false,
             collect_speed: false,
             disable_driving_status: false,
             hu_button_handler: None,
@@ -1309,6 +1314,8 @@ impl AppConfig {
         doc["map_album_art_crop_y"] = value(self.map_album_art_crop_y as i64);
         doc["map_album_art_crop_w"] = value(self.map_album_art_crop_w as i64);
         doc["map_album_art_crop_h"] = value(self.map_album_art_crop_h as i64);
+        doc["map_album_art_duration_tick_enabled"] =
+            value(self.map_album_art_duration_tick_enabled);
         doc["collect_speed"] = value(self.collect_speed);
         doc["disable_driving_status"] = value(self.disable_driving_status);
         if let Some(cmd) = &self.hu_button_handler {

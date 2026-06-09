@@ -7,7 +7,7 @@ use crate::packet_fragment::{
     DEFAULT_FIRST_FRAGMENT_PAYLOAD_BYTES, MAX_FIRST_FRAGMENT_PAYLOAD_BYTES,
     MIN_FIRST_FRAGMENT_PAYLOAD_BYTES,
 };
-use log::{debug, info, warn};
+use log::{info, warn};
 use std::collections::HashMap;
 
 /// MediaPlaybackStatusMessageId::MEDIA_PLAYBACK_METADATA.
@@ -21,6 +21,7 @@ pub(crate) struct MapAlbumArtInjector {
     last_metadata: Option<CachedMetadata>,
     last_emitted_art_version: u64,
     last_missing_template_log_version: u64,
+    duration_tick_flip: bool,
 }
 
 pub(crate) enum AlbumArtProcessResult {
@@ -58,7 +59,6 @@ struct CachedMetadata {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RewriteError {
     Malformed,
-    NotFound,
 }
 
 impl MapAlbumArtInjector {
@@ -97,7 +97,7 @@ impl MapAlbumArtInjector {
             Some(cached) => cached,
             None => {
                 if self.last_missing_template_log_version != replacement.version {
-                    debug!(
+                    info!(
                         "map album art: runtime artwork version {} is pending but no MEDIA_PLAYBACK_METADATA template has been cached yet",
                         replacement.version
                     );
@@ -126,13 +126,6 @@ impl MapAlbumArtInjector {
                     packets.len()
                 );
                 Some(packets)
-            }
-            Err(RewriteError::NotFound) => {
-                warn!(
-                    "map album art: cached MEDIA_PLAYBACK_METADATA has no album_art field; cannot emit artwork update"
-                );
-                self.last_emitted_art_version = replacement.version;
-                None
             }
             Err(RewriteError::Malformed) => {
                 warn!(
@@ -275,7 +268,7 @@ impl MapAlbumArtInjector {
             base_flags,
             payload,
         });
-        debug!(
+        info!(
             "map album art: cached MEDIA_PLAYBACK_METADATA template channel={:#04x} payload={}",
             channel, payload_len
         );
@@ -326,15 +319,6 @@ impl MapAlbumArtInjector {
                 );
                 AlbumArtProcessResult::Replace(rewritten)
             }
-            Err(RewriteError::NotFound) => {
-                debug!(
-                    "map album art: MEDIA_PLAYBACK_METADATA on channel {:#04x} has no album_art field; replaying original metadata",
-                    channel
-                );
-                let rewritten = self.fragment_metadata(channel, base_flags, &original_payload, cfg);
-                self.last_emitted_art_version = replacement_version;
-                AlbumArtProcessResult::Replace(rewritten)
-            }
             Err(RewriteError::Malformed) => {
                 warn!(
                     "map album art: malformed MEDIA_PLAYBACK_METADATA protobuf on channel {:#04x}; replaying original metadata",
@@ -348,17 +332,28 @@ impl MapAlbumArtInjector {
     }
 
     fn build_rewritten_packets(
-        &self,
+        &mut self,
         channel: u8,
         base_flags: u8,
         original_payload: &[u8],
         replacement: &[u8],
         cfg: &AppConfig,
     ) -> Result<(Vec<Packet>, usize), RewriteError> {
-        let rewritten_payload = rewrite_album_art_payload(original_payload, replacement)?;
+        let duration_tick = self.take_duration_tick(cfg);
+        let rewritten_payload =
+            rewrite_album_art_payload(original_payload, replacement, duration_tick)?;
         let rewritten_payload_len = rewritten_payload.len();
         let packets = self.fragment_metadata(channel, base_flags, &rewritten_payload, cfg);
         Ok((packets, rewritten_payload_len))
+    }
+
+    fn take_duration_tick(&mut self, cfg: &AppConfig) -> bool {
+        if !cfg.map_album_art_duration_tick_enabled {
+            return false;
+        }
+
+        self.duration_tick_flip = !self.duration_tick_flip;
+        self.duration_tick_flip
     }
 
     fn fragment_metadata(
@@ -443,12 +438,21 @@ fn skip_checked(data: &[u8], pos: &mut usize, len: usize) -> Result<(), RewriteE
     Ok(())
 }
 
-fn rewrite_album_art_payload(payload: &[u8], replacement: &[u8]) -> Result<Vec<u8>, RewriteError> {
+fn rewrite_album_art_payload(
+    payload: &[u8],
+    replacement: &[u8],
+    duration_tick: bool,
+) -> Result<Vec<u8>, RewriteError> {
     if payload.len() < 2 {
         return Err(RewriteError::Malformed);
     }
 
-    let mut out = Vec::with_capacity(payload.len().saturating_sub(0).max(replacement.len() + 16));
+    let mut out = Vec::with_capacity(
+        payload
+            .len()
+            .saturating_add(replacement.len())
+            .saturating_add(16),
+    );
     out.extend_from_slice(&payload[..2]);
 
     let data = &payload[2..];
@@ -468,8 +472,16 @@ fn rewrite_album_art_payload(payload: &[u8], replacement: &[u8]) -> Result<Vec<u
         match wire_type {
             // varint
             0 => {
-                let _ = read_varint(data, &mut pos)?;
-                out.extend_from_slice(&data[field_start..pos]);
+                let value = read_varint(data, &mut pos)?;
+                if field_no == 6 && duration_tick {
+                    // Optional HU-cache workaround: only the outbound clone is touched.
+                    // The cached phone metadata template stays unchanged, so the value
+                    // alternates between the original duration and original+1.
+                    write_varint(key, &mut out);
+                    write_varint(value.saturating_add(1), &mut out);
+                } else {
+                    out.extend_from_slice(&data[field_start..pos]);
+                }
             }
             // fixed64
             1 => {
@@ -479,7 +491,6 @@ fn rewrite_album_art_payload(payload: &[u8], replacement: &[u8]) -> Result<Vec<u
             // length-delimited
             2 => {
                 let len = read_varint(data, &mut pos)? as usize;
-                let value_start = pos;
                 skip_checked(data, &mut pos, len)?;
 
                 if field_no == 4 && !replaced {
@@ -490,11 +501,6 @@ fn rewrite_album_art_payload(payload: &[u8], replacement: &[u8]) -> Result<Vec<u
                 } else {
                     out.extend_from_slice(&data[field_start..pos]);
                 }
-
-                // Keep the original value_start calculation above explicit. It makes
-                // malformed length-delimited fields fail before any output is emitted
-                // for that field.
-                let _ = value_start;
             }
             // fixed32
             5 => {
@@ -505,11 +511,16 @@ fn rewrite_album_art_payload(payload: &[u8], replacement: &[u8]) -> Result<Vec<u
         }
     }
 
-    if replaced {
-        Ok(out)
-    } else {
-        Err(RewriteError::NotFound)
+    if !replaced {
+        // Dynamic re-fragment mode can grow the protobuf, so an existing album_art
+        // field is no longer required. Append field 4 when the cached template did
+        // not contain artwork at all.
+        write_varint((4 << 3) | 2, &mut out);
+        write_varint(replacement.len() as u64, &mut out);
+        out.extend_from_slice(replacement);
     }
+
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -548,6 +559,15 @@ mod tests {
         payload
     }
 
+    fn metadata_payload_without_album_art() -> Vec<u8> {
+        let mut payload = vec![0x80, 0x03];
+        payload.extend_from_slice(&[0x0A, 0x01, b'A']);
+        payload.extend_from_slice(&[0x12, 0x01, b'B']);
+        payload.extend_from_slice(&[0x1A, 0x01, b'C']);
+        payload.extend_from_slice(&[0x30, 0x0A]);
+        payload
+    }
+
     fn extract_album_art(payload: &[u8]) -> Vec<u8> {
         let data = &payload[2..];
         let mut pos = 0usize;
@@ -576,16 +596,65 @@ mod tests {
         panic!("album art not found")
     }
 
+    fn extract_duration(payload: &[u8]) -> Option<u64> {
+        let data = &payload[2..];
+        let mut pos = 0usize;
+
+        while pos < data.len() {
+            let key = read_varint(data, &mut pos).unwrap();
+            let field_no = key >> 3;
+            let wire_type = key & 0x07;
+            match wire_type {
+                0 => {
+                    let value = read_varint(data, &mut pos).unwrap();
+                    if field_no == 6 {
+                        return Some(value);
+                    }
+                }
+                1 => pos += 8,
+                2 => {
+                    let len = read_varint(data, &mut pos).unwrap() as usize;
+                    pos += len;
+                }
+                5 => pos += 4,
+                _ => panic!("unexpected wire type"),
+            }
+        }
+        None
+    }
+
     #[test]
     fn rewrite_album_art_payload_uses_dynamic_replacement_length() {
         let original_art = vec![0x11; 3];
         let replacement = vec![0x89, b'P', b'N', b'G', 1, 2, 3, 4, 5, 6];
         let payload = metadata_payload(&original_art);
 
-        let rewritten = rewrite_album_art_payload(&payload, &replacement).unwrap();
+        let rewritten = rewrite_album_art_payload(&payload, &replacement, false).unwrap();
 
         assert_eq!(extract_album_art(&rewritten), replacement);
         assert!(rewritten.len() > payload.len());
+    }
+
+    #[test]
+    fn rewrite_album_art_payload_adds_missing_album_art_field() {
+        let replacement = vec![0x89, b'P', b'N', b'G', 1, 2, 3, 4, 5, 6];
+        let payload = metadata_payload_without_album_art();
+
+        let rewritten = rewrite_album_art_payload(&payload, &replacement, false).unwrap();
+
+        assert_eq!(extract_album_art(&rewritten), replacement);
+    }
+
+    #[test]
+    fn rewrite_album_art_payload_can_tick_duration_without_mutating_template() {
+        let original_art = vec![0x11; 3];
+        let replacement = vec![0x89, b'P', b'N', b'G', 1, 2, 3, 4, 5, 6];
+        let payload = metadata_payload(&original_art);
+
+        let rewritten = rewrite_album_art_payload(&payload, &replacement, true).unwrap();
+
+        assert_eq!(extract_duration(&payload), Some(10));
+        assert_eq!(extract_duration(&rewritten), Some(11));
     }
 
     #[test]
