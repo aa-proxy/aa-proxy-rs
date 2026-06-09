@@ -159,6 +159,7 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/config", get(get_config).post(set_config))
         .route("/config-entry", post(update_config_entry))
         .route("/config-data", get(get_config_data))
+        .route("/config-data-tree", get(get_config_data_tree))
         .route(
             "/map-album-art",
             post(map_album_art_upload_handler)
@@ -1889,6 +1890,11 @@ async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 async fn get_config_data(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let cfg = merged_config_json(&state).await;
     Json(cfg.to_flat_config_data())
+}
+
+async fn get_config_data_tree(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let cfg = merged_config_json(&state).await;
+    Json(cfg)
 }
 
 /// POST /set-time
