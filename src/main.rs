@@ -206,8 +206,23 @@ fn is_external_ap_phone_wifi_mode(value: &str) -> bool {
     )
 }
 
+fn is_bt_wireless_proxy_car_wifi_mitm_mode(value: &str) -> bool {
+    let proxy_mode = value.trim().to_ascii_lowercase();
+    matches!(proxy_mode.as_str(), "car-wifi-mitm" | "wifi-mitm")
+}
+
+fn bt_wireless_proxy_external_ap_enabled(cfg: &AppConfig) -> bool {
+    cfg.bt_wireless_proxy
+        && is_bt_wireless_proxy_car_wifi_mitm_mode(&cfg.bt_wireless_proxy_mode)
+        && is_external_ap_phone_wifi_mode(&cfg.bt_wireless_proxy_phone_wifi_mode)
+}
+
 fn effective_preload_kernel_modules(cfg: &AppConfig) -> Vec<String> {
     parse_preload_kernel_modules(&cfg.preload_kernel_modules)
+}
+
+fn should_prepare_kernel_firmware_path(cfg: &AppConfig) -> bool {
+    !effective_preload_kernel_modules(cfg).is_empty() || bt_wireless_proxy_external_ap_enabled(cfg)
 }
 
 fn preload_kernel_modules_for_config(cfg: &AppConfig) {
@@ -358,7 +373,7 @@ fn external_ap_startup_sta_iface(cfg: &AppConfig) -> Option<String> {
 }
 
 fn bring_external_ap_sta_iface_up_for_config(cfg: &AppConfig) {
-    if !is_external_ap_phone_wifi_mode(&cfg.bt_wireless_proxy_phone_wifi_mode) {
+    if !bt_wireless_proxy_external_ap_enabled(cfg) {
         return;
     }
 
@@ -1309,7 +1324,9 @@ fn main() -> Result<()> {
         );
     }
 
-    configure_kernel_module_path_for_config(&config);
+    if should_prepare_kernel_firmware_path(&config) {
+        configure_kernel_module_path_for_config(&config);
+    }
     preload_kernel_modules_for_config(&config);
     bring_external_ap_sta_iface_up_for_config(&config);
 
