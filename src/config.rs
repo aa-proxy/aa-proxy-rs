@@ -545,6 +545,15 @@ pub struct AppConfig {
     pub odometer: bool,
     pub tire_pressure: bool,
     pub remove_bluetooth: bool,
+    /// Inject a synthetic Bluetooth SDR service that points Android Auto to the
+    /// real HU Bluetooth adapter for HFP/call routing. Only enable when the
+    /// phone is already paired with that HU Bluetooth device.
+    #[serde(alias = "real_hu_bluetooth_passthrough_enabled")]
+    pub bt_real_hu_passthrough_enabled: bool,
+    /// Real HU Bluetooth MAC address advertised in the synthetic Bluetooth SDR
+    /// service when bt_real_hu_passthrough_enabled is active.
+    #[serde(alias = "real_hu_bluetooth_passthrough_address")]
+    pub bt_real_hu_passthrough_address: String,
     pub remove_wifi: bool,
     pub inject_display_types: InjectDisplayTypes,
     pub inject_add_input_sources: bool,
@@ -921,6 +930,8 @@ impl Default for AppConfig {
             odometer: false,
             tire_pressure: false,
             remove_bluetooth: false,
+            bt_real_hu_passthrough_enabled: false,
+            bt_real_hu_passthrough_address: String::new(),
             remove_wifi: false,
             inject_display_types: InjectDisplayTypes::default(),
             inject_add_input_sources: false,
@@ -1256,6 +1267,8 @@ impl AppConfig {
         doc["odometer"] = value(self.odometer);
         doc["tire_pressure"] = value(self.tire_pressure);
         doc["remove_bluetooth"] = value(self.remove_bluetooth);
+        doc["bt_real_hu_passthrough_enabled"] = value(self.bt_real_hu_passthrough_enabled);
+        doc["bt_real_hu_passthrough_address"] = value(self.bt_real_hu_passthrough_address.clone());
         doc["remove_wifi"] = value(self.remove_wifi);
         doc["inject_display_types"] = value(self.inject_display_types.to_string());
         doc["inject_add_input_sources"] = value(self.inject_add_input_sources);

@@ -294,7 +294,7 @@ async fn tcp_bridge(
                 }
             }
             Ok(Ok(mut remote)) => {
-                info!(
+                debug!(
                     "{} tcp_bridge[{}]: remote connected: {}",
                     NAME, label, remote_addr
                 );
@@ -321,7 +321,7 @@ async fn tcp_bridge(
                         );
                     }
                     Ok(Ok(mut local)) => {
-                        info!(
+                        debug!(
                             "{} tcp_bridge[{}]: local connected: {}; starting bidirectional transfer",
                             NAME, label, local_addr
                         );
@@ -333,7 +333,7 @@ async fn tcp_bridge(
                             res = copy_bidirectional(&mut remote, &mut local) => {
                                 match res {
                                     Ok((from_remote, from_local)) => {
-                                        info!(
+                                        debug!(
                                             "{} tcp_bridge[{}]: closed, remote->local={} local->remote={}",
                                             NAME, label, from_remote, from_local
                                         );

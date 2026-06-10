@@ -437,6 +437,17 @@
               "typ": "boolean",
               "description": "Remove the Bluetooth service from the `service discovery response`. May help on head units with integrated wireless Android Auto."
             },
+            "bt_real_hu_passthrough_enabled": {
+              "typ": "boolean",
+              "description": "Inject a synthetic Bluetooth service into the ServiceDiscoveryResponse that points the phone to the real HU Bluetooth MAC for HFP/call routing. Enable only when the phone is already paired with the real HU Bluetooth device. Default: false.",
+              "advanced": true
+            },
+            "bt_real_hu_passthrough_address": {
+              "typ": "string",
+              "description": "Real HU Bluetooth MAC address advertised by bt_real_hu_passthrough_enabled. Format: XX:XX:XX:XX:XX:XX. Pairing/auth is not implemented here; aa-proxy replies already_paired=true only.",
+              "requires": "bt_real_hu_passthrough_enabled",
+              "advanced": true
+            },
             "remove_wifi": {
               "typ": "boolean",
               "description": "Remove the Wi-Fi service from the `service discovery response`. May help on head units with integrated wireless Android Auto."

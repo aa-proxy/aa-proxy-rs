@@ -2,6 +2,7 @@ pub mod album_art_inject;
 pub mod aoa;
 pub mod bluetooth;
 pub mod bt_helper;
+pub mod bt_real_hu_passthrough;
 pub mod bt_sco;
 pub mod bt_sco_echo;
 pub mod bt_sco_media_bridge;

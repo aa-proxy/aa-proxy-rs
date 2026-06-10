@@ -12,6 +12,9 @@ use crate::script_wasm::{
 };
 #[cfg(not(feature = "wasm-scripting"))]
 type ScriptRegistry = ();
+use crate::bt_real_hu_passthrough::{
+    bt_add_real_hu_passthrough_service, bt_maybe_handle_real_hu_passthrough_packet,
+};
 use crate::display::add_display_services;
 use crate::display::emulate_injected_media_packet;
 use crate::display::maybe_emit_pending_injected_focus;
@@ -176,6 +179,8 @@ pub struct ModifyContext {
     pub(crate) injected_service_ids: HashSet<i32>,
     /// Channels corresponding to injected services that must never be forwarded to HU.
     pub(crate) injected_channels: HashSet<u8>,
+    /// Synthetic Bluetooth passthrough service/channel, if advertised by aa-proxy-rs.
+    pub(crate) injected_bluetooth_channel: Option<u8>,
     /// Injected media service_id/channel -> display type.
     pub(crate) injected_media_display: HashMap<u8, DisplayType>,
     /// Injected media service_id/channel -> inject-displays.toml profile id.
@@ -2100,6 +2105,10 @@ pub async fn pkt_modify_hook(
                     .retain(|svc| svc.wifi_projection_service.is_none());
             }
 
+            // Must run after remove_bluetooth so the synthetic service is not stripped.
+            // This mode only supports phones already paired to the real HU Bluetooth device.
+            bt_add_real_hu_passthrough_service(proxy_type, ctx, &mut msg, cfg);
+
             // EV routing features
             if cfg.ev {
                 if let Some(svc) = msg
@@ -3096,6 +3105,7 @@ pub async fn proxy<D: IoDeviceTrait>(
         hu_service_ids: HashSet::new(),
         injected_service_ids: HashSet::new(),
         injected_channels: HashSet::new(),
+        injected_bluetooth_channel: None,
         injected_media_display: HashMap::new(),
         injected_media_profile_ids: HashMap::new(),
         injected_media_state: HashMap::new(),
@@ -3159,6 +3169,20 @@ pub async fn proxy<D: IoDeviceTrait>(
                     );
 
                     tx.send(pkt).await?;
+                    continue;
+                }
+
+                if let Some(action) = bt_maybe_handle_real_hu_passthrough_packet(
+                    proxy_type,
+                    &mut pkt,
+                    &ctx,
+                    &cfg,
+                )? {
+                    match action {
+                        PacketAction::SendBack => tx.send(pkt).await?,
+                        PacketAction::Drop => {}
+                        PacketAction::Forward | PacketAction::Replace(_) => {}
+                    }
                     continue;
                 }
 
@@ -3401,6 +3425,7 @@ mod tests {
             hu_service_ids: HashSet::new(),
             injected_service_ids: HashSet::new(),
             injected_channels: HashSet::new(),
+            injected_bluetooth_channel: None,
             injected_media_display: HashMap::new(),
             injected_media_profile_ids: HashMap::new(),
             injected_media_state: HashMap::new(),
