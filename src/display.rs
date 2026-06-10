@@ -1,5 +1,7 @@
 use crate::config::AppConfig;
-use crate::inject_displays::{read_inject_displays_file_sync, InjectDisplayInsets, InjectDisplayProfile};
+use crate::inject_displays::{
+    read_inject_displays_file_sync, InjectDisplayInsets, InjectDisplayProfile,
+};
 pub use crate::media_tap::{
     media_tcp_server, AudioStreamConfig, MediaSink, MediaStreamInfo, MediaStreamKind,
 };
@@ -183,7 +185,8 @@ fn create_media_sink_service(id: i32, profile: DisplayProfile) -> Service {
     let mut ui_config = UiConfig::new();
     ui_config.margins = Some(margins).into();
     ui_config.content_insets = Some(insets_from_profile(profile.content_insets.as_ref())).into();
-    ui_config.stable_content_insets = Some(insets_from_profile(profile.stable_content_insets.as_ref())).into();
+    ui_config.stable_content_insets =
+        Some(insets_from_profile(profile.stable_content_insets.as_ref())).into();
     ui_config.set_ui_theme(UiTheme::UI_THEME_AUTOMATIC);
 
     let mut video_cfg = VideoConfiguration::new();

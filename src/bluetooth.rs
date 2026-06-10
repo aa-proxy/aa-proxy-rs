@@ -2,6 +2,7 @@ use crate::config::Action;
 use crate::config::SharedConfig;
 use crate::config::WifiConfig;
 use crate::config::IDENTITY_NAME;
+use crate::config::{TCP_DHU_PORT, TCP_SERVER_PORT};
 use crate::config_types::BluetoothAddressList;
 use crate::sdr_ui;
 use crate::web::AppState;
@@ -19,21 +20,20 @@ use bluer::{
 };
 use futures::{FutureExt, Stream as FuturesStream, StreamExt};
 use simplelog::*;
-use std::sync::atomic::{AtomicBool, AtomicU64};
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use std::net::IpAddr;
 use std::pin::Pin;
+use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{copy_bidirectional, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::process::Command;
 use tokio::sync::broadcast::Receiver as BroadcastReceiver;
 use tokio::sync::broadcast::Sender as BroadcastSender;
-use tokio::sync::Notify;
 use tokio::sync::Mutex;
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
-use crate::config::{TCP_DHU_PORT, TCP_SERVER_PORT};
 use tokio::time::timeout;
 
 include!(concat!(env!("OUT_DIR"), "/protos/mod.rs"));
@@ -90,7 +90,11 @@ fn build_sdp_service_search_attribute_request(
     continuation_state: &[u8],
 ) -> Result<Vec<u8>> {
     if continuation_state.len() > u8::MAX as usize {
-        return Err(format!("SDP continuation state too long: {}", continuation_state.len()).into());
+        return Err(format!(
+            "SDP continuation state too long: {}",
+            continuation_state.len()
+        )
+        .into());
     }
 
     let service_search_pattern = sdp_de_sequence_u8(sdp_de_uuid128(service_uuid))?;
@@ -142,7 +146,12 @@ fn describe_sdp_error_response(params: &[u8]) -> String {
         0x0006 => "Insufficient resources",
         _ => "Unknown SDP error",
     };
-    format!("{} code=0x{:04x} params={}", label, code, hex::encode(params))
+    format!(
+        "{} code=0x{:04x} params={}",
+        label,
+        code,
+        hex::encode(params)
+    )
 }
 
 fn parse_rfcomm_channel_after_uuid16(bytes: &[u8], pos: usize) -> Option<u8> {
@@ -194,7 +203,10 @@ fn extract_rfcomm_channel_from_sdp_attribute_lists(bytes: &[u8]) -> Option<u8> {
         })
 }
 
-async fn discover_rfcomm_channel_via_internal_sdp_once(hu_addr: Address, settle_delay: Duration) -> Result<u8> {
+async fn discover_rfcomm_channel_via_internal_sdp_once(
+    hu_addr: Address,
+    settle_delay: Duration,
+) -> Result<u8> {
     let sdp_addr = L2capSocketAddr::new(hu_addr, AddressType::BrEdr, SDP_PSM);
     info!(
         "{} 🧪 bt-wireless-proxy: internal SDP discovery: connecting to HU {} L2CAP PSM 0x{:04x}",
@@ -231,7 +243,8 @@ async fn discover_rfcomm_channel_via_internal_sdp_once(hu_addr: Address, settle_
         stream.write_all(&request).await?;
         stream.flush().await?;
 
-        let (pdu_id, response_tid, params) = timeout(Duration::from_secs(10), read_sdp_pdu(&mut stream)).await??;
+        let (pdu_id, response_tid, params) =
+            timeout(Duration::from_secs(10), read_sdp_pdu(&mut stream)).await??;
         debug!(
             "{} 🧪 bt-wireless-proxy: internal SDP discovery: RX pdu=0x{:02x} tid={} len={} bytes={}",
             NAME,
@@ -252,16 +265,22 @@ async fn discover_rfcomm_channel_via_internal_sdp_once(hu_addr: Address, settle_
                 "HU returned SDP ErrorResponse for AA Wireless UUID {}: {}",
                 AAWG_PROFILE_UUID,
                 describe_sdp_error_response(&params)
-            ).into());
+            )
+            .into());
         }
         if pdu_id != SDP_PDU_SERVICE_SEARCH_ATTRIBUTE_RESPONSE {
             return Err(format!(
                 "unexpected SDP PDU 0x{:02x}; expected ServiceSearchAttributeResponse 0x{:02x}",
                 pdu_id, SDP_PDU_SERVICE_SEARCH_ATTRIBUTE_RESPONSE
-            ).into());
+            )
+            .into());
         }
         if params.len() < 3 {
-            return Err(format!("short SDP ServiceSearchAttributeResponse: {} bytes", params.len()).into());
+            return Err(format!(
+                "short SDP ServiceSearchAttributeResponse: {} bytes",
+                params.len()
+            )
+            .into());
         }
 
         let attr_count = u16::from_be_bytes([params[0], params[1]]) as usize;
@@ -270,7 +289,8 @@ async fn discover_rfcomm_channel_via_internal_sdp_once(hu_addr: Address, settle_
                 "truncated SDP response: attr_count={} total_params={}",
                 attr_count,
                 params.len()
-            ).into());
+            )
+            .into());
         }
 
         attribute_lists.extend_from_slice(&params[2..2 + attr_count]);
@@ -281,7 +301,8 @@ async fn discover_rfcomm_channel_via_internal_sdp_once(hu_addr: Address, settle_
                 "truncated SDP continuation state: cont_len={} total_params={}",
                 cont_len,
                 params.len()
-            ).into());
+            )
+            .into());
         }
         continuation_state = params[cont_len_pos + 1..cont_len_pos + 1 + cont_len].to_vec();
         if continuation_state.is_empty() {
@@ -298,7 +319,8 @@ async fn discover_rfcomm_channel_via_internal_sdp_once(hu_addr: Address, settle_
         return Err(format!(
             "HU {} returned no SDP attributes for AA Wireless UUID {}",
             hu_addr, AAWG_PROFILE_UUID
-        ).into());
+        )
+        .into());
     }
 
     if let Some(channel) = extract_rfcomm_channel_from_sdp_attribute_lists(&attribute_lists) {
@@ -356,7 +378,6 @@ async fn discover_rfcomm_channel_via_internal_sdp(hu_addr: Address) -> Result<u8
     .into())
 }
 
-
 pub const AAWG_PROFILE_UUID: Uuid = Uuid::from_u128(0x4de17a0052cb11e6bdf40800200c9a66);
 const HSP_HS_UUID: Uuid = Uuid::from_u128(0x0000110800001000800000805f9b34fb);
 const HSP_AG_UUID: Uuid = Uuid::from_u128(0x0000111200001000800000805f9b34fb);
@@ -392,7 +413,6 @@ enum MessageId {
     WifiPingRequest = 8,
     WifiPingResponse = 9,
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
@@ -657,23 +677,71 @@ fn phone_like_sdp_profile_specs(profile_set: &str) -> Vec<PhoneLikeSdpProfileSpe
     let mut specs = vec![
         // The minimal set mirrors the common phone-facing capabilities seen on Android phones:
         // HFP Audio Gateway, PBAP server, MAP server, OPP, A2DP source, AVRCP target.
-        PhoneLikeSdpProfileSpec { uuid: SDP_HANDSFREE_AG_UUID, name: "Handsfree Audio Gateway", tag: "hfp_ag" },
-        PhoneLikeSdpProfileSpec { uuid: SDP_PHONEBOOK_ACCESS_SERVER_UUID, name: "Phonebook Access Server", tag: "pbap_server" },
-        PhoneLikeSdpProfileSpec { uuid: SDP_MESSAGE_ACCESS_SERVER_UUID, name: "Message Access Server", tag: "map_server" },
-        PhoneLikeSdpProfileSpec { uuid: SDP_OBEX_OBJECT_PUSH_UUID, name: "OBEX Object Push", tag: "opp" },
-        PhoneLikeSdpProfileSpec { uuid: SDP_AUDIO_SOURCE_UUID, name: "Audio Source", tag: "a2dp_source" },
-        PhoneLikeSdpProfileSpec { uuid: SDP_AVRCP_TARGET_UUID, name: "A/V Remote Control Target", tag: "avrcp_target" },
+        PhoneLikeSdpProfileSpec {
+            uuid: SDP_HANDSFREE_AG_UUID,
+            name: "Handsfree Audio Gateway",
+            tag: "hfp_ag",
+        },
+        PhoneLikeSdpProfileSpec {
+            uuid: SDP_PHONEBOOK_ACCESS_SERVER_UUID,
+            name: "Phonebook Access Server",
+            tag: "pbap_server",
+        },
+        PhoneLikeSdpProfileSpec {
+            uuid: SDP_MESSAGE_ACCESS_SERVER_UUID,
+            name: "Message Access Server",
+            tag: "map_server",
+        },
+        PhoneLikeSdpProfileSpec {
+            uuid: SDP_OBEX_OBJECT_PUSH_UUID,
+            name: "OBEX Object Push",
+            tag: "opp",
+        },
+        PhoneLikeSdpProfileSpec {
+            uuid: SDP_AUDIO_SOURCE_UUID,
+            name: "Audio Source",
+            tag: "a2dp_source",
+        },
+        PhoneLikeSdpProfileSpec {
+            uuid: SDP_AVRCP_TARGET_UUID,
+            name: "A/V Remote Control Target",
+            tag: "avrcp_target",
+        },
     ];
 
     match normalized.as_str() {
         "full" | "android" | "phone" => {
             specs.extend([
-                PhoneLikeSdpProfileSpec { uuid: HSP_AG_UUID, name: "Headset Audio Gateway", tag: "hsp_ag" },
-                PhoneLikeSdpProfileSpec { uuid: SDP_AVRCP_REMOTE_UUID, name: "A/V Remote Control", tag: "avrcp_remote" },
-                PhoneLikeSdpProfileSpec { uuid: SDP_AVRCP_CONTROLLER_UUID, name: "A/V Remote Control Controller", tag: "avrcp_controller" },
-                PhoneLikeSdpProfileSpec { uuid: SDP_PANU_UUID, name: "PANU", tag: "panu" },
-                PhoneLikeSdpProfileSpec { uuid: SDP_NAP_UUID, name: "NAP", tag: "nap" },
-                PhoneLikeSdpProfileSpec { uuid: SDP_PNP_INFORMATION_UUID, name: "PnP Information", tag: "pnp" },
+                PhoneLikeSdpProfileSpec {
+                    uuid: HSP_AG_UUID,
+                    name: "Headset Audio Gateway",
+                    tag: "hsp_ag",
+                },
+                PhoneLikeSdpProfileSpec {
+                    uuid: SDP_AVRCP_REMOTE_UUID,
+                    name: "A/V Remote Control",
+                    tag: "avrcp_remote",
+                },
+                PhoneLikeSdpProfileSpec {
+                    uuid: SDP_AVRCP_CONTROLLER_UUID,
+                    name: "A/V Remote Control Controller",
+                    tag: "avrcp_controller",
+                },
+                PhoneLikeSdpProfileSpec {
+                    uuid: SDP_PANU_UUID,
+                    name: "PANU",
+                    tag: "panu",
+                },
+                PhoneLikeSdpProfileSpec {
+                    uuid: SDP_NAP_UUID,
+                    name: "NAP",
+                    tag: "nap",
+                },
+                PhoneLikeSdpProfileSpec {
+                    uuid: SDP_PNP_INFORMATION_UUID,
+                    name: "PnP Information",
+                    tag: "pnp",
+                },
             ]);
         }
         "minimal" | "" => {}
@@ -867,12 +935,18 @@ impl TaskAbortGuard {
     }
 
     fn new(name: &'static str, handle: JoinHandle<()>) -> Self {
-        Self { name, handle: Some(handle) }
+        Self {
+            name,
+            handle: Some(handle),
+        }
     }
 
     fn abort_now(&mut self) {
         if let Some(handle) = self.handle.take() {
-            info!("{} 🧪 bt-wireless-proxy car-wifi-mitm: stopping {}", NAME, self.name);
+            info!(
+                "{} 🧪 bt-wireless-proxy car-wifi-mitm: stopping {}",
+                NAME, self.name
+            );
             handle.abort();
         }
     }
@@ -886,10 +960,7 @@ impl Drop for TaskAbortGuard {
     }
 }
 
-fn spawn_hu_wpp_keepalive<W>(
-    hu_writer: Arc<Mutex<W>>,
-    interval: Duration,
-) -> TaskAbortGuard
+fn spawn_hu_wpp_keepalive<W>(hu_writer: Arc<Mutex<W>>, interval: Duration) -> TaskAbortGuard
 where
     W: AsyncWrite + Unpin + Send + 'static,
 {
@@ -949,11 +1020,8 @@ async fn read_phone_bootstrap_frame(
             .into());
         }
         let remaining = timeout_duration - elapsed;
-        let (phone_id, phone_payload) = timeout(
-            remaining,
-            read_proxy_frame(phone_stream, "PHONE -> POC"),
-        )
-        .await??;
+        let (phone_id, phone_payload) =
+            timeout(remaining, read_proxy_frame(phone_stream, "PHONE -> POC")).await??;
 
         if phone_id == expected as u16 {
             return Ok((phone_id, phone_payload));
@@ -1161,18 +1229,26 @@ fn skip_proto_value(payload: &[u8], offset: &mut usize, wire: u8) -> bool {
     match wire {
         0 => read_proto_varint(payload, offset).is_some(),
         1 => {
-            if *offset + 8 > payload.len() { return false; }
+            if *offset + 8 > payload.len() {
+                return false;
+            }
             *offset += 8;
             true
         }
         2 => {
-            let Some(len) = read_proto_varint(payload, offset).map(|v| v as usize) else { return false; };
-            if *offset + len > payload.len() { return false; }
+            let Some(len) = read_proto_varint(payload, offset).map(|v| v as usize) else {
+                return false;
+            };
+            if *offset + len > payload.len() {
+                return false;
+            }
             *offset += len;
             true
         }
         5 => {
-            if *offset + 4 > payload.len() { return false; }
+            if *offset + 4 > payload.len() {
+                return false;
+            }
             *offset += 4;
             true
         }
@@ -1180,15 +1256,34 @@ fn skip_proto_value(payload: &[u8], offset: &mut usize, wire: u8) -> bool {
     }
 }
 
-fn merge_wifi_version_head_unit_info(dst: &mut WifiVersionRequestDebugInfo, src: WifiVersionRequestDebugInfo) {
-    if dst.car_make.is_none() { dst.car_make = src.car_make; }
-    if dst.car_model.is_none() { dst.car_model = src.car_model; }
-    if dst.car_year.is_none() { dst.car_year = src.car_year; }
-    if dst.vehicle_id.is_none() { dst.vehicle_id = src.vehicle_id; }
-    if dst.head_unit_make.is_none() { dst.head_unit_make = src.head_unit_make; }
-    if dst.head_unit_model.is_none() { dst.head_unit_model = src.head_unit_model; }
-    if dst.head_unit_software_build.is_none() { dst.head_unit_software_build = src.head_unit_software_build; }
-    if dst.head_unit_software_version.is_none() { dst.head_unit_software_version = src.head_unit_software_version; }
+fn merge_wifi_version_head_unit_info(
+    dst: &mut WifiVersionRequestDebugInfo,
+    src: WifiVersionRequestDebugInfo,
+) {
+    if dst.car_make.is_none() {
+        dst.car_make = src.car_make;
+    }
+    if dst.car_model.is_none() {
+        dst.car_model = src.car_model;
+    }
+    if dst.car_year.is_none() {
+        dst.car_year = src.car_year;
+    }
+    if dst.vehicle_id.is_none() {
+        dst.vehicle_id = src.vehicle_id;
+    }
+    if dst.head_unit_make.is_none() {
+        dst.head_unit_make = src.head_unit_make;
+    }
+    if dst.head_unit_model.is_none() {
+        dst.head_unit_model = src.head_unit_model;
+    }
+    if dst.head_unit_software_build.is_none() {
+        dst.head_unit_software_build = src.head_unit_software_build;
+    }
+    if dst.head_unit_software_version.is_none() {
+        dst.head_unit_software_version = src.head_unit_software_version;
+    }
 }
 
 fn wifi_version_head_unit_info_looks_populated(info: &WifiVersionRequestDebugInfo) -> bool {
@@ -1203,7 +1298,9 @@ fn wifi_version_head_unit_info_looks_populated(info: &WifiVersionRequestDebugInf
 }
 
 fn wifi_projection_info_looks_valid(info: &WifiProjectionProtocolDebugInfo) -> bool {
-    let Some(ip) = info.ip_address.as_ref() else { return false; };
+    let Some(ip) = info.ip_address.as_ref() else {
+        return false;
+    };
     if ip.parse::<IpAddr>().is_err() {
         return false;
     }
@@ -1215,35 +1312,50 @@ fn inspect_wifi_version_request(payload: &[u8]) -> WifiVersionRequestDebugInfo {
     let mut offset = 0usize;
     while offset < payload.len() {
         let field_start = offset;
-        let Some(key) = read_proto_varint(payload, &mut offset) else { break; };
+        let Some(key) = read_proto_varint(payload, &mut offset) else {
+            break;
+        };
         let field = (key >> 3) as u32;
         let wire = (key & 0x07) as u8;
         match wire {
             0 => {
-                let Some(value) = read_proto_varint(payload, &mut offset) else { break; };
+                let Some(value) = read_proto_varint(payload, &mut offset) else {
+                    break;
+                };
                 match field {
                     1 => info.major_version = Some(value),
                     2 => info.minor_version = Some(value),
-                    3 => info.supported_wifi_channels.push(signed_from_proto_varint(value)),
+                    3 => info
+                        .supported_wifi_channels
+                        .push(signed_from_proto_varint(value)),
                     // MBUX traces carry a second channel/frequency-like varint at field #4
                     // (for example 5240/5765) before the HeadUnitInfo blob. Treat it as
                     // channel metadata for debug purposes instead of trying to parse it as
                     // the length-delimited HeadUnitInfo variant from other proto revisions.
-                    4 => info.supported_wifi_channels.push(signed_from_proto_varint(value)),
+                    4 => info
+                        .supported_wifi_channels
+                        .push(signed_from_proto_varint(value)),
                     _ => {}
                 }
             }
             2 => {
-                let Some(len) = read_proto_varint(payload, &mut offset).map(|v| v as usize) else { break; };
-                if offset + len > payload.len() { break; }
+                let Some(len) = read_proto_varint(payload, &mut offset).map(|v| v as usize) else {
+                    break;
+                };
+                if offset + len > payload.len() {
+                    break;
+                }
                 let data = &payload[offset..offset + len];
                 match field {
                     // Some encoders may pack repeated int32 supported_wifi_channels.
                     3 => {
                         let mut packed_offset = 0usize;
                         while packed_offset < data.len() {
-                            let Some(value) = read_proto_varint(data, &mut packed_offset) else { break; };
-                            info.supported_wifi_channels.push(signed_from_proto_varint(value));
+                            let Some(value) = read_proto_varint(data, &mut packed_offset) else {
+                                break;
+                            };
+                            info.supported_wifi_channels
+                                .push(signed_from_proto_varint(value));
                         }
                     }
                     4 => inspect_wifi_version_head_unit_info(data, &mut info),
@@ -1271,7 +1383,9 @@ fn inspect_wifi_version_request(payload: &[u8]) -> WifiVersionRequestDebugInfo {
                 offset += len;
             }
             1 | 5 => {
-                if !skip_proto_value(payload, &mut offset, wire) { break; }
+                if !skip_proto_value(payload, &mut offset, wire) {
+                    break;
+                }
             }
             _ => {
                 warn!(
@@ -1289,13 +1403,19 @@ fn inspect_wifi_version_head_unit_info(payload: &[u8], info: &mut WifiVersionReq
     let mut offset = 0usize;
     while offset < payload.len() {
         let field_start = offset;
-        let Some(key) = read_proto_varint(payload, &mut offset) else { break; };
+        let Some(key) = read_proto_varint(payload, &mut offset) else {
+            break;
+        };
         let field = (key >> 3) as u32;
         let wire = (key & 0x07) as u8;
         match wire {
             2 => {
-                let Some(len) = read_proto_varint(payload, &mut offset).map(|v| v as usize) else { break; };
-                if offset + len > payload.len() { break; }
+                let Some(len) = read_proto_varint(payload, &mut offset).map(|v| v as usize) else {
+                    break;
+                };
+                if offset + len > payload.len() {
+                    break;
+                }
                 let value = try_utf8(&payload[offset..offset + len]);
                 match field {
                     1 => info.car_make = value,
@@ -1328,19 +1448,27 @@ fn inspect_wifi_projection_protocol_info(payload: &[u8]) -> WifiProjectionProtoc
     let mut offset = 0usize;
     while offset < payload.len() {
         let field_start = offset;
-        let Some(key) = read_proto_varint(payload, &mut offset) else { break; };
+        let Some(key) = read_proto_varint(payload, &mut offset) else {
+            break;
+        };
         let field = (key >> 3) as u32;
         let wire = (key & 0x07) as u8;
         match wire {
             0 => {
-                let Some(value) = read_proto_varint(payload, &mut offset) else { break; };
+                let Some(value) = read_proto_varint(payload, &mut offset) else {
+                    break;
+                };
                 if field == 2 {
                     info.port = Some(value as u32);
                 }
             }
             2 => {
-                let Some(len) = read_proto_varint(payload, &mut offset).map(|v| v as usize) else { break; };
-                if offset + len > payload.len() { break; }
+                let Some(len) = read_proto_varint(payload, &mut offset).map(|v| v as usize) else {
+                    break;
+                };
+                if offset + len > payload.len() {
+                    break;
+                }
                 if field == 1 {
                     info.ip_address = try_utf8(&payload[offset..offset + len]);
                 }
@@ -1365,12 +1493,16 @@ fn inspect_wifi_version_response(payload: &[u8]) -> WifiVersionResponseDebugInfo
     let mut offset = 0usize;
     while offset < payload.len() {
         let field_start = offset;
-        let Some(key) = read_proto_varint(payload, &mut offset) else { break; };
+        let Some(key) = read_proto_varint(payload, &mut offset) else {
+            break;
+        };
         let field = (key >> 3) as u32;
         let wire = (key & 0x07) as u8;
         match wire {
             0 => {
-                let Some(value) = read_proto_varint(payload, &mut offset) else { break; };
+                let Some(value) = read_proto_varint(payload, &mut offset) else {
+                    break;
+                };
                 match field {
                     1 => info.major_version = Some(value),
                     2 => info.minor_version = Some(value),
@@ -1380,8 +1512,12 @@ fn inspect_wifi_version_response(payload: &[u8]) -> WifiVersionResponseDebugInfo
                 }
             }
             2 => {
-                let Some(len) = read_proto_varint(payload, &mut offset).map(|v| v as usize) else { break; };
-                if offset + len > payload.len() { break; }
+                let Some(len) = read_proto_varint(payload, &mut offset).map(|v| v as usize) else {
+                    break;
+                };
+                if offset + len > payload.len() {
+                    break;
+                }
                 let data = &payload[offset..offset + len];
                 match field {
                     3 => info.device_serial = try_utf8(data),
@@ -1391,7 +1527,9 @@ fn inspect_wifi_version_response(payload: &[u8]) -> WifiVersionResponseDebugInfo
                 offset += len;
             }
             1 | 5 => {
-                if !skip_proto_value(payload, &mut offset, wire) { break; }
+                if !skip_proto_value(payload, &mut offset, wire) {
+                    break;
+                }
             }
             _ => {
                 warn!(
@@ -1409,13 +1547,19 @@ fn inspect_wifi_version_device_info(payload: &[u8], info: &mut WifiVersionRespon
     let mut offset = 0usize;
     while offset < payload.len() {
         let field_start = offset;
-        let Some(key) = read_proto_varint(payload, &mut offset) else { break; };
+        let Some(key) = read_proto_varint(payload, &mut offset) else {
+            break;
+        };
         let field = (key >> 3) as u32;
         let wire = (key & 0x07) as u8;
         match wire {
             2 => {
-                let Some(len) = read_proto_varint(payload, &mut offset).map(|v| v as usize) else { break; };
-                if offset + len > payload.len() { break; }
+                let Some(len) = read_proto_varint(payload, &mut offset).map(|v| v as usize) else {
+                    break;
+                };
+                if offset + len > payload.len() {
+                    break;
+                }
                 let value = try_utf8(&payload[offset..offset + len]);
                 match field {
                     1 => info.device_id = value,
@@ -1478,7 +1622,11 @@ fn log_wifi_version_response(direction: &str, payload: &[u8]) -> WifiVersionResp
 
 fn build_wifi_start_request_payload(ip_address: &str, port: u32) -> Result<Vec<u8>> {
     if port > i32::MAX as u32 {
-        return Err(format!("WifiStartRequest port is out of range for generated proto setter: {}", port).into());
+        return Err(format!(
+            "WifiStartRequest port is out of range for generated proto setter: {}",
+            port
+        )
+        .into());
     }
 
     let mut req = WifiStartRequest::WifiStartRequest::new();
@@ -1660,18 +1808,29 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-fn render_wifi_join_cmd(template: &str, iface: &str, info: &WifiInfoResponse::WifiInfoResponse) -> String {
+fn render_wifi_join_cmd(
+    template: &str,
+    iface: &str,
+    info: &WifiInfoResponse::WifiInfoResponse,
+) -> String {
     template
         .replace("{iface}", &shell_quote(iface))
         .replace("{ssid}", &shell_quote(info.ssid()))
         .replace("{bssid}", &shell_quote(info.bssid()))
         .replace("{key}", &shell_quote(info.key()))
-        .replace("{security}", &shell_quote(&format!("{:?}", info.security_mode())))
+        .replace(
+            "{security}",
+            &shell_quote(&format!("{:?}", info.security_mode())),
+        )
 }
 
 async fn command_available(binary: &str) -> bool {
     matches!(
-        timeout(Duration::from_secs(2), Command::new(binary).arg("--help").output()).await,
+        timeout(
+            Duration::from_secs(2),
+            Command::new(binary).arg("--help").output()
+        )
+        .await,
         Ok(Ok(_))
     ) || matches!(
         timeout(Duration::from_secs(2), Command::new("which").arg(binary).output()).await,
@@ -1747,7 +1906,11 @@ async fn current_iw_ssid(iface: &str) -> Option<String> {
 async fn current_iw_connected(iface: &str) -> bool {
     current_iw_link_text(iface)
         .await
-        .map(|stdout| stdout.lines().any(|line| line.trim_start().starts_with("Connected to ")))
+        .map(|stdout| {
+            stdout
+                .lines()
+                .any(|line| line.trim_start().starts_with("Connected to "))
+        })
         .unwrap_or(false)
 }
 
@@ -1797,16 +1960,18 @@ async fn run_nmcli_wifi_join(
 }
 
 fn wpa_quote(value: &str) -> String {
-    let escaped = value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"");
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
     format!("\"{}\"", escaped)
 }
 
 async fn wpa_cli_output(iface: &str, args: &[&str]) -> Result<String> {
     let output = timeout(
         Duration::from_secs(5),
-        Command::new("wpa_cli").arg("-i").arg(iface).args(args).output(),
+        Command::new("wpa_cli")
+            .arg("-i")
+            .arg(iface)
+            .args(args)
+            .output(),
     )
     .await??;
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -1845,15 +2010,26 @@ async fn run_wpa_cli_wifi_join(
     );
 
     let net_id = wpa_cli_output(iface, &["add_network"]).await?;
-    let net_id = net_id.lines().last().unwrap_or(net_id.as_str()).trim().to_string();
+    let net_id = net_id
+        .lines()
+        .last()
+        .unwrap_or(net_id.as_str())
+        .trim()
+        .to_string();
     if net_id.is_empty() || net_id.eq_ignore_ascii_case("FAIL") {
-        return Err(format!("wpa_cli add_network returned invalid network id: {}", net_id).into());
+        return Err(format!(
+            "wpa_cli add_network returned invalid network id: {}",
+            net_id
+        )
+        .into());
     }
 
     wpa_cli_output(iface, &["set_network", &net_id, "ssid", &wpa_quote(ssid)]).await?;
     if !bssid.trim().is_empty() {
         // Best-effort. Some wpa_supplicant builds reject bssid for generated networks.
-        if let Err(e) = wpa_cli_output(iface, &["set_network", &net_id, "bssid", bssid.trim()]).await {
+        if let Err(e) =
+            wpa_cli_output(iface, &["set_network", &net_id, "bssid", bssid.trim()]).await
+        {
             warn!(
                 "{} 🧪 bt-wireless-proxy car-wifi-mitm: wpa_cli could not pin bssid {}: {}",
                 NAME, bssid, e
@@ -1873,8 +2049,6 @@ async fn run_wpa_cli_wifi_join(
     let _ = wpa_cli_output(iface, &["save_config"]).await;
     Ok(())
 }
-
-
 
 fn wpactrl_cmd(client: &mut wpactrl::Client, cmd: &str) -> Result<String> {
     let response = client
@@ -1909,7 +2083,6 @@ async fn wait_for_wpa_ctrl_socket(iface: &str, timeout_duration: Duration) -> Re
     )
     .into())
 }
-
 
 async fn cleanup_wpactrl_wpa_supplicant(iface: &str, reason: &str) {
     let iface = iface.trim();
@@ -1949,7 +2122,10 @@ async fn run_wpactrl_wifi_join(
     let key = info_msg.key().to_string();
     let bssid = info_msg.bssid().trim().to_string();
     let is_open = key.is_empty() || info_msg.security_mode() == SecurityMode::OPEN;
-    let conf_path = format!("/tmp/aa-proxy-car-wifi-{}-wpactrl.conf", iface.replace('/', "_"));
+    let conf_path = format!(
+        "/tmp/aa-proxy-car-wifi-{}-wpactrl.conf",
+        iface.replace('/', "_")
+    );
     tokio::fs::write(&conf_path, wpa_supplicant_config(info_msg, false)).await?;
 
     info!(
@@ -1998,20 +2174,37 @@ async fn run_wpactrl_wifi_join(
 
         let pong = wpactrl_cmd(&mut client, "PING")?;
         if !pong.trim().eq_ignore_ascii_case("PONG") {
-            return Err(format!("wpactrl PING returned unexpected response: {}", pong.trim()).into());
+            return Err(
+                format!("wpactrl PING returned unexpected response: {}", pong.trim()).into(),
+            );
         }
 
         let _ = wpactrl_cmd(&mut client, "DISCONNECT");
         let _ = wpactrl_cmd(&mut client, "REMOVE_NETWORK all");
         let net_id = wpactrl_cmd(&mut client, "ADD_NETWORK")?;
-        let net_id = net_id.lines().last().unwrap_or(net_id.as_str()).trim().to_string();
+        let net_id = net_id
+            .lines()
+            .last()
+            .unwrap_or(net_id.as_str())
+            .trim()
+            .to_string();
         if net_id.is_empty() || net_id.eq_ignore_ascii_case("FAIL") {
-            return Err(format!("wpactrl ADD_NETWORK returned invalid network id: {}", net_id).into());
+            return Err(format!(
+                "wpactrl ADD_NETWORK returned invalid network id: {}",
+                net_id
+            )
+            .into());
         }
 
-        wpactrl_cmd(&mut client, &format!("SET_NETWORK {} ssid {}", net_id, ssid_cmd))?;
+        wpactrl_cmd(
+            &mut client,
+            &format!("SET_NETWORK {} ssid {}", net_id, ssid_cmd),
+        )?;
         if !bssid_cmd.is_empty() {
-            if let Err(e) = wpactrl_cmd(&mut client, &format!("SET_NETWORK {} bssid {}", net_id, bssid_cmd)) {
+            if let Err(e) = wpactrl_cmd(
+                &mut client,
+                &format!("SET_NETWORK {} bssid {}", net_id, bssid_cmd),
+            ) {
                 warn!(
                     "{} 🧪 bt-wireless-proxy car-wifi-mitm: wpactrl could not pin bssid {}: {}",
                     NAME, bssid_cmd, e
@@ -2019,10 +2212,19 @@ async fn run_wpactrl_wifi_join(
             }
         }
         if is_open {
-            wpactrl_cmd(&mut client, &format!("SET_NETWORK {} key_mgmt NONE", net_id))?;
+            wpactrl_cmd(
+                &mut client,
+                &format!("SET_NETWORK {} key_mgmt NONE", net_id),
+            )?;
         } else {
-            wpactrl_cmd(&mut client, &format!("SET_NETWORK {} key_mgmt WPA-PSK", net_id))?;
-            wpactrl_cmd(&mut client, &format!("SET_NETWORK {} psk {}", net_id, key_cmd))?;
+            wpactrl_cmd(
+                &mut client,
+                &format!("SET_NETWORK {} key_mgmt WPA-PSK", net_id),
+            )?;
+            wpactrl_cmd(
+                &mut client,
+                &format!("SET_NETWORK {} psk {}", net_id, key_cmd),
+            )?;
         }
         wpactrl_cmd(&mut client, &format!("ENABLE_NETWORK {}", net_id))?;
         wpactrl_cmd(&mut client, &format!("SELECT_NETWORK {}", net_id))?;
@@ -2062,7 +2264,6 @@ async fn iface_exists(iface: &str) -> bool {
     )
 }
 
-
 async fn wait_for_iface_exists(iface: &str, wait: Duration) -> bool {
     let iface = iface.trim();
     if iface.is_empty() {
@@ -2094,7 +2295,9 @@ fn push_unique_usb_wlan_candidate(out: &mut Vec<String>, iface: &str, exclude_if
 }
 
 fn iface_device_path_looks_usb(iface: &str) -> bool {
-    let path = std::path::Path::new("/sys/class/net").join(iface).join("device");
+    let path = std::path::Path::new("/sys/class/net")
+        .join(iface)
+        .join("device");
     match std::fs::canonicalize(path) {
         Ok(real) => real.to_string_lossy().contains("/usb"),
         Err(_) => false,
@@ -2157,7 +2360,10 @@ async fn usb_wlan_ifaces(exclude_iface: &str) -> Vec<String> {
     stable
 }
 
-async fn resolve_external_car_sta_iface(configured_sta_iface: &str, phone_ap_iface: &str) -> Result<String> {
+async fn resolve_external_car_sta_iface(
+    configured_sta_iface: &str,
+    phone_ap_iface: &str,
+) -> Result<String> {
     let configured_sta_iface = configured_sta_iface.trim();
     let phone_ap_iface = phone_ap_iface.trim();
 
@@ -2187,7 +2393,9 @@ async fn resolve_external_car_sta_iface(configured_sta_iface: &str, phone_ap_ifa
             return Ok(iface.clone());
         }
 
-        if phone_ap_iface != "wlan1" && wait_for_iface_exists("wlan1", Duration::from_millis(600)).await {
+        if phone_ap_iface != "wlan1"
+            && wait_for_iface_exists("wlan1", Duration::from_millis(600)).await
+        {
             info!(
                 "{} 🧪 bt-wireless-proxy external_ap: using wlan1 fallback as car STA iface",
                 NAME
@@ -2426,7 +2634,6 @@ async fn start_wpa_supplicant_process(
     .into())
 }
 
-
 async fn prepare_sta_iface_takeover(iface: &str) -> Result<String> {
     let iface = iface.trim();
     if iface.is_empty() {
@@ -2509,7 +2716,12 @@ fn normalize_phy_name(value: &str) -> Option<String> {
 }
 
 async fn phys_from_iw_dev() -> Vec<String> {
-    let output = match timeout(Duration::from_secs(3), Command::new("iw").arg("dev").output()).await {
+    let output = match timeout(
+        Duration::from_secs(3),
+        Command::new("iw").arg("dev").output(),
+    )
+    .await
+    {
         Ok(Ok(output)) if output.status.success() => output,
         _ => return Vec::new(),
     };
@@ -2668,7 +2880,11 @@ async fn prepare_sta_iface_keep_ap(
 
 async fn iface_mac_address(iface: &str) -> Option<String> {
     let path = format!("/sys/class/net/{}/address", iface.trim());
-    tokio::fs::read_to_string(path).await.ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+    tokio::fs::read_to_string(path)
+        .await
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
 }
 
 fn wifi_channel_from_freq(freq_mhz: u32) -> Option<u32> {
@@ -2735,7 +2951,10 @@ async fn stop_phone_ap_for_proxy_ap(ap_iface: &str) {
     .await;
     let _ = run_shell_for_wifi(
         "bring phone-facing AP iface down before STA join",
-        &format!("ip link set {} down 2>/dev/null || true", shell_quote(ap_iface)),
+        &format!(
+            "ip link set {} down 2>/dev/null || true",
+            shell_quote(ap_iface)
+        ),
         5,
     )
     .await;
@@ -2745,7 +2964,6 @@ async fn stop_phone_ap_for_proxy_ap(ap_iface: &str) {
     // sequence works.
     tokio::time::sleep(Duration::from_millis(500)).await;
 }
-
 
 async fn ensure_proxy_phone_ap_iface(ap_iface: &str, car_sta_iface: &str) -> Result<()> {
     let ap_iface = ap_iface.trim();
@@ -2847,7 +3065,11 @@ async fn ensure_proxy_phone_ap_iface(ap_iface: &str, car_sta_iface: &str) -> Res
 }
 
 fn hostapd_hw_mode_for_channel(channel: u32) -> &'static str {
-    if channel <= 14 { "g" } else { "a" }
+    if channel <= 14 {
+        "g"
+    } else {
+        "a"
+    }
 }
 
 async fn start_proxy_phone_ap(
@@ -2867,9 +3089,15 @@ async fn start_proxy_phone_ap(
     }
     let key = key.trim();
     if !key.is_empty() && key.len() < 8 {
-        return Err("proxy_ap phone AP WPA2 key must be empty/open or at least 8 characters".into());
+        return Err(
+            "proxy_ap phone AP WPA2 key must be empty/open or at least 8 characters".into(),
+        );
     }
-    let ip = if ip.trim().is_empty() { "10.0.0.1" } else { ip.trim() };
+    let ip = if ip.trim().is_empty() {
+        "10.0.0.1"
+    } else {
+        ip.trim()
+    };
 
     let hostapd_conf = format!("/tmp/aa-proxy-phone-ap-{}.conf", ap_iface.replace('/', "_"));
     let mut conf = format!(
@@ -2889,7 +3117,10 @@ async fn start_proxy_phone_ap(
     }
     tokio::fs::write(&hostapd_conf, conf).await?;
 
-    let dnsmasq_conf = format!("/tmp/aa-proxy-phone-ap-{}-dnsmasq.conf", ap_iface.replace('/', "_"));
+    let dnsmasq_conf = format!(
+        "/tmp/aa-proxy-phone-ap-{}-dnsmasq.conf",
+        ap_iface.replace('/', "_")
+    );
     let dhcp_range = if ip.starts_with("10.0.0.") {
         "10.0.0.50,10.0.0.150,255.255.255.0,12h".to_string()
     } else if let Some((prefix, _)) = ip.rsplit_once('.') {
@@ -2924,7 +3155,9 @@ async fn start_proxy_phone_ap(
 async fn iw_iface_type(iface: &str) -> Option<String> {
     let output = timeout(
         Duration::from_secs(3),
-        Command::new("iw").args(["dev", iface.trim(), "info"]).output(),
+        Command::new("iw")
+            .args(["dev", iface.trim(), "info"])
+            .output(),
     )
     .await
     .ok()?
@@ -2993,7 +3226,9 @@ async fn start_external_phone_ap(
     start_proxy_phone_ap(ap_iface, ssid, key, ip, channel).await?;
 
     if !wait_for_iface_type(ap_iface, "AP", Duration::from_secs(5)).await {
-        let actual = iw_iface_type(ap_iface).await.unwrap_or_else(|| "<unknown>".to_string());
+        let actual = iw_iface_type(ap_iface)
+            .await
+            .unwrap_or_else(|| "<unknown>".to_string());
         return Err(format!(
             "external_ap phone AP iface {} did not enter AP mode after hostapd start; current iw type is {}",
             ap_iface, actual
@@ -3115,7 +3350,10 @@ async fn run_wpa_supplicant_wifi_join(
     let mut associated = false;
     for attempt in 1..=20 {
         if !iface_exists(iface).await {
-            stop_wpa_supplicant_for_wifi("stop wpa_supplicant after iface disappeared during association wait").await;
+            stop_wpa_supplicant_for_wifi(
+                "stop wpa_supplicant after iface disappeared during association wait",
+            )
+            .await;
             return Err(format!(
                 "wpa_supplicant started but iface {} disappeared before association wait attempt {}",
                 iface, attempt
@@ -3147,7 +3385,8 @@ async fn run_wpa_supplicant_wifi_join(
     }
 
     if !iface_exists(iface).await {
-        stop_wpa_supplicant_for_wifi("stop wpa_supplicant after iface disappeared before DHCP").await;
+        stop_wpa_supplicant_for_wifi("stop wpa_supplicant after iface disappeared before DHCP")
+            .await;
         return Err(format!(
             "wpa_supplicant started but iface {} disappeared before DHCP",
             iface
@@ -3157,12 +3396,9 @@ async fn run_wpa_supplicant_wifi_join(
     let dhcp_ok = run_udhcpc_for_iface(iface, "after wpa_supplicant start", dhcp_timeout).await;
     if !dhcp_ok {
         if !iface_exists(iface).await {
-            stop_wpa_supplicant_for_wifi("stop wpa_supplicant after iface disappeared during DHCP").await;
-            return Err(format!(
-                "iface {} disappeared while/after running DHCP",
-                iface
-            )
-            .into());
+            stop_wpa_supplicant_for_wifi("stop wpa_supplicant after iface disappeared during DHCP")
+                .await;
+            return Err(format!("iface {} disappeared while/after running DHCP", iface).into());
         }
         return Err(format!("udhcpc did not return success on iface {}", iface).into());
     }
@@ -3192,7 +3428,11 @@ async fn run_car_wifi_join(
         ap_iface.trim()
     };
     let requested_sta_iface = if sta_iface.trim().is_empty() {
-        if keep_ap { "sta0" } else { base_iface }
+        if keep_ap {
+            "sta0"
+        } else {
+            base_iface
+        }
     } else {
         sta_iface.trim()
     };
@@ -3215,7 +3455,12 @@ async fn run_car_wifi_join(
             "{} 🧪 bt-wireless-proxy car-wifi-mitm: iface {} is associated to ssid={} but IPv4 is not ready; requesting DHCP before deciding to rejoin",
             NAME, requested_sta_iface, ssid
         );
-        let _ = run_udhcpc_for_iface(requested_sta_iface, "existing association has no IPv4", dhcp_timeout).await;
+        let _ = run_udhcpc_for_iface(
+            requested_sta_iface,
+            "existing association has no IPv4",
+            dhcp_timeout,
+        )
+        .await;
         if wait_for_wifi_ready(requested_sta_iface, ssid, wifi_association_timeout).await {
             return Ok(requested_sta_iface.to_string());
         }
@@ -3257,7 +3502,11 @@ async fn run_car_wifi_join(
     };
 
     let join_control = join_control.trim().to_ascii_lowercase();
-    let join_control = if join_control.is_empty() { "auto" } else { join_control.as_str() };
+    let join_control = if join_control.is_empty() {
+        "auto"
+    } else {
+        join_control.as_str()
+    };
     info!(
         "{} 🧪 bt-wireless-proxy car-wifi-mitm: Wi-Fi join control={} iface={}",
         NAME, join_control, join_iface
@@ -3266,7 +3515,9 @@ async fn run_car_wifi_join(
     let mut errors = Vec::new();
 
     if join_control == "wpactrl" {
-        match run_wpactrl_wifi_join(&join_iface, info_msg, wpactrl_socket_timeout, dhcp_timeout).await {
+        match run_wpactrl_wifi_join(&join_iface, info_msg, wpactrl_socket_timeout, dhcp_timeout)
+            .await
+        {
             Ok(()) => {
                 if wait_for_wifi_ready(&join_iface, ssid, wifi_association_timeout).await {
                     return Ok(join_iface);
@@ -3286,9 +3537,13 @@ async fn run_car_wifi_join(
                         "{} 🧪 bt-wireless-proxy car-wifi-mitm: recreating STA iface {} before direct wpa_supplicant fallback because wpactrl cleanup/driver may have dropped the virtual iface",
                         NAME, join_iface
                     );
-                    stop_wpa_supplicant_for_wifi("stop stale wpa_supplicant before recreating STA iface for fallback").await;
+                    stop_wpa_supplicant_for_wifi(
+                        "stop stale wpa_supplicant before recreating STA iface for fallback",
+                    )
+                    .await;
                     tokio::time::sleep(Duration::from_secs(1)).await;
-                    join_iface = prepare_sta_iface_keep_ap(&join_iface, ap_iface, sta_phy, true).await?;
+                    join_iface =
+                        prepare_sta_iface_keep_ap(&join_iface, ap_iface, sta_phy, true).await?;
                 }
             }
         }
@@ -3297,7 +3552,8 @@ async fn run_car_wifi_join(
             return Err(format!(
                 "car Wi-Fi join iface {} disappeared before direct wpa_supplicant fallback",
                 join_iface
-            ).into());
+            )
+            .into());
         }
 
         match run_wpa_supplicant_wifi_join(&join_iface, info_msg, dhcp_timeout).await {
@@ -3320,7 +3576,10 @@ async fn run_car_wifi_join(
                     "{} 🧪 bt-wireless-proxy car-wifi-mitm: recreating STA iface {} before wpa_supplicant retry {}/{}",
                     NAME, join_iface, attempt, max_attempts
                 );
-                stop_wpa_supplicant_for_wifi("stop stale wpa_supplicant before recreating STA iface for retry").await;
+                stop_wpa_supplicant_for_wifi(
+                    "stop stale wpa_supplicant before recreating STA iface for retry",
+                )
+                .await;
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 match prepare_sta_iface_keep_ap(&join_iface, ap_iface, sta_phy, true).await {
                     Ok(iface) => join_iface = iface,
@@ -3347,7 +3606,9 @@ async fn run_car_wifi_join(
                     if wait_for_wifi_ready(&join_iface, ssid, wifi_association_timeout).await {
                         return Ok(join_iface);
                     }
-                    last_error = "wpa_supplicant returned success but association/IPv4 was not observed".to_string();
+                    last_error =
+                        "wpa_supplicant returned success but association/IPv4 was not observed"
+                            .to_string();
                 }
                 Err(e) => {
                     last_error = format!("wpa_supplicant: {}", e);
@@ -3367,7 +3628,9 @@ async fn run_car_wifi_join(
                 if wait_for_wifi_ready(&join_iface, ssid, wifi_association_timeout).await {
                     return Ok(join_iface);
                 }
-                return Err("wpa_cli returned success but association/IPv4 was not observed".into());
+                return Err(
+                    "wpa_cli returned success but association/IPv4 was not observed".into(),
+                );
             }
             Err(e) => return Err(format!("wpa_cli: {}", e).into()),
         }
@@ -3398,7 +3661,9 @@ async fn run_car_wifi_join(
                 if wait_for_wifi_ready(&join_iface, ssid, wifi_association_timeout).await {
                     return Ok(join_iface);
                 }
-                errors.push("nmcli returned success but association/IPv4 was not observed".to_string());
+                errors.push(
+                    "nmcli returned success but association/IPv4 was not observed".to_string(),
+                );
             }
             Err(e) => errors.push(format!("nmcli: {}", e)),
         }
@@ -3415,7 +3680,9 @@ async fn run_car_wifi_join(
                 if wait_for_wifi_ready(&join_iface, ssid, wifi_association_timeout).await {
                     return Ok(join_iface);
                 }
-                errors.push("wpa_cli returned success but association/IPv4 was not observed".to_string());
+                errors.push(
+                    "wpa_cli returned success but association/IPv4 was not observed".to_string(),
+                );
             }
             Err(e) => errors.push(format!("wpa_cli: {}", e)),
         }
@@ -3432,7 +3699,10 @@ async fn run_car_wifi_join(
                 if wait_for_wifi_ready(&join_iface, ssid, wifi_association_timeout).await {
                     return Ok(join_iface);
                 }
-                errors.push("wpa_supplicant returned success but association/IPv4 was not observed".to_string());
+                errors.push(
+                    "wpa_supplicant returned success but association/IPv4 was not observed"
+                        .to_string(),
+                );
             }
             Err(e) => errors.push(format!("wpa_supplicant: {}", e)),
         }
@@ -3444,15 +3714,22 @@ async fn run_car_wifi_join(
     }
 
     if errors.is_empty() {
-        Err("auto Wi-Fi join requested but nmcli, wpa_cli, and wpa_supplicant were unavailable".into())
+        Err(
+            "auto Wi-Fi join requested but nmcli, wpa_cli, and wpa_supplicant were unavailable"
+                .into(),
+        )
     } else {
         Err(format!("auto Wi-Fi join failed: {}", errors.join("; ")).into())
     }
 }
 
 fn ipv4_likely_same_lan(src_ip: &str, target_ip: &str) -> bool {
-    let Ok(src) = src_ip.parse::<std::net::Ipv4Addr>() else { return true; };
-    let Ok(target) = target_ip.parse::<std::net::Ipv4Addr>() else { return true; };
+    let Ok(src) = src_ip.parse::<std::net::Ipv4Addr>() else {
+        return true;
+    };
+    let Ok(target) = target_ip.parse::<std::net::Ipv4Addr>() else {
+        return true;
+    };
     let s = src.octets();
     let t = target.octets();
 
@@ -3468,7 +3745,6 @@ fn ipv4_likely_same_lan(src_ip: &str, target_ip: &str) -> bool {
 
     s[0] == t[0] && s[1] == t[1]
 }
-
 
 async fn install_ipv4_host_route(target_ip: &str, iface: &str, src_ip: &str) -> Result<()> {
     let target_ip = target_ip.trim();
@@ -3573,7 +3849,12 @@ async fn repair_car_side_route_after_phone_ap(
             current_ip
         );
         if current_ssid.is_some() && current_ip.is_none() {
-            let _ = run_udhcpc_for_iface(iface, "proxy_ap phone AP start left car STA without IPv4", dhcp_timeout).await;
+            let _ = run_udhcpc_for_iface(
+                iface,
+                "proxy_ap phone AP start left car STA without IPv4",
+                dhcp_timeout,
+            )
+            .await;
         }
         let _ = wait_for_wifi_ready(iface, expected_ssid, Duration::from_secs(5)).await;
         current_ip = iface_ipv4(iface).await;
@@ -3602,7 +3883,6 @@ async fn repair_car_side_route_after_phone_ap(
     install_ipv4_host_route(target_ip, iface, &src_ip).await?;
     Ok(src_ip)
 }
-
 
 async fn warm_car_side_route_for_hu(target_ip: &str, iface: &str) {
     let target_ip = target_ip.trim();
@@ -3688,10 +3968,7 @@ async fn connect_real_hu_tcp_with_route_retry(
             let delay = Duration::from_millis(750 * attempt as u64);
             info!(
                 "{} 🧪 bt-wireless-proxy car-wifi-mitm: delaying {:?} before HU TCP retry {}/{}",
-                NAME,
-                delay,
-                attempt,
-                max_attempts
+                NAME, delay, attempt, max_attempts
             );
             tokio::time::sleep(delay).await;
         }
@@ -3731,10 +4008,7 @@ async fn connect_real_hu_tcp_with_route_retry(
 
         info!(
             "{} 🧪 bt-wireless-proxy car-wifi-mitm: connecting real HU TCP {} attempt {}/{}",
-            NAME,
-            hu_tcp_addr,
-            attempt,
-            max_attempts
+            NAME, hu_tcp_addr, attempt, max_attempts
         );
         match timeout(Duration::from_secs(5), TcpStream::connect(hu_tcp_addr)).await {
             Ok(Ok(stream)) => {
@@ -3774,14 +4048,17 @@ async fn connect_real_hu_tcp_with_route_retry(
     log_car_side_route_state(hu_tcp_ip, iface, "after HU TCP connect retries failed").await;
     Err(format!(
         "real HU TCP {} failed after {} attempts; last error: {}",
-        hu_tcp_addr,
-        max_attempts,
-        last_error
+        hu_tcp_addr, max_attempts, last_error
     )
     .into())
 }
 
-async fn discover_rewrite_ip(target_ip: &str, iface: &str, override_ip: &str, dhcp_timeout: Duration) -> Result<String> {
+async fn discover_rewrite_ip(
+    target_ip: &str,
+    iface: &str,
+    override_ip: &str,
+    dhcp_timeout: Duration,
+) -> Result<String> {
     let override_ip = override_ip.trim();
     if !override_ip.is_empty() {
         info!(
@@ -3863,7 +4140,12 @@ async fn discover_rewrite_ip(target_ip: &str, iface: &str, override_ip: &str, dh
             "{} 🧪 bt-wireless-proxy car-wifi-mitm: no suitable rewrite IP found for HU {}; requesting DHCP on {} and retrying once",
             NAME, target_ip.trim(), iface
         );
-        let _ = run_udhcpc_for_iface(iface, "rewrite IP discovery had no suitable source address", dhcp_timeout).await;
+        let _ = run_udhcpc_for_iface(
+            iface,
+            "rewrite IP discovery had no suitable source address",
+            dhcp_timeout,
+        )
+        .await;
 
         if let Ok(Ok(output)) = timeout(
             Duration::from_secs(5),
@@ -4081,10 +4363,7 @@ pub fn remove_known_device_entry(mac: &str) -> std::io::Result<bool> {
         std::fs::write(path, new_contents)?;
     }
 
-    info!(
-        "{} 🗑️ Removed {} from known devices file",
-        NAME, target
-    );
+    info!("{} 🗑️ Removed {} from known devices file", NAME, target);
 
     Ok(true)
 }
@@ -4201,8 +4480,11 @@ async fn read_message(
     Ok(HEADER_LEN + len)
 }
 
-
-fn auto_accept_only_configured_hu(device: Address, allowed_hu: Address, action: &str) -> AgentReqResult<()> {
+fn auto_accept_only_configured_hu(
+    device: Address,
+    allowed_hu: Address,
+    action: &str,
+) -> AgentReqResult<()> {
     if device == allowed_hu {
         info!(
             "{} 🧲 bt-wireless-proxy pairing: auto-accepting {} from configured HU {}",
@@ -4314,7 +4596,6 @@ async fn hu_authorize_service(req: AuthorizeService, allowed_hu: Address) -> Age
     );
     Ok(())
 }
-
 
 async fn log_hu_device_snapshot(adapter: &Adapter, hu_addr: Address, context: &str) {
     match adapter.device(hu_addr) {
@@ -4561,7 +4842,11 @@ impl Bluetooth {
         }
 
         let alias = requested_alias.trim();
-        let alias = if alias.is_empty() { "AndroidAuto" } else { alias };
+        let alias = if alias.is_empty() {
+            "AndroidAuto"
+        } else {
+            alias
+        };
         let class_value = match Self::normalize_bt_class_value(requested_class) {
             Some(value) => value,
             None => {
@@ -4827,22 +5112,23 @@ impl Bluetooth {
             NAME, hu_addr
         );
 
-        let mut discovery: Option<Pin<Box<dyn FuturesStream<Item = AdapterEvent> + Send>>> = match self.adapter.discover_devices_with_changes().await {
-            Ok(stream) => {
-                info!(
+        let mut discovery: Option<Pin<Box<dyn FuturesStream<Item = AdapterEvent> + Send>>> =
+            match self.adapter.discover_devices_with_changes().await {
+                Ok(stream) => {
+                    info!(
                     "{} 🧲 bt-wireless-proxy pairing: BlueZ discovery started for configured HU {}; known devices will be reported first",
                     NAME, hu_addr
                 );
-                Some(Box::pin(stream))
-            }
-            Err(e) => {
-                warn!(
+                    Some(Box::pin(stream))
+                }
+                Err(e) => {
+                    warn!(
                     "{} 🧲 bt-wireless-proxy pairing: failed to start BlueZ discovery for HU {}; passive inbound pairing only for this window: {}",
                     NAME, hu_addr, e
                 );
-                None
-            }
-        };
+                    None
+                }
+            };
 
         let mut discovery_done = discovery.is_none();
         let mut active_pair_attempts: u32 = 0;
@@ -4903,7 +5189,12 @@ impl Bluetooth {
                             "{} 🧲 bt-wireless-proxy pairing: discovered configured HU {} during active scan; active_pair_attempt={} remaining={}s",
                             NAME, hu_addr, active_pair_attempts, remaining_secs
                         );
-                        log_hu_device_snapshot(&self.adapter, hu_addr, "discovered-target-before-pair").await;
+                        log_hu_device_snapshot(
+                            &self.adapter,
+                            hu_addr,
+                            "discovered-target-before-pair",
+                        )
+                        .await;
 
                         match self.adapter.device(hu_addr) {
                             Ok(device) => {
@@ -5016,7 +5307,11 @@ impl Bluetooth {
         }
     }
 
-    pub async fn start_companion_bt(&mut self, state: AppState, enable_companion_bt: bool) -> Result<()> {
+    pub async fn start_companion_bt(
+        &mut self,
+        state: AppState,
+        enable_companion_bt: bool,
+    ) -> Result<()> {
         if !enable_companion_bt {
             info!("{} 📱 Companion Classic BT profile: disabled", NAME);
             return Ok(());
@@ -5029,7 +5324,10 @@ impl Bluetooth {
                     self.companion_pairing_agent = Some(handle);
                 }
                 Err(e) => {
-                    warn!("{} 📱 Failed to register Companion Classic BT pairing agent: {}", NAME, e);
+                    warn!(
+                        "{} 📱 Failed to register Companion Classic BT pairing agent: {}",
+                        NAME, e
+                    );
                 }
             }
         }
@@ -5050,21 +5348,33 @@ impl Bluetooth {
 
         match crate::companion_bt::register_companion_bt_profile(&self.session).await {
             Ok(handle) => {
-                info!("{} 📱 Companion Classic BT custom profile: registered", NAME);
+                info!(
+                    "{} 📱 Companion Classic BT custom profile: registered",
+                    NAME
+                );
                 crate::companion_bt::spawn_companion_bt_accept_loop(handle, state.clone());
             }
             Err(e) => {
-                error!("{} 📱 Failed to register Companion Classic BT custom profile: {}", NAME, e);
+                error!(
+                    "{} 📱 Failed to register Companion Classic BT custom profile: {}",
+                    NAME, e
+                );
             }
         }
 
         match crate::companion_bt::register_companion_spp_profile(&self.session).await {
             Ok(handle) => {
-                info!("{} 📱 Companion Classic BT SPP fallback profile: registered", NAME);
+                info!(
+                    "{} 📱 Companion Classic BT SPP fallback profile: registered",
+                    NAME
+                );
                 crate::companion_bt::spawn_companion_bt_accept_loop(handle, state);
             }
             Err(e) => {
-                warn!("{} 📱 Failed to register Companion Classic BT SPP fallback profile: {}", NAME, e);
+                warn!(
+                    "{} 📱 Failed to register Companion Classic BT SPP fallback profile: {}",
+                    NAME, e
+                );
             }
         }
 
@@ -5187,9 +5497,7 @@ impl Bluetooth {
         let start = Instant::now();
         info!(
             "{} 🧪 bt-wireless-proxy: waiting up to {:?} for PHONE AA Wireless RFCOMM ({})",
-            NAME,
-            bt_timeout,
-            reason
+            NAME, bt_timeout, reason
         );
 
         loop {
@@ -5205,17 +5513,19 @@ impl Bluetooth {
 
             let req = timeout(remaining, handle_aa.next())
                 .await
-                .map_err(|_| format!(
-                    "timed out after {:?} waiting for PHONE AA Wireless RFCOMM ({})",
-                    bt_timeout, reason
-                ))?
-                .ok_or("AA Wireless local server profile ended while waiting for PHONE AA RFCOMM")?;
+                .map_err(|_| {
+                    format!(
+                        "timed out after {:?} waiting for PHONE AA Wireless RFCOMM ({})",
+                        bt_timeout, reason
+                    )
+                })?
+                .ok_or(
+                    "AA Wireless local server profile ended while waiting for PHONE AA RFCOMM",
+                )?;
             let addr = req.device().clone();
             info!(
                 "{} 📱 AA Wireless Profile: inbound RFCOMM from <b>{}</> while {}",
-                NAME,
-                addr,
-                reason
+                NAME, addr, reason
             );
 
             if reject_addr == Some(addr) {
@@ -5243,9 +5553,7 @@ impl Bluetooth {
             let stream = req.accept()?;
             info!(
                 "{} 🧪 bt-wireless-proxy: accepted PHONE AA Wireless RFCOMM from {} ({})",
-                NAME,
-                addr,
-                reason
+                NAME, addr, reason
             );
             return Ok((addr, stream));
         }
@@ -5355,12 +5663,8 @@ impl Bluetooth {
             }
         }
 
-        self.wait_for_phone_aa_profile_request(
-            bt_timeout,
-            "after phone BT trigger",
-            None,
-        )
-        .await
+        self.wait_for_phone_aa_profile_request(bt_timeout, "after phone BT trigger", None)
+            .await
     }
 
     async fn wait_for_phone_aa_profile_while_buffering_hu(
@@ -5599,7 +5903,6 @@ impl Bluetooth {
         Ok(())
     }
 
-
     async fn register_hsp_trigger_profile(&self, bt_sco: bool) -> Option<bluer::Session> {
         if self.dongle_mode {
             return None;
@@ -5608,7 +5911,10 @@ impl Bluetooth {
         let session = match bluer::Session::new().await {
             Ok(session) => session,
             Err(e) => {
-                warn!("{} 🎧 Headset Profile (HSP): session error: {}, ignoring", NAME, e);
+                warn!(
+                    "{} 🎧 Headset Profile (HSP): session error: {}, ignoring",
+                    NAME, e
+                );
                 return None;
             }
         };
@@ -5629,7 +5935,10 @@ impl Bluetooth {
                         let req = match h.next().await {
                             Some(req) => req,
                             None => {
-                                warn!("{} 🎧 Headset Profile (HSP): no more connect requests", NAME);
+                                warn!(
+                                    "{} 🎧 Headset Profile (HSP): no more connect requests",
+                                    NAME
+                                );
                                 break;
                             }
                         };
@@ -5769,7 +6078,9 @@ impl Bluetooth {
             NAME, phone_addr, hu_endpoint_hint
         );
 
-        let hu_conn = self.connect_hu_aa_wireless_proxy(hu_mac.trim(), hu_channel).await?;
+        let hu_conn = self
+            .connect_hu_aa_wireless_proxy(hu_mac.trim(), hu_channel)
+            .await?;
         let hu_endpoint = hu_conn.endpoint.clone();
         info!(
             "{} 🧪 bt-wireless-proxy bridge: connected to HU {}; relaying raw AA Wireless BT frames both ways",
@@ -5853,7 +6164,8 @@ impl Bluetooth {
         // phone before the HU AA RFCOMM socket is established. Some phones appear to
         // enter a stale cached WPP/TCP path when HSP is triggered too early, before the
         // bridge is ready to replay the HU Bluetooth bootstrap frames.
-        self.trigger_phone_aa_connection(connect, options.stopped).await?;
+        self.trigger_phone_aa_connection(connect, options.stopped)
+            .await?;
 
         let hu_addr: Address = options.hu_mac.trim().parse()?;
         let (phone_addr, phone_stream, buffered_hu_frames) = self
@@ -5978,13 +6290,18 @@ impl Bluetooth {
         reason: &str,
     ) {
         let reason = reason.trim();
-        let reason = if reason.is_empty() { "car-wifi-mitm error" } else { reason };
+        let reason = if reason.is_empty() {
+            "car-wifi-mitm error"
+        } else {
+            reason
+        };
         warn!(
             "{} 🧪 bt-wireless-proxy car-wifi-mitm: recovery cleanup after {}; closing stale HU/phone Bluetooth state before retry",
             NAME,
             reason
         );
-        self.disconnect_triggered_phone_devices(connect, reason).await;
+        self.disconnect_triggered_phone_devices(connect, reason)
+            .await;
         self.disconnect_hu_device_for_recovery(hu_mac, reason).await;
         let cooldown = if reason.contains("could not find RFCOMM channel")
             || reason.contains("attrs=3500")
@@ -6103,14 +6420,20 @@ impl Bluetooth {
                     "{} 🧪 bt-wireless-proxy car-wifi-mitm: strict HU-first rendezvous selected",
                     NAME
                 );
-                self.car_wifi_mitm_hu_first_rendezvous(connect.clone(), &options).await?
+                self.car_wifi_mitm_hu_first_rendezvous(connect.clone(), &options)
+                    .await?
             }
             CarWifiRendezvousMode::PhoneFirst => {
                 info!(
                     "{} 🧪 bt-wireless-proxy car-wifi-mitm: strict phone-first rendezvous selected",
                     NAME
                 );
-                self.car_wifi_mitm_phone_first_rendezvous(connect.clone(), &options, &hu_endpoint_hint).await?
+                self.car_wifi_mitm_phone_first_rendezvous(
+                    connect.clone(),
+                    &options,
+                    &hu_endpoint_hint,
+                )
+                .await?
             }
             CarWifiRendezvousMode::Auto => {
                 info!(
@@ -6138,7 +6461,11 @@ impl Bluetooth {
                         // connect/refused/disconnect loops. Reset to START so the fake/real HU
                         // and the phone are both forced through a fresh HU-first Bluetooth
                         // bootstrap attempt.
-                        self.disconnect_triggered_phone_devices(&connect, "auto HU-first/hybrid failure").await;
+                        self.disconnect_triggered_phone_devices(
+                            &connect,
+                            "auto HU-first/hybrid failure",
+                        )
+                        .await;
                         return Err(format!(
                             "auto rendezvous HU-first/hybrid failed; resetting Bluetooth/Wi-Fi bootstrap to initial START state instead of passive/phone-first fallback: {}",
                             hu_first_err_msg
@@ -6223,9 +6550,19 @@ impl Bluetooth {
         };
 
         let phone_wifi_mode = options.phone_wifi_mode.trim().to_ascii_lowercase();
-        let external_phone_ap = matches!(phone_wifi_mode.as_str(), "external_ap" | "external-ap" | "externalap" | "external_proxy_ap" | "external-proxy-ap");
+        let external_phone_ap = matches!(
+            phone_wifi_mode.as_str(),
+            "external_ap"
+                | "external-ap"
+                | "externalap"
+                | "external_proxy_ap"
+                | "external-proxy-ap"
+        );
         let proxy_phone_ap = external_phone_ap
-            || matches!(phone_wifi_mode.as_str(), "proxy_ap" | "proxy-ap" | "proxyap" | "ap_proxy");
+            || matches!(
+                phone_wifi_mode.as_str(),
+                "proxy_ap" | "proxy-ap" | "proxyap" | "ap_proxy"
+            );
         let base_iface = options.iface.trim();
         let mut effective_keep_ap = options.keep_ap;
         let mut proxy_ap_uses_virtual_ap_iface = false;
@@ -6255,7 +6592,8 @@ impl Bluetooth {
             } else {
                 base_iface.to_string()
             };
-            let car_sta_iface = resolve_external_car_sta_iface(&options.sta_iface, &phone_ap_iface).await?;
+            let car_sta_iface =
+                resolve_external_car_sta_iface(&options.sta_iface, &phone_ap_iface).await?;
             effective_ap_iface = phone_ap_iface;
             effective_sta_iface = car_sta_iface;
             effective_keep_ap = false;
@@ -6326,8 +6664,10 @@ impl Bluetooth {
         }
 
         let effective_join_control = if proxy_phone_ap
-            && matches!(options.join_control.trim().to_ascii_lowercase().as_str(), "" | "auto" | "wpactrl")
-        {
+            && matches!(
+                options.join_control.trim().to_ascii_lowercase().as_str(),
+                "" | "auto" | "wpactrl"
+            ) {
             info!(
                 "{} 🧪 bt-wireless-proxy {}: forcing Wi-Fi join control=wpa_supplicant for car STA iface",
                 NAME,
@@ -6361,14 +6701,21 @@ impl Bluetooth {
 
         let join_iface = match join_attempt {
             Ok(iface) => iface,
-            Err(e) if !external_phone_ap && proxy_phone_ap && e.to_string().contains("disappeared before association") => {
+            Err(e)
+                if !external_phone_ap
+                    && proxy_phone_ap
+                    && e.to_string().contains("disappeared before association") =>
+            {
                 warn!(
                     "{} 🧪 bt-wireless-proxy proxy_ap: car STA iface {} disappeared during virtual-STA join: {}; falling back to inverted single-radio mode: wlan0 as car STA, ap0 as phone AP",
                     NAME,
                     effective_sta_iface,
                     e
                 );
-                stop_wpa_supplicant_for_wifi("stop stale wpa_supplicant before inverted proxy_ap fallback").await;
+                stop_wpa_supplicant_for_wifi(
+                    "stop stale wpa_supplicant before inverted proxy_ap fallback",
+                )
+                .await;
                 let fallback_car_sta_iface = if effective_ap_iface.trim().is_empty() {
                     "wlan0".to_string()
                 } else {
@@ -6408,7 +6755,13 @@ impl Bluetooth {
         };
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        let mut car_side_rewrite_ip = discover_rewrite_ip(&hu_tcp_ip, &join_iface, &options.rewrite_ip, options.dhcp_timeout).await?;
+        let mut car_side_rewrite_ip = discover_rewrite_ip(
+            &hu_tcp_ip,
+            &join_iface,
+            &options.rewrite_ip,
+            options.dhcp_timeout,
+        )
+        .await?;
         let mut rewrite_ip = car_side_rewrite_ip.clone();
         let mut phone_wifi_info_payload = hu_info_payload.clone();
 
@@ -6419,11 +6772,12 @@ impl Bluetooth {
                 options.phone_ap_ip.trim().to_string()
             };
             let channel = if external_phone_ap {
-                let fallback_channel = if let Some(channel) = current_iw_channel(&effective_ap_iface).await {
-                    channel
-                } else {
-                    current_iw_channel(&join_iface).await.unwrap_or(0)
-                };
+                let fallback_channel =
+                    if let Some(channel) = current_iw_channel(&effective_ap_iface).await {
+                        channel
+                    } else {
+                        current_iw_channel(&join_iface).await.unwrap_or(0)
+                    };
                 let channel = start_external_phone_ap(
                     &effective_ap_iface,
                     &options.phone_ap_ssid,
@@ -6436,9 +6790,12 @@ impl Bluetooth {
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 channel
             } else {
-                let channel = current_iw_channel(&join_iface)
-                    .await
-                    .ok_or_else(|| format!("proxy_ap could not determine car STA channel from iface {}", join_iface))?;
+                let channel = current_iw_channel(&join_iface).await.ok_or_else(|| {
+                    format!(
+                        "proxy_ap could not determine car STA channel from iface {}",
+                        join_iface
+                    )
+                })?;
                 if proxy_ap_uses_virtual_ap_iface {
                     ensure_proxy_phone_ap_iface(&effective_ap_iface, &join_iface).await?;
                 }
@@ -6528,7 +6885,8 @@ impl Bluetooth {
         let phone_tcp_seq_before = options.tcp_phone_connection_seq.load(Ordering::Relaxed);
         options.tcp_start.notify_one();
 
-        let mut phone_start_req = WifiStartRequest::WifiStartRequest::parse_from_bytes(&hu_start_payload)?;
+        let mut phone_start_req =
+            WifiStartRequest::WifiStartRequest::parse_from_bytes(&hu_start_payload)?;
         phone_start_req.set_ip_address(rewrite_ip.clone());
         phone_start_req.set_port(listen_port as i32);
         let phone_start_payload = phone_start_req.write_to_bytes()?;
@@ -6540,15 +6898,16 @@ impl Bluetooth {
 
         for phone_bootstrap_attempt in 1..=max_phone_bootstrap_attempts {
             if phone_bootstrap_attempt > 1 {
-                let (new_phone_addr, new_phone_stream) = reconnect_phone_aa_rfcomm_for_car_wifi_mitm(
-                    self,
-                    connect.clone(),
-                    &options,
-                    phone_bootstrap_attempt - 1,
-                    max_phone_bootstrap_attempts,
-                    &last_phone_bootstrap_error,
-                )
-                .await?;
+                let (new_phone_addr, new_phone_stream) =
+                    reconnect_phone_aa_rfcomm_for_car_wifi_mitm(
+                        self,
+                        connect.clone(),
+                        &options,
+                        phone_bootstrap_attempt - 1,
+                        max_phone_bootstrap_attempts,
+                        &last_phone_bootstrap_error,
+                    )
+                    .await?;
                 phone_addr = new_phone_addr;
                 phone_stream = new_phone_stream;
             }
@@ -6577,10 +6936,7 @@ impl Bluetooth {
                 if is_retriable_phone_bootstrap_disconnect(&err)
                     && phone_bootstrap_attempt < max_phone_bootstrap_attempts
                 {
-                    last_phone_bootstrap_error = format!(
-                        "send WifiStartRequest failed: {}",
-                        err
-                    );
+                    last_phone_bootstrap_error = format!("send WifiStartRequest failed: {}", err);
                     continue;
                 }
                 return Err(e);
@@ -6600,10 +6956,8 @@ impl Bluetooth {
                     if is_retriable_phone_bootstrap_disconnect(&err)
                         && phone_bootstrap_attempt < max_phone_bootstrap_attempts
                     {
-                        last_phone_bootstrap_error = format!(
-                            "waiting for WifiInfoRequest failed: {}",
-                            err
-                        );
+                        last_phone_bootstrap_error =
+                            format!("waiting for WifiInfoRequest failed: {}", err);
                         continue;
                     }
                     return Err(e);
@@ -6635,10 +6989,7 @@ impl Bluetooth {
                 if is_retriable_phone_bootstrap_disconnect(&err)
                     && phone_bootstrap_attempt < max_phone_bootstrap_attempts
                 {
-                    last_phone_bootstrap_error = format!(
-                        "send WifiInfoResponse failed: {}",
-                        err
-                    );
+                    last_phone_bootstrap_error = format!("send WifiInfoResponse failed: {}", err);
                     continue;
                 }
                 return Err(e);
@@ -6658,10 +7009,8 @@ impl Bluetooth {
                     if is_retriable_phone_bootstrap_disconnect(&err)
                         && phone_bootstrap_attempt < max_phone_bootstrap_attempts
                     {
-                        last_phone_bootstrap_error = format!(
-                            "waiting for WifiStartResponse failed: {}",
-                            err
-                        );
+                        last_phone_bootstrap_error =
+                            format!("waiting for WifiStartResponse failed: {}", err);
                         continue;
                     }
                     return Err(e);
@@ -6706,7 +7055,10 @@ impl Bluetooth {
                             ProxyMessageId::name(phone_status_id)
                         );
                     }
-                    Ok::<_, Box<dyn std::error::Error + Send + Sync>>((phone_status_id, phone_status_payload))
+                    Ok::<_, Box<dyn std::error::Error + Send + Sync>>((
+                        phone_status_id,
+                        phone_status_payload,
+                    ))
                 }
                 Ok(Err(e)) => {
                     warn!(
@@ -6760,7 +7112,6 @@ impl Bluetooth {
             .await?;
         }
 
-
         let hu_tcp_addr = format!("{}:{}", hu_tcp_ip, hu_tcp_port);
         let local_hu_tcp_addr = format!("127.0.0.1:{}", TCP_DHU_PORT);
         info!(
@@ -6777,7 +7128,11 @@ impl Bluetooth {
             options.dhcp_timeout,
         )
         .await?;
-        let mut local_hu_tcp = timeout(Duration::from_secs(45), TcpStream::connect(local_hu_tcp_addr.as_str())).await??;
+        let mut local_hu_tcp = timeout(
+            Duration::from_secs(45),
+            TcpStream::connect(local_hu_tcp_addr.as_str()),
+        )
+        .await??;
         hu_wpp_keepalive.abort_now();
         hu_tcp.set_nodelay(true)?;
         local_hu_tcp.set_nodelay(true)?;
@@ -6847,7 +7202,6 @@ impl Bluetooth {
         Ok(())
     }
 
-
     pub async fn aa_wireless_probe_proxy(
         &mut self,
         hu_mac: String,
@@ -6858,7 +7212,9 @@ impl Bluetooth {
             return Err("bt_wireless_proxy_hu_mac must be set for probe mode".into());
         }
 
-        let hu_conn = self.connect_hu_aa_wireless_proxy(hu_mac.trim(), hu_channel).await?;
+        let hu_conn = self
+            .connect_hu_aa_wireless_proxy(hu_mac.trim(), hu_channel)
+            .await?;
         let hu_endpoint = hu_conn.endpoint.clone();
         let ProxyHuConnection {
             mut stream,
@@ -6952,7 +7308,12 @@ impl Bluetooth {
         );
 
         loop {
-            match timeout(Duration::from_secs(30), read_proxy_frame(&mut stream, "HU -> POC")).await {
+            match timeout(
+                Duration::from_secs(30),
+                read_proxy_frame(&mut stream, "HU -> POC"),
+            )
+            .await
+            {
                 Ok(Ok((_id, _payload))) => continue,
                 Ok(Err(e)) => {
                     info!("{} 🧪 bt-wireless-proxy probe: RFCOMM ended: {}", NAME, e);

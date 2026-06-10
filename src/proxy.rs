@@ -825,7 +825,11 @@ pub async fn io_loop(
 
         let bt_car_wifi_mitm_hu_tcp = config.bt_wireless_proxy
             && matches!(
-                config.bt_wireless_proxy_mode.trim().to_ascii_lowercase().as_str(),
+                config
+                    .bt_wireless_proxy_mode
+                    .trim()
+                    .to_ascii_lowercase()
+                    .as_str(),
                 "car-wifi-mitm" | "wifi-mitm"
             );
 

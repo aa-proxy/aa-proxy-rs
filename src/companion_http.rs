@@ -45,7 +45,9 @@ pub fn dispatch_companion_http(req: CompanionHttpRequest) -> CompanionHttpRespon
     let body = match req.body_base64.as_deref() {
         Some(body) if !body.is_empty() => match BASE64_STANDARD.decode(body) {
             Ok(bytes) => bytes,
-            Err(e) => return CompanionHttpResponse::error(400, format!("invalid body_base64: {e}")),
+            Err(e) => {
+                return CompanionHttpResponse::error(400, format!("invalid body_base64: {e}"))
+            }
         },
         _ => Vec::new(),
     };

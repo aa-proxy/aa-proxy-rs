@@ -1,3 +1,10 @@
+use crate::companion_protocol::{
+    COMPANION_APP_VERSION, COMPANION_OP_ECHO, COMPANION_OP_ECHO_REPLY, COMPANION_OP_ERROR,
+    COMPANION_OP_GET_STATUS, COMPANION_OP_ON_SCRIPT_EVENT, COMPANION_OP_ON_TOPIC_EVENT,
+    COMPANION_OP_PING, COMPANION_OP_PONG, COMPANION_OP_REST_CALL, COMPANION_OP_REST_CALL_REPLY,
+    COMPANION_OP_REST_CALL_RESULT, COMPANION_OP_REST_CALL_SYNC, COMPANION_OP_STATUS,
+    COMPANION_OP_SUBSCRIBE_TOPIC_EVENT, COMPANION_OP_UNSUBSCRIBE_TOPIC_EVENT,
+};
 use crate::mitm::protos::{Service, ServiceDiscoveryResponse, VendorExtensionService};
 use crate::mitm::{
     ModifyContext, Packet, PacketAction, Result, ENCRYPTED, FRAME_TYPE_FIRST, FRAME_TYPE_LAST,
@@ -5,15 +12,6 @@ use crate::mitm::{
 #[cfg(feature = "wasm-scripting")]
 use crate::script_wasm::{LoadedScript, ScriptRegistry};
 use crate::web::ServerEvent;
-use crate::companion_protocol::{
-    COMPANION_APP_VERSION, COMPANION_OP_ECHO, COMPANION_OP_ECHO_REPLY,
-    COMPANION_OP_ERROR, COMPANION_OP_GET_STATUS, COMPANION_OP_ON_SCRIPT_EVENT,
-    COMPANION_OP_ON_TOPIC_EVENT, COMPANION_OP_PING, COMPANION_OP_PONG,
-    COMPANION_OP_REST_CALL, COMPANION_OP_REST_CALL_REPLY,
-    COMPANION_OP_REST_CALL_RESULT, COMPANION_OP_REST_CALL_SYNC,
-    COMPANION_OP_STATUS, COMPANION_OP_SUBSCRIBE_TOPIC_EVENT,
-    COMPANION_OP_UNSUBSCRIBE_TOPIC_EVENT,
-};
 #[cfg(not(feature = "wasm-scripting"))]
 type ScriptRegistry = ();
 use log::{debug, info, warn};
@@ -120,7 +118,8 @@ impl VecTopicEventBridge {
                             }
                         };
 
-                        let reply = build_vendor_app_reply(channel, COMPANION_OP_ON_TOPIC_EVENT, payload);
+                        let reply =
+                            build_vendor_app_reply(channel, COMPANION_OP_ON_TOPIC_EVENT, payload);
 
                         if let Err(e) = tx.send(reply).await {
                             warn!("Failed to send VEC topic event to phone: {}", e);
@@ -171,7 +170,10 @@ pub(crate) fn ensure_vendor_topic_event_bridge(
         return false;
     };
 
-    info!("Starting Companion topic event bridge channel={:#04x}", channel);
+    info!(
+        "Starting Companion topic event bridge channel={:#04x}",
+        channel
+    );
 
     ctx.vendor_topic_event_bridges
         .insert(channel, VecTopicEventBridge::new(channel, tx, runtime));
@@ -211,7 +213,8 @@ pub(crate) fn add_vendor_extension_service(
 
     let mut ves = VendorExtensionService::new();
     ves.set_service_name(OUR_COMPANION_SERVICE_NAME.to_string());
-    ves.package_white_list.push(OUR_COMPANION_PACKAGE.to_string());
+    ves.package_white_list
+        .push(OUR_COMPANION_PACKAGE.to_string());
 
     service.vendor_extension_service = protobuf::MessageField::some(ves);
     msg.services.push(service);
@@ -254,7 +257,8 @@ fn build_vendor_app_reply_fragments(channel: u8, opcode: u8, payload: Vec<u8>) -
     }
 
     let total_len = out.len() as u32;
-    let total_chunks = (out.len() + COMPANION_APP_FRAGMENT_CHUNK_SIZE - 1) / COMPANION_APP_FRAGMENT_CHUNK_SIZE;
+    let total_chunks =
+        (out.len() + COMPANION_APP_FRAGMENT_CHUNK_SIZE - 1) / COMPANION_APP_FRAGMENT_CHUNK_SIZE;
 
     info!(
         "VEC reply fragmented channel={:#04x} opcode={:#04x} total_len={} chunks={} chunk_size={}",
@@ -682,8 +686,11 @@ pub(crate) async fn handle_vendor_channel_packet(
             let result_call =
                 rest_call_blocking(rest_call.method, rest_call.path, rest_call.body, false);
 
-            *pkt =
-                build_vendor_app_reply(channel, COMPANION_OP_REST_CALL_RESULT, result_call.into_bytes());
+            *pkt = build_vendor_app_reply(
+                channel,
+                COMPANION_OP_REST_CALL_RESULT,
+                result_call.into_bytes(),
+            );
 
             return Ok(PacketAction::SendBack);
         }
@@ -794,8 +801,11 @@ pub(crate) async fn handle_vendor_channel_packet(
                 }
             };
 
-            *pkt =
-                build_vendor_app_reply(pkt.channel, COMPANION_OP_REST_CALL_REPLY, payload.into_bytes());
+            *pkt = build_vendor_app_reply(
+                pkt.channel,
+                COMPANION_OP_REST_CALL_REPLY,
+                payload.into_bytes(),
+            );
 
             Ok(PacketAction::SendBack)
         }

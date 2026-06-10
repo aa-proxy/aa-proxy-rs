@@ -1,17 +1,16 @@
+use crate::companion_protocol::{
+    COMPANION_OP_ECHO, COMPANION_OP_ECHO_REPLY, COMPANION_OP_ERROR, COMPANION_OP_GET_STATUS,
+    COMPANION_OP_ON_SCRIPT_EVENT, COMPANION_OP_ON_TOPIC_EVENT, COMPANION_OP_PING,
+    COMPANION_OP_PONG, COMPANION_OP_REST_CALL, COMPANION_OP_REST_CALL_REPLY,
+    COMPANION_OP_REST_CALL_RESULT, COMPANION_OP_REST_CALL_SYNC, COMPANION_OP_STATUS,
+    COMPANION_OP_SUBSCRIBE_TOPIC_EVENT, COMPANION_OP_UNSUBSCRIBE_TOPIC_EVENT,
+};
 use crate::config::AppConfig;
 use crate::config_types::HexdumpLevel;
 use crate::mitm::protos::ControlMessageType;
 use crate::mitm::protos::ControlMessageType::*;
 use crate::mitm::protos::*;
 use crate::mitm::{get_name, ModifyContext, Packet, ProxyType, Result};
-use crate::companion_protocol::{
-    COMPANION_OP_ECHO, COMPANION_OP_ECHO_REPLY, COMPANION_OP_ERROR,
-    COMPANION_OP_GET_STATUS, COMPANION_OP_ON_SCRIPT_EVENT, COMPANION_OP_ON_TOPIC_EVENT,
-    COMPANION_OP_PING, COMPANION_OP_PONG, COMPANION_OP_REST_CALL,
-    COMPANION_OP_REST_CALL_REPLY, COMPANION_OP_REST_CALL_RESULT,
-    COMPANION_OP_REST_CALL_SYNC, COMPANION_OP_STATUS,
-    COMPANION_OP_SUBSCRIBE_TOPIC_EVENT, COMPANION_OP_UNSUBSCRIBE_TOPIC_EVENT,
-};
 use log::{debug, info, log_enabled, Level};
 use protobuf::text_format::print_to_string_pretty;
 use protobuf::{Enum, Message};

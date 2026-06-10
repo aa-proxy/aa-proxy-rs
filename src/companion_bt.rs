@@ -5,8 +5,8 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use bluer::agent::{
     Agent, AgentHandle, AuthorizeService, DisplayPasskey, DisplayPinCode,
-    ReqResult as AgentReqResult, RequestAuthorization, RequestConfirmation,
-    RequestPasskey, RequestPinCode,
+    ReqResult as AgentReqResult, RequestAuthorization, RequestConfirmation, RequestPasskey,
+    RequestPinCode,
 };
 use bluer::rfcomm::{Profile, ProfileHandle, Role, Stream};
 use bluer::{Address, Session, Uuid};
@@ -92,7 +92,6 @@ struct TopicEventPayload {
     payload: String,
 }
 
-
 impl CompanionBtAuthState {
     async fn from_state(state: &AppState) -> Self {
         let cfg = state.config.read().await;
@@ -121,7 +120,10 @@ impl CompanionBtAuthState {
             authenticated: self.authenticated,
             version: COMPANION_APP_VERSION,
             algorithm: "HMAC-SHA256",
-            server_nonce: self.server_nonce.as_ref().map(|n| BASE64_STANDARD.encode(n)),
+            server_nonce: self
+                .server_nonce
+                .as_ref()
+                .map(|n| BASE64_STANDARD.encode(n)),
         })
     }
 }
@@ -156,9 +158,8 @@ fn random_bytes(len: usize) -> Vec<u8> {
 }
 
 fn companion_auth_message(server_nonce: &[u8], client_nonce: &[u8]) -> Vec<u8> {
-    let mut msg = Vec::with_capacity(
-        AUTH_HMAC_CONTEXT.len() + server_nonce.len() + client_nonce.len() + 1,
-    );
+    let mut msg =
+        Vec::with_capacity(AUTH_HMAC_CONTEXT.len() + server_nonce.len() + client_nonce.len() + 1);
     msg.extend_from_slice(AUTH_HMAC_CONTEXT);
     msg.extend_from_slice(server_nonce);
     msg.extend_from_slice(client_nonce);
@@ -219,7 +220,6 @@ fn validate_auth_token(token: &str) -> Result<String> {
     Ok(token.to_string())
 }
 
-
 async fn companion_trust_device(
     session: Session,
     adapter_name: String,
@@ -251,17 +251,26 @@ async fn companion_trust_device(
 }
 
 async fn companion_request_pin_code(req: RequestPinCode) -> AgentReqResult<String> {
-    info!("{} pairing: replying with fallback PIN 0000 for {}", NAME, req.device);
+    info!(
+        "{} pairing: replying with fallback PIN 0000 for {}",
+        NAME, req.device
+    );
     Ok("0000".to_string())
 }
 
 async fn companion_display_pin_code(req: DisplayPinCode) -> AgentReqResult<()> {
-    info!("{} pairing: display PIN-code request from {}: {}", NAME, req.device, req.pincode);
+    info!(
+        "{} pairing: display PIN-code request from {}: {}",
+        NAME, req.device, req.pincode
+    );
     Ok(())
 }
 
 async fn companion_request_passkey(req: RequestPasskey) -> AgentReqResult<u32> {
-    info!("{} pairing: replying with fallback passkey 000000 for {}", NAME, req.device);
+    info!(
+        "{} pairing: replying with fallback passkey 000000 for {}",
+        NAME, req.device
+    );
     Ok(0)
 }
 
@@ -288,7 +297,10 @@ async fn companion_request_authorization(
     req: RequestAuthorization,
     session: Session,
 ) -> AgentReqResult<()> {
-    info!("{} pairing: authorizing companion pairing from {}", NAME, req.device);
+    info!(
+        "{} pairing: authorizing companion pairing from {}",
+        NAME, req.device
+    );
     companion_trust_device(session, req.adapter.clone(), req.device).await
 }
 
@@ -321,7 +333,10 @@ pub async fn register_companion_pairing_agent(session: &Session) -> Result<Agent
     };
 
     let handle = session.register_agent(agent).await?;
-    info!("{} pairing: registered default Companion Classic BT pairing agent", NAME);
+    info!(
+        "{} pairing: registered default Companion Classic BT pairing agent",
+        NAME
+    );
     Ok(handle)
 }
 
@@ -443,7 +458,10 @@ async fn handle_client(stream: Stream, state: AppState) -> Result<()> {
                         writer.clone(),
                         COMPANION_OP_AUTH_OK,
                         frame.request_id,
-                        &AuthOkPayload { ok: true, message: "auth not required" },
+                        &AuthOkPayload {
+                            ok: true,
+                            message: "auth not required",
+                        },
                     )
                     .await?;
                     continue;
@@ -453,7 +471,8 @@ async fn handle_client(stream: Stream, state: AppState) -> Result<()> {
                     write_error(
                         writer.clone(),
                         frame.request_id,
-                        "BT auth token is not configured; use AUTH_SET_TOKEN provisioning".to_string(),
+                        "BT auth token is not configured; use AUTH_SET_TOKEN provisioning"
+                            .to_string(),
                     )
                     .await?;
                     continue;
@@ -462,8 +481,12 @@ async fn handle_client(stream: Stream, state: AppState) -> Result<()> {
                 let payload: AuthResponsePayload = match serde_json::from_slice(&frame.payload) {
                     Ok(payload) => payload,
                     Err(e) => {
-                        write_error(writer.clone(), frame.request_id, format!("invalid auth response payload: {e}"))
-                            .await?;
+                        write_error(
+                            writer.clone(),
+                            frame.request_id,
+                            format!("invalid auth response payload: {e}"),
+                        )
+                        .await?;
                         continue;
                     }
                 };
@@ -480,16 +503,24 @@ async fn handle_client(stream: Stream, state: AppState) -> Result<()> {
                 let client_nonce = match BASE64_STANDARD.decode(payload.client_nonce.as_bytes()) {
                     Ok(nonce) => nonce,
                     Err(e) => {
-                        write_error(writer.clone(), frame.request_id, format!("invalid client_nonce: {e}"))
-                            .await?;
+                        write_error(
+                            writer.clone(),
+                            frame.request_id,
+                            format!("invalid client_nonce: {e}"),
+                        )
+                        .await?;
                         continue;
                     }
                 };
                 let response = match BASE64_STANDARD.decode(payload.response.as_bytes()) {
                     Ok(response) => response,
                     Err(e) => {
-                        write_error(writer.clone(), frame.request_id, format!("invalid auth response: {e}"))
-                            .await?;
+                        write_error(
+                            writer.clone(),
+                            frame.request_id,
+                            format!("invalid auth response: {e}"),
+                        )
+                        .await?;
                         continue;
                     }
                 };
@@ -505,26 +536,43 @@ async fn handle_client(stream: Stream, state: AppState) -> Result<()> {
                         writer.clone(),
                         COMPANION_OP_AUTH_OK,
                         frame.request_id,
-                        &AuthOkPayload { ok: true, message: "authenticated" },
+                        &AuthOkPayload {
+                            ok: true,
+                            message: "authenticated",
+                        },
                     )
                     .await?;
                 } else {
-                    warn!("{} auth: HMAC authentication failed; closing connection", NAME);
-                    write_error(writer.clone(), frame.request_id, "authentication failed".to_string()).await?;
+                    warn!(
+                        "{} auth: HMAC authentication failed; closing connection",
+                        NAME
+                    );
+                    write_error(
+                        writer.clone(),
+                        frame.request_id,
+                        "authentication failed".to_string(),
+                    )
+                    .await?;
                     return Err("authentication failed".into());
                 }
                 continue;
             }
             COMPANION_OP_AUTH_SET_TOKEN => {
                 if !auth.required {
-                    write_error(writer.clone(), frame.request_id, "BT auth is not required".to_string()).await?;
+                    write_error(
+                        writer.clone(),
+                        frame.request_id,
+                        "BT auth is not required".to_string(),
+                    )
+                    .await?;
                     continue;
                 }
                 if auth.configured() && !auth.authenticated {
                     write_error(
                         writer.clone(),
                         frame.request_id,
-                        "BT auth token is already configured; authenticate before changing it".to_string(),
+                        "BT auth token is already configured; authenticate before changing it"
+                            .to_string(),
                     )
                     .await?;
                     continue;
@@ -533,16 +581,24 @@ async fn handle_client(stream: Stream, state: AppState) -> Result<()> {
                 let payload: AuthSetTokenPayload = match serde_json::from_slice(&frame.payload) {
                     Ok(payload) => payload,
                     Err(e) => {
-                        write_error(writer.clone(), frame.request_id, format!("invalid set-token payload: {e}"))
-                            .await?;
+                        write_error(
+                            writer.clone(),
+                            frame.request_id,
+                            format!("invalid set-token payload: {e}"),
+                        )
+                        .await?;
                         continue;
                     }
                 };
                 let token = match validate_auth_token(&payload.token) {
                     Ok(token) => token,
                     Err(e) => {
-                        write_error(writer.clone(), frame.request_id, format!("invalid auth token: {e}"))
-                            .await?;
+                        write_error(
+                            writer.clone(),
+                            frame.request_id,
+                            format!("invalid auth token: {e}"),
+                        )
+                        .await?;
                         continue;
                     }
                 };
@@ -555,12 +611,18 @@ async fn handle_client(stream: Stream, state: AppState) -> Result<()> {
                 auth.token = token;
                 auth.server_nonce = Some(random_bytes(AUTH_NONCE_LEN));
                 auth.authenticated = true;
-                info!("{} auth: companion BT auth token provisioned and saved", NAME);
+                info!(
+                    "{} auth: companion BT auth token provisioned and saved",
+                    NAME
+                );
                 write_json_frame(
                     writer.clone(),
                     COMPANION_OP_AUTH_OK,
                     frame.request_id,
-                    &AuthOkPayload { ok: true, message: "token provisioned" },
+                    &AuthOkPayload {
+                        ok: true,
+                        message: "token provisioned",
+                    },
                 )
                 .await?;
                 continue;
@@ -606,27 +668,41 @@ async fn handle_client(stream: Stream, state: AppState) -> Result<()> {
                 .await?;
             }
             COMPANION_OP_ECHO => {
-                write_raw_frame(writer.clone(), COMPANION_OP_ECHO_REPLY, frame.request_id, frame.payload)
-                    .await?;
+                write_raw_frame(
+                    writer.clone(),
+                    COMPANION_OP_ECHO_REPLY,
+                    frame.request_id,
+                    frame.payload,
+                )
+                .await?;
             }
             COMPANION_OP_REST_CALL | COMPANION_OP_REST_CALL_SYNC => {
                 let req: CompanionHttpRequest = match serde_json::from_slice(&frame.payload) {
                     Ok(req) => req,
                     Err(e) => {
-                        write_error(writer.clone(), frame.request_id, format!("invalid REST payload: {e}"))
-                            .await?;
+                        write_error(
+                            writer.clone(),
+                            frame.request_id,
+                            format!("invalid REST payload: {e}"),
+                        )
+                        .await?;
                         continue;
                     }
                 };
 
-                let response = match tokio::task::spawn_blocking(move || dispatch_companion_http(req)).await {
-                    Ok(response) => response,
-                    Err(e) => {
-                        write_error(writer.clone(), frame.request_id, format!("REST task failed: {e}"))
+                let response =
+                    match tokio::task::spawn_blocking(move || dispatch_companion_http(req)).await {
+                        Ok(response) => response,
+                        Err(e) => {
+                            write_error(
+                                writer.clone(),
+                                frame.request_id,
+                                format!("REST task failed: {e}"),
+                            )
                             .await?;
-                        continue;
-                    }
-                };
+                            continue;
+                        }
+                    };
 
                 write_json_frame(
                     writer.clone(),
@@ -640,34 +716,56 @@ async fn handle_client(stream: Stream, state: AppState) -> Result<()> {
                 let payload: TopicPayload = match serde_json::from_slice(&frame.payload) {
                     Ok(payload) => payload,
                     Err(e) => {
-                        write_error(writer.clone(), frame.request_id, format!("invalid subscribe payload: {e}"))
-                            .await?;
+                        write_error(
+                            writer.clone(),
+                            frame.request_id,
+                            format!("invalid subscribe payload: {e}"),
+                        )
+                        .await?;
                         continue;
                     }
                 };
                 subscriptions.lock().await.insert(payload.topic.clone());
-                write_raw_frame(writer.clone(), COMPANION_OP_STATUS, frame.request_id, b"{\"status\":1}".to_vec())
-                    .await?;
+                write_raw_frame(
+                    writer.clone(),
+                    COMPANION_OP_STATUS,
+                    frame.request_id,
+                    b"{\"status\":1}".to_vec(),
+                )
+                .await?;
             }
             COMPANION_OP_UNSUBSCRIBE_TOPIC_EVENT => {
                 let payload: TopicPayload = match serde_json::from_slice(&frame.payload) {
                     Ok(payload) => payload,
                     Err(e) => {
-                        write_error(writer.clone(), frame.request_id, format!("invalid unsubscribe payload: {e}"))
-                            .await?;
+                        write_error(
+                            writer.clone(),
+                            frame.request_id,
+                            format!("invalid unsubscribe payload: {e}"),
+                        )
+                        .await?;
                         continue;
                     }
                 };
                 subscriptions.lock().await.remove(&payload.topic);
-                write_raw_frame(writer.clone(), COMPANION_OP_STATUS, frame.request_id, b"{\"status\":1}".to_vec())
-                    .await?;
+                write_raw_frame(
+                    writer.clone(),
+                    COMPANION_OP_STATUS,
+                    frame.request_id,
+                    b"{\"status\":1}".to_vec(),
+                )
+                .await?;
             }
             COMPANION_OP_ON_SCRIPT_EVENT => {
                 let payload: TopicEventPayload = match serde_json::from_slice(&frame.payload) {
                     Ok(payload) => payload,
                     Err(e) => {
-                        write_error(writer.clone(), frame.request_id, format!("invalid script event payload: {e}"))
-                            .await?;
+                        write_error(
+                            writer.clone(),
+                            frame.request_id,
+                            format!("invalid script event payload: {e}"),
+                        )
+                        .await?;
                         continue;
                     }
                 };
@@ -675,12 +773,21 @@ async fn handle_client(stream: Stream, state: AppState) -> Result<()> {
                     topic: payload.topic,
                     payload: payload.payload,
                 });
-                write_raw_frame(writer.clone(), COMPANION_OP_STATUS, frame.request_id, b"{\"status\":1}".to_vec())
-                    .await?;
+                write_raw_frame(
+                    writer.clone(),
+                    COMPANION_OP_STATUS,
+                    frame.request_id,
+                    b"{\"status\":1}".to_vec(),
+                )
+                .await?;
             }
             _ => {
-                write_error(writer.clone(), frame.request_id, format!("unknown op 0x{:02x}", frame.op))
-                    .await?;
+                write_error(
+                    writer.clone(),
+                    frame.request_id,
+                    format!("unknown op 0x{:02x}", frame.op),
+                )
+                .await?;
             }
         }
     }
@@ -714,7 +821,9 @@ fn spawn_event_forwarder(
                 topic: event.topic,
                 payload: event.payload,
             };
-            if let Err(e) = write_json_frame(writer.clone(), COMPANION_OP_ON_TOPIC_EVENT, 0, &payload).await {
+            if let Err(e) =
+                write_json_frame(writer.clone(), COMPANION_OP_ON_TOPIC_EVENT, 0, &payload).await
+            {
                 warn!("{} failed to forward event over BT: {}", NAME, e);
                 break;
             }

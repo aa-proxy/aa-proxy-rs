@@ -41,8 +41,8 @@ use std::fs;
 use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -77,7 +77,6 @@ const REBOOT_CMD: &str = "/sbin/reboot";
 const DEFAULT_KERNEL_MODULE_PATH: &str = "/data/aa-proxy-rs/firmware";
 const FIRMWARE_CLASS_PATH_PARAM: &str = "/sys/module/firmware_class/parameters/path";
 
-
 /// AndroidAuto wired/wireless proxy
 #[derive(Parser, Debug)]
 #[clap(version, long_about = None, about = format!(
@@ -103,8 +102,6 @@ struct Args {
     #[clap(short = 'o', long)]
     generate_hostapd: bool,
 }
-
-
 
 fn configure_kernel_module_path_for_config(cfg: &AppConfig) {
     let configured_path = cfg.kernel_module_path.trim();
@@ -228,7 +225,10 @@ fn preload_kernel_modules_for_config(cfg: &AppConfig) {
             continue;
         }
 
-        info!("{} 🧩 Loading kernel module with modprobe: {}", NAME, module);
+        info!(
+            "{} 🧩 Loading kernel module with modprobe: {}",
+            NAME, module
+        );
         match Command::new("modprobe").arg(&module).output() {
             Ok(output) if output.status.success() => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
@@ -289,7 +289,9 @@ fn push_unique_iface(out: &mut Vec<String>, iface: &str, exclude_iface: &str) {
 }
 
 fn iface_device_path_looks_usb(iface: &str) -> bool {
-    let path = std::path::Path::new("/sys/class/net").join(iface).join("device");
+    let path = std::path::Path::new("/sys/class/net")
+        .join(iface)
+        .join("device");
     match fs::canonicalize(path) {
         Ok(real) => real.to_string_lossy().contains("/usb"),
         Err(_) => false,
@@ -824,7 +826,10 @@ async fn tokio_main(
                     )
                     .await
                 {
-                    warn!("{} bt_wireless_proxy phone-like SDP registration failed: {}", NAME, e);
+                    warn!(
+                        "{} bt_wireless_proxy phone-like SDP registration failed: {}",
+                        NAME, e
+                    );
                 }
             }
         }
@@ -902,11 +907,12 @@ async fn tokio_main(
                         )
                         .await
                 } else if proxy_mode == "car-wifi-mitm" || proxy_mode == "wifi-mitm" {
-                    let car_wifi_base_iface = if cfg.bt_wireless_proxy_car_wifi_base_iface.trim().is_empty() {
-                        cfg.iface.clone()
-                    } else {
-                        cfg.bt_wireless_proxy_car_wifi_base_iface.clone()
-                    };
+                    let car_wifi_base_iface =
+                        if cfg.bt_wireless_proxy_car_wifi_base_iface.trim().is_empty() {
+                            cfg.iface.clone()
+                        } else {
+                            cfg.bt_wireless_proxy_car_wifi_base_iface.clone()
+                        };
                     bluetooth
                         .aa_wireless_car_wifi_mitm_proxy(
                             cfg.connect.clone(),
@@ -932,13 +938,24 @@ async fn tokio_main(
                                 tcp_start: tcp_start.clone(),
                                 tcp_phone_connected: tcp_phone_connected.clone(),
                                 tcp_phone_connection_seq: tcp_phone_connection_seq.clone(),
-                                use_version_projection_fallback: cfg.bt_wireless_proxy_use_version_projection_fallback,
+                                use_version_projection_fallback: cfg
+                                    .bt_wireless_proxy_use_version_projection_fallback,
                                 wpp_keepalive: cfg.bt_wireless_proxy_wpp_keepalive,
-                                wpp_keepalive_interval: Duration::from_millis(cfg.bt_wireless_proxy_wpp_keepalive_interval_ms.max(250)),
-                                wpactrl_socket_timeout: Duration::from_secs(cfg.bt_wireless_proxy_wpactrl_socket_timeout_secs.max(1)),
-                                wifi_association_timeout: Duration::from_secs(cfg.bt_wireless_proxy_wifi_association_timeout_secs.max(1)),
-                                dhcp_timeout: Duration::from_secs(cfg.bt_wireless_proxy_dhcp_timeout_secs.max(1)),
-                                hu_first_wait_phone_timeout: Duration::from_secs(cfg.bt_wireless_proxy_hu_first_wait_phone_secs.max(1)),
+                                wpp_keepalive_interval: Duration::from_millis(
+                                    cfg.bt_wireless_proxy_wpp_keepalive_interval_ms.max(250),
+                                ),
+                                wpactrl_socket_timeout: Duration::from_secs(
+                                    cfg.bt_wireless_proxy_wpactrl_socket_timeout_secs.max(1),
+                                ),
+                                wifi_association_timeout: Duration::from_secs(
+                                    cfg.bt_wireless_proxy_wifi_association_timeout_secs.max(1),
+                                ),
+                                dhcp_timeout: Duration::from_secs(
+                                    cfg.bt_wireless_proxy_dhcp_timeout_secs.max(1),
+                                ),
+                                hu_first_wait_phone_timeout: Duration::from_secs(
+                                    cfg.bt_wireless_proxy_hu_first_wait_phone_secs.max(1),
+                                ),
                                 bt_timeout: Duration::from_secs(cfg.bt_timeout_secs.into()),
                                 stopped: cfg.action_requested == Some(Action::Stop),
                             },

@@ -398,7 +398,11 @@ pub struct AppConfig {
     /// car-wifi-mitm HU-first mode: how long to keep the HU RFCOMM connection open
     /// while waiting for the phone. HU frames received meanwhile are buffered.
     pub bt_wireless_proxy_hu_first_wait_phone_secs: u64,
-    #[serde(default, alias = "bt_wireless_poc_hu_channel", deserialize_with = "empty_string_as_none")]
+    #[serde(
+        default,
+        alias = "bt_wireless_poc_hu_channel",
+        deserialize_with = "empty_string_as_none"
+    )]
     pub bt_wireless_proxy_hu_channel: Option<u8>,
     #[serde(alias = "bt_wireless_poc_tcp_probe")]
     pub bt_wireless_proxy_tcp_probe: bool,
@@ -1141,7 +1145,8 @@ impl AppConfig {
         doc["bt_wireless_proxy_hu_mac"] = value(self.bt_wireless_proxy_hu_mac.clone());
         doc["bt_wireless_proxy_pairing_window_secs"] =
             value(self.bt_wireless_proxy_pairing_window_secs as i64);
-        doc["bt_wireless_proxy_phone_like_pairing"] = value(self.bt_wireless_proxy_phone_like_pairing);
+        doc["bt_wireless_proxy_phone_like_pairing"] =
+            value(self.bt_wireless_proxy_phone_like_pairing);
         doc["bt_wireless_proxy_phone_like_pairing_alias"] =
             value(self.bt_wireless_proxy_phone_like_pairing_alias.clone());
         doc["bt_wireless_proxy_phone_like_pairing_class"] =
@@ -1171,8 +1176,7 @@ impl AppConfig {
             value(self.bt_wireless_proxy_wifi_association_timeout_secs as i64);
         doc["bt_wireless_proxy_dhcp_timeout_secs"] =
             value(self.bt_wireless_proxy_dhcp_timeout_secs as i64);
-        doc["bt_wireless_proxy_car_wifi_keep_ap"] =
-            value(self.bt_wireless_proxy_car_wifi_keep_ap);
+        doc["bt_wireless_proxy_car_wifi_keep_ap"] = value(self.bt_wireless_proxy_car_wifi_keep_ap);
         doc["bt_wireless_proxy_car_wifi_sta_iface"] =
             value(self.bt_wireless_proxy_car_wifi_sta_iface.clone());
         doc["bt_wireless_proxy_car_wifi_sta_phy"] =
@@ -1182,8 +1186,7 @@ impl AppConfig {
         doc["bt_wireless_proxy_phone_wifi_mode"] =
             value(self.bt_wireless_proxy_phone_wifi_mode.clone());
         doc["bt_wireless_proxy_rewrite_ip"] = value(self.bt_wireless_proxy_rewrite_ip.clone());
-        doc["bt_wireless_proxy_listen_port"] =
-            value(self.bt_wireless_proxy_listen_port as i64);
+        doc["bt_wireless_proxy_listen_port"] = value(self.bt_wireless_proxy_listen_port as i64);
         doc["bt_wireless_proxy_use_version_projection_fallback"] =
             value(self.bt_wireless_proxy_use_version_projection_fallback);
         doc["bt_wireless_proxy_wpp_keepalive"] = value(self.bt_wireless_proxy_wpp_keepalive);
