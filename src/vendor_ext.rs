@@ -244,15 +244,6 @@ fn build_vendor_app_reply(channel: u8, opcode: u8, payload: Vec<u8>) -> Packet {
     }
 }
 
-fn build_vendor_app_reply_fragments(channel: u8, opcode: u8, payload: Vec<u8>) -> Vec<Packet> {
-    build_vendor_app_reply_fragments_with_chunk_size(
-        channel,
-        opcode,
-        payload,
-        COMPANION_APP_FRAGMENT_CHUNK_SIZE,
-    )
-}
-
 fn build_vendor_app_reply_fragments_with_chunk_size(
     channel: u8,
     opcode: u8,
@@ -305,19 +296,6 @@ fn build_vendor_app_reply_fragments_with_chunk_size(
     }
 
     packets
-}
-
-async fn send_vendor_app_reply_fragments(
-    tx: Sender<Packet>,
-    channel: u8,
-    opcode: u8,
-    payload: Vec<u8>,
-) -> std::result::Result<(), tokio::sync::mpsc::error::SendError<Packet>> {
-    for reply in build_vendor_app_reply_fragments(channel, opcode, payload) {
-        tx.send(reply).await?;
-    }
-
-    Ok(())
 }
 
 fn build_error_reply(channel: u8, message: impl Into<String>) -> Packet {
