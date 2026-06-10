@@ -31,6 +31,7 @@ pub mod mitm_prettyprint;
 pub mod mpegts;
 pub mod packet_fragment;
 pub mod proxy;
+pub mod bt_real_hu_passthrough;
 #[cfg(feature = "wasm-scripting")]
 pub mod script_wasm;
 pub mod sdr_ui;
