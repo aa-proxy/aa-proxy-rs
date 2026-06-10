@@ -181,6 +181,9 @@ pub struct ModifyContext {
     pub(crate) injected_channels: HashSet<u8>,
     /// Synthetic Bluetooth passthrough service/channel, if advertised by aa-proxy-rs.
     pub(crate) injected_bluetooth_channel: Option<u8>,
+    /// Whether the synthetic real-HU Bluetooth passthrough channel has been
+    /// opened by the phone and should be kept logically alive locally.
+    pub(crate) bt_real_hu_passthrough_channel_open: bool,
     /// Injected media service_id/channel -> display type.
     pub(crate) injected_media_display: HashMap<u8, DisplayType>,
     /// Injected media service_id/channel -> inject-displays.toml profile id.
@@ -1685,6 +1688,18 @@ pub async fn pkt_modify_hook(
                 );
             }
 
+            // BT real-HU passthrough owns its synthetic channel lifecycle locally.
+            // Handle channel-0 opens here so the channel is marked active before
+            // Bluetooth pairing messages arrive on the service channel.
+            if let Some(action) = bt_maybe_handle_real_hu_passthrough_packet(
+                proxy_type,
+                pkt,
+                ctx,
+                cfg,
+            )? {
+                return Ok(action);
+            }
+
             // display code
             let injected = ctx.injected_service_ids.contains(&msg.service_id());
             let hu_known = ctx.hu_service_ids.contains(&msg.service_id());
@@ -3106,6 +3121,7 @@ pub async fn proxy<D: IoDeviceTrait>(
         injected_service_ids: HashSet::new(),
         injected_channels: HashSet::new(),
         injected_bluetooth_channel: None,
+        bt_real_hu_passthrough_channel_open: false,
         injected_media_display: HashMap::new(),
         injected_media_profile_ids: HashMap::new(),
         injected_media_state: HashMap::new(),
@@ -3138,6 +3154,20 @@ pub async fn proxy<D: IoDeviceTrait>(
                     .get(0..2)
                     .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]));
 
+                if let Some(action) = bt_maybe_handle_real_hu_passthrough_packet(
+                    proxy_type,
+                    &mut pkt,
+                    &mut ctx,
+                    &cfg,
+                )? {
+                    match action {
+                        PacketAction::SendBack => tx.send(pkt).await?,
+                        PacketAction::Drop => {}
+                        PacketAction::Forward | PacketAction::Replace(_) => {}
+                    }
+                    continue;
+                }
+
                 // Service-channel CHANNEL_OPEN_REQUESTs for injected services are sent on
                 // the service channel itself (for example 0x08/0x0a), not always on channel 0.
                 // Keep the synthetic service hidden from the real HU, but answer the phone
@@ -3169,20 +3199,6 @@ pub async fn proxy<D: IoDeviceTrait>(
                     );
 
                     tx.send(pkt).await?;
-                    continue;
-                }
-
-                if let Some(action) = bt_maybe_handle_real_hu_passthrough_packet(
-                    proxy_type,
-                    &mut pkt,
-                    &ctx,
-                    &cfg,
-                )? {
-                    match action {
-                        PacketAction::SendBack => tx.send(pkt).await?,
-                        PacketAction::Drop => {}
-                        PacketAction::Forward | PacketAction::Replace(_) => {}
-                    }
                     continue;
                 }
 
@@ -3426,6 +3442,7 @@ mod tests {
             injected_service_ids: HashSet::new(),
             injected_channels: HashSet::new(),
             injected_bluetooth_channel: None,
+            bt_real_hu_passthrough_channel_open: false,
             injected_media_display: HashMap::new(),
             injected_media_profile_ids: HashMap::new(),
             injected_media_state: HashMap::new(),
