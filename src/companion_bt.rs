@@ -11,9 +11,9 @@ use bluer::agent::{
 use bluer::rfcomm::{Profile, ProfileHandle, Role, Stream};
 use bluer::{Address, Session, Uuid};
 use futures::{FutureExt, StreamExt};
-use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use simplelog::*;
 use std::collections::HashSet;
 use std::io::Read;
 use std::sync::Arc;
