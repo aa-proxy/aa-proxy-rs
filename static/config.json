@@ -75,6 +75,14 @@
           "typ": "boolean",
           "description": "Enable Classic Bluetooth/RFCOMM companion transport"
         },
+        "companion_bt_auth_required": {
+          "typ": "boolean",
+          "description": "Require application-level HMAC authentication for Classic Bluetooth companion transport. Pairing behavior is unchanged; auth gates companion commands after RFCOMM connects."
+        },
+        "companion_bt_auth_token": {
+          "typ": "string",
+          "description": "Shared Classic Bluetooth companion auth token. Leave empty for first-run provisioning; the companion app can generate and install a long random token, then future BT connections use HMAC challenge-response. Do not share this value."
+        },
         "advertise": {
           "typ": "boolean",
           "description": "Make the Bluetooth adapter discoverable"
