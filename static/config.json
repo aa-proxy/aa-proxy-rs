@@ -119,208 +119,217 @@
           "typ": "boolean",
           "description": "EXPERIMENTAL Proxy: enable AA Wireless Bluetooth RFCOMM bridge/probe against a real wireless-capable HU. Disabled by default.",
           "advanced": true
-        },
-        "bt_wireless_proxy_mode": {
-          "typ": "string",
-          "description": "EXPERIMENTAL Proxy mode: bridge = relay phone<->HU RFCOMM using one adapter; probe = connect to HU and emulate only the Wi-Fi bootstrap frames; car-wifi-mitm = delay/modify BT Wi-Fi bootstrap, join car Wi-Fi, and raw-relay TCP.",
-          "values": [
-            "bridge",
-            "probe",
-            "car-wifi-mitm"
-          ],
-          "advanced": true
-        },
-        "bt_wireless_proxy_hu_mac": {
-          "typ": "string",
-          "description": "EXPERIMENTAL Proxy: Bluetooth MAC address of the wireless-capable head unit.",
-          "advanced": true,
-          "requires": "bt_wireless_proxy"
-        },
-        "bt_wireless_proxy_phone_wifi_mode": {
-          "typ": "radio",
-          "description": "EXPERIMENTAL Proxy car-wifi-mitm: phone-facing Wi-Fi mode. car_ap forwards HU/car Wi-Fi credentials to the phone. proxy_ap uses a single radio and creates a virtual phone AP. external_ap keeps the phone on the base aa-proxy AP while an external/USB STA joins the HU/car Wi-Fi.",
-          "values": [
-            "car_ap",
-            "proxy_ap",
-            "external_ap"
-          ],
-          "advanced": true,
-          "requires": "bt_wireless_proxy"
-        },
-        "bt_wireless_proxy_pairing_window_secs": {
-          "typ": "integer",
-          "description": "AA Wireless proxy: if the configured HU is not paired/trusted, keep aa-proxy pairable/discoverable for this many seconds and auto-accept pairing only from bt_wireless_proxy_hu_mac. Default: 120.",
-          "advanced": true,
-          "requires": "bt_wireless_proxy"
-        },
-        "bt_wireless_proxy_phone_like_pairing": {
-          "typ": "boolean",
-          "description": "AA Wireless proxy: during HU pairing preflight, temporarily make the local Bluetooth adapter look more like a phone by changing its alias and Classic Bluetooth Class of Device. Useful for HUs such as MBUX that may hide non-phone devices from the pair-phone screen. Restored after the pairing window. Default: false.",
-          "advanced": true,
-          "requires": "bt_wireless_proxy"
-        },
-        "bt_wireless_proxy_phone_like_pairing_alias": {
-          "typ": "string",
-          "description": "AA Wireless proxy: temporary Bluetooth alias used only while bt_wireless_proxy_phone_like_pairing is active. Empty means AndroidAuto.",
-          "advanced": true,
-          "requires": "bt_wireless_proxy"
-        },
-        "bt_wireless_proxy_phone_like_pairing_class": {
-          "typ": "string",
-          "description": "AA Wireless proxy: temporary Classic Bluetooth Class of Device used only while bt_wireless_proxy_phone_like_pairing is active. Examples: 0x00020C = phone/smartphone; 0x5A020C = more phone-like with service bits. Requires hciconfig on the SBC.",
-          "advanced": true,
-          "requires": "bt_wireless_proxy"
-        },
-        "bt_wireless_proxy_phone_like_sdp_profiles": {
-          "typ": "boolean",
-          "description": "AA Wireless proxy: register additional dummy phone-like SDP service UUIDs while bt_wireless_proxy is enabled. This is for HUs such as MBUX that classify paired devices by SDP profile list. The AA Wireless UUID remains registered and is never removed. Dummy profiles only advertise UUIDs and log/close incoming connections; they do not implement HFP/PBAP/MAP semantics. Default: false.",
-          "advanced": true,
-          "requires": "bt_wireless_proxy"
-        },
-        "bt_wireless_proxy_phone_like_sdp_profile_set": {
-          "typ": "select",
-          "description": "AA Wireless proxy: dummy phone-like SDP profile set. minimal advertises HFP AG, PBAP Server, MAP Server, OPP, Audio Source, and AVRCP Target. full additionally advertises HSP AG, AVRCP Remote/Controller, PANU, NAP, and PnP Information. Use minimal first.",
-          "values": [
-            "minimal",
-            "full"
-          ],
-          "advanced": true,
-          "requires": "bt_wireless_proxy_phone_like_sdp_profiles"
-        },
-        "bt_wireless_proxy_rendezvous_mode": {
-          "typ": "select",
-          "description": "EXPERIMENTAL Proxy car-wifi-mitm Bluetooth rendezvous strategy. auto tries the HU-first buffered path first and falls back to phone-first if the phone AA RFCOMM never arrives. hu_first and phone_first force the strict old order. Default: auto.",
-          "values": [
-            "auto",
-            "hu_first",
-            "phone_first"
-          ],
-          "advanced": true,
-          "requires": "bt_wireless_proxy"
-        },
-        "bt_wireless_proxy_hu_first_wait_phone_secs": {
-          "typ": "integer",
-          "description": "EXPERIMENTAL Proxy car-wifi-mitm HU-first mode: seconds to keep the HU RFCOMM connection open while waiting for the phone AA RFCOMM connection. Default: 30.",
-          "advanced": true,
-          "requires": "bt_wireless_proxy"
-        },
-        "bt_wireless_proxy_hu_channel": {
-          "typ": "integer",
-          "description": "EXPERIMENTAL Proxy: RFCOMM channel for HU AA Wireless profile. Leave empty or use 0 for BlueZ SDP/ConnectProfile auto-discovery; set a positive value to force manual RFCOMM.",
-          "advanced": true,
-          "requires": "bt_wireless_proxy"
-        },
-        "bt_wireless_proxy_tcp_probe": {
-          "typ": "boolean",
-          "description": "EXPERIMENTAL Proxy probe mode: after WifiStartRequest, try a TCP connection to the HU AA endpoint before sending WifiConnectStatus.",
-          "advanced": true,
-          "requires": "bt_wireless_proxy"
-        },
-        "bt_wireless_proxy_car_wifi_base_iface": {
-          "typ": "string",
-          "description": "EXPERIMENTAL Proxy car-wifi-mitm: base Wi-Fi interface. Empty falls back to global iface. In proxy_ap this starts as the base/single-radio interface; in external_ap this is the phone-facing AP interface, usually wlan0.",
-          "advanced": true,
-          "requires": "bt_wireless_proxy"
-        },
-        "bt_wireless_proxy_car_wifi_join_cmd": {
-          "typ": "string",
-          "description": "EXPERIMENTAL Proxy car-wifi-mitm: optional shell command template for joining the HU Wi-Fi. Placeholders: {iface}, {ssid}, {bssid}, {key}, {security}. Non-empty custom command overrides automatic nmcli/wpa_cli join.",
-          "advanced": true,
-          "requires": "bt_wireless_proxy"
-        },
-        "bt_wireless_proxy_car_wifi_auto_join": {
-          "typ": "boolean",
-          "description": "EXPERIMENTAL Proxy car-wifi-mitm: if true and no custom command is configured, try to join HU Wi-Fi automatically using nmcli, wpa_cli, or wpa_supplicant/udhcpc.",
-          "advanced": true,
-          "requires": "bt_wireless_proxy"
-        },
-        "bt_wireless_proxy_wifi_join_control": {
-          "typ": "select",
-          "description": "EXPERIMENTAL Proxy car-wifi-mitm: automatic Wi-Fi join backend. auto/legacy keeps the old fallback chain. wpactrl starts/uses wpa_supplicant and configures it through its control socket. nmcli, wpa_cli, and wpa_supplicant force a single backend.",
-          "values": [
-            "auto",
-            "legacy",
-            "wpactrl",
-            "wpa_supplicant",
-            "wpa_cli",
-            "nmcli"
-          ],
-          "advanced": true,
-          "requires": "bt_wireless_proxy"
-        },
-        "bt_wireless_proxy_wpactrl_socket_timeout_secs": {
-          "typ": "integer",
-          "description": "EXPERIMENTAL Proxy car-wifi-mitm: seconds to wait for /var/run/wpa_supplicant/<iface> to appear after starting wpa_supplicant in wpactrl mode. Default: 12.",
-          "advanced": true,
-          "requires": "bt_wireless_proxy"
-        },
-        "bt_wireless_proxy_wifi_association_timeout_secs": {
-          "typ": "integer",
-          "description": "EXPERIMENTAL Proxy car-wifi-mitm: seconds to wait for the STA interface to associate to the HU/car SSID and have an IPv4 address after a Wi-Fi join attempt. Default: 30.",
-          "advanced": true,
-          "requires": "bt_wireless_proxy"
-        },
-        "bt_wireless_proxy_dhcp_timeout_secs": {
-          "typ": "integer",
-          "description": "EXPERIMENTAL Proxy car-wifi-mitm: seconds to allow udhcpc/DHCP attempts to run. Default: 30.",
-          "advanced": true,
-          "requires": "bt_wireless_proxy"
-        },
-        "bt_wireless_proxy_car_wifi_keep_ap": {
-          "typ": "boolean",
-          "description": "EXPERIMENTAL Proxy car-wifi-mitm: keep aa-proxy AP up and join HU Wi-Fi through a separate managed STA interface. Requires AP+managed support on the same channel.",
-          "advanced": true,
-          "requires": "bt_wireless_proxy"
-        },
-        "bt_wireless_proxy_car_wifi_sta_iface": {
-          "typ": "string",
-          "description": "EXPERIMENTAL Proxy car-wifi-mitm: managed STA interface used to join HU/car Wi-Fi. In external_ap, empty auto-detects a USB WLAN interface and falls back to wlan1.",
-          "advanced": true,
-          "requires": "bt_wireless_proxy"
-        },
-        "bt_wireless_proxy_car_wifi_sta_phy": {
-          "typ": "string",
-          "description": "EXPERIMENTAL Proxy car-wifi-mitm: optional PHY used to create the managed STA interface in keep_ap/proxy_ap mode. Empty auto-detects from the AP interface. Example: phy1.",
-          "advanced": true,
-          "requires": "bt_wireless_proxy"
-        },
-        "bt_wireless_proxy_car_wifi_ap_iface": {
-          "typ": "string",
-          "description": "EXPERIMENTAL Proxy car-wifi-mitm: existing AP interface to keep when keep_ap is true. Empty falls back to iface.",
-          "advanced": true,
-          "requires": "bt_wireless_proxy"
-        },
-        "bt_wireless_proxy_rewrite_ip": {
-          "typ": "string",
-          "description": "EXPERIMENTAL Proxy car-wifi-mitm: IP address to place in the phone-facing WifiStartRequest. Empty means auto-detect using route/interface IPv4.",
-          "advanced": true,
-          "requires": "bt_wireless_proxy"
-        },
-        "bt_wireless_proxy_listen_port": {
-          "typ": "integer",
-          "description": "EXPERIMENTAL Proxy car-wifi-mitm: local TCP port where aa-proxy listens for the phone, default 5288.",
-          "advanced": true,
-          "requires": "bt_wireless_proxy"
-        },
-        "bt_wireless_proxy_use_version_projection_fallback": {
-          "typ": "boolean",
-          "description": "EXPERIMENTAL Proxy car-wifi-mitm: if WifiVersionRequest includes WifiProjectionProtocolInfo ip/port and HU does not send explicit WifiStartRequest, synthesize WifiStartRequest from that endpoint. Default: true.",
-          "advanced": true,
-          "requires": "bt_wireless_proxy"
-        },
-        "bt_wireless_proxy_wpp_keepalive": {
-          "typ": "boolean",
-          "description": "EXPERIMENTAL Proxy car-wifi-mitm: send synthetic WPP WifiPingRequest keepalive frames to the HU while aa-proxy is joining Wi-Fi / starting proxy_ap and waiting for phone Wi-Fi bootstrap. Default: false.",
-          "advanced": true,
-          "requires": "bt_wireless_proxy"
-        },
-        "bt_wireless_proxy_wpp_keepalive_interval_ms": {
-          "typ": "integer",
-          "description": "EXPERIMENTAL Proxy car-wifi-mitm: interval in milliseconds for synthetic HU WPP WifiPingRequest keepalives. Default: 2000; minimum used by code: 250.",
-          "advanced": true,
-          "requires": "bt_wireless_proxy"
         }
-      }
+      },
+      "subsections": [
+        {
+          "title": "📡 AA Wireless proxy",
+          "requires": "bt_wireless_proxy",
+          "advanced": true,
+          "values": {
+            "bt_wireless_proxy_mode": {
+              "typ": "string",
+              "description": "EXPERIMENTAL Proxy mode: bridge = relay phone<->HU RFCOMM using one adapter; probe = connect to HU and emulate only the Wi-Fi bootstrap frames; car-wifi-mitm = delay/modify BT Wi-Fi bootstrap, join car Wi-Fi, and raw-relay TCP.",
+              "values": [
+                "bridge",
+                "probe",
+                "car-wifi-mitm"
+              ],
+              "advanced": true
+            },
+            "bt_wireless_proxy_hu_mac": {
+              "typ": "string",
+              "description": "EXPERIMENTAL Proxy: Bluetooth MAC address of the wireless-capable head unit.",
+              "advanced": true,
+              "requires": "bt_wireless_proxy"
+            },
+            "bt_wireless_proxy_phone_wifi_mode": {
+              "typ": "radio",
+              "description": "EXPERIMENTAL Proxy car-wifi-mitm: phone-facing Wi-Fi mode. car_ap forwards HU/car Wi-Fi credentials to the phone. proxy_ap uses a single radio and creates a virtual phone AP. external_ap keeps the phone on the base aa-proxy AP while an external/USB STA joins the HU/car Wi-Fi.",
+              "values": [
+                "car_ap",
+                "proxy_ap",
+                "external_ap"
+              ],
+              "advanced": true,
+              "requires": "bt_wireless_proxy"
+            },
+            "bt_wireless_proxy_pairing_window_secs": {
+              "typ": "integer",
+              "description": "AA Wireless proxy: if the configured HU is not paired/trusted, keep aa-proxy pairable/discoverable for this many seconds and auto-accept pairing only from bt_wireless_proxy_hu_mac. Default: 120.",
+              "advanced": true,
+              "requires": "bt_wireless_proxy"
+            },
+            "bt_wireless_proxy_phone_like_pairing": {
+              "typ": "boolean",
+              "description": "AA Wireless proxy: during HU pairing preflight, temporarily make the local Bluetooth adapter look more like a phone by changing its alias and Classic Bluetooth Class of Device. Useful for HUs such as MBUX that may hide non-phone devices from the pair-phone screen. Restored after the pairing window. Default: false.",
+              "advanced": true,
+              "requires": "bt_wireless_proxy"
+            },
+            "bt_wireless_proxy_phone_like_pairing_alias": {
+              "typ": "string",
+              "description": "AA Wireless proxy: temporary Bluetooth alias used only while bt_wireless_proxy_phone_like_pairing is active. Empty means AndroidAuto.",
+              "advanced": true,
+              "requires": "bt_wireless_proxy"
+            },
+            "bt_wireless_proxy_phone_like_pairing_class": {
+              "typ": "string",
+              "description": "AA Wireless proxy: temporary Classic Bluetooth Class of Device used only while bt_wireless_proxy_phone_like_pairing is active. Examples: 0x00020C = phone/smartphone; 0x5A020C = more phone-like with service bits. Requires hciconfig on the SBC.",
+              "advanced": true,
+              "requires": "bt_wireless_proxy"
+            },
+            "bt_wireless_proxy_phone_like_sdp_profiles": {
+              "typ": "boolean",
+              "description": "AA Wireless proxy: register additional dummy phone-like SDP service UUIDs while bt_wireless_proxy is enabled. This is for HUs such as MBUX that classify paired devices by SDP profile list. The AA Wireless UUID remains registered and is never removed. Dummy profiles only advertise UUIDs and log/close incoming connections; they do not implement HFP/PBAP/MAP semantics. Default: false.",
+              "advanced": true,
+              "requires": "bt_wireless_proxy"
+            },
+            "bt_wireless_proxy_phone_like_sdp_profile_set": {
+              "typ": "select",
+              "description": "AA Wireless proxy: dummy phone-like SDP profile set. minimal advertises HFP AG, PBAP Server, MAP Server, OPP, Audio Source, and AVRCP Target. full additionally advertises HSP AG, AVRCP Remote/Controller, PANU, NAP, and PnP Information. Use minimal first.",
+              "values": [
+                "minimal",
+                "full"
+              ],
+              "advanced": true,
+              "requires": "bt_wireless_proxy_phone_like_sdp_profiles"
+            },
+            "bt_wireless_proxy_rendezvous_mode": {
+              "typ": "select",
+              "description": "EXPERIMENTAL Proxy car-wifi-mitm Bluetooth rendezvous strategy. auto tries the HU-first buffered path first and falls back to phone-first if the phone AA RFCOMM never arrives. hu_first and phone_first force the strict old order. Default: auto.",
+              "values": [
+                "auto",
+                "hu_first",
+                "phone_first"
+              ],
+              "advanced": true,
+              "requires": "bt_wireless_proxy"
+            },
+            "bt_wireless_proxy_hu_first_wait_phone_secs": {
+              "typ": "integer",
+              "description": "EXPERIMENTAL Proxy car-wifi-mitm HU-first mode: seconds to keep the HU RFCOMM connection open while waiting for the phone AA RFCOMM connection. Default: 30.",
+              "advanced": true,
+              "requires": "bt_wireless_proxy"
+            },
+            "bt_wireless_proxy_hu_channel": {
+              "typ": "integer",
+              "description": "EXPERIMENTAL Proxy: RFCOMM channel for HU AA Wireless profile. Leave empty or use 0 for BlueZ SDP/ConnectProfile auto-discovery; set a positive value to force manual RFCOMM.",
+              "advanced": true,
+              "requires": "bt_wireless_proxy"
+            },
+            "bt_wireless_proxy_tcp_probe": {
+              "typ": "boolean",
+              "description": "EXPERIMENTAL Proxy probe mode: after WifiStartRequest, try a TCP connection to the HU AA endpoint before sending WifiConnectStatus.",
+              "advanced": true,
+              "requires": "bt_wireless_proxy"
+            },
+            "bt_wireless_proxy_car_wifi_base_iface": {
+              "typ": "string",
+              "description": "EXPERIMENTAL Proxy car-wifi-mitm: base Wi-Fi interface. Empty falls back to global iface. In proxy_ap this starts as the base/single-radio interface; in external_ap this is the phone-facing AP interface, usually wlan0.",
+              "advanced": true,
+              "requires": "bt_wireless_proxy"
+            },
+            "bt_wireless_proxy_car_wifi_join_cmd": {
+              "typ": "string",
+              "description": "EXPERIMENTAL Proxy car-wifi-mitm: optional shell command template for joining the HU Wi-Fi. Placeholders: {iface}, {ssid}, {bssid}, {key}, {security}. Non-empty custom command overrides automatic nmcli/wpa_cli join.",
+              "advanced": true,
+              "requires": "bt_wireless_proxy"
+            },
+            "bt_wireless_proxy_car_wifi_auto_join": {
+              "typ": "boolean",
+              "description": "EXPERIMENTAL Proxy car-wifi-mitm: if true and no custom command is configured, try to join HU Wi-Fi automatically using nmcli, wpa_cli, or wpa_supplicant/udhcpc.",
+              "advanced": true,
+              "requires": "bt_wireless_proxy"
+            },
+            "bt_wireless_proxy_wifi_join_control": {
+              "typ": "select",
+              "description": "EXPERIMENTAL Proxy car-wifi-mitm: automatic Wi-Fi join backend. auto/legacy keeps the old fallback chain. wpactrl starts/uses wpa_supplicant and configures it through its control socket. nmcli, wpa_cli, and wpa_supplicant force a single backend.",
+              "values": [
+                "auto",
+                "legacy",
+                "wpactrl",
+                "wpa_supplicant",
+                "wpa_cli",
+                "nmcli"
+              ],
+              "advanced": true,
+              "requires": "bt_wireless_proxy"
+            },
+            "bt_wireless_proxy_wpactrl_socket_timeout_secs": {
+              "typ": "integer",
+              "description": "EXPERIMENTAL Proxy car-wifi-mitm: seconds to wait for /var/run/wpa_supplicant/<iface> to appear after starting wpa_supplicant in wpactrl mode. Default: 12.",
+              "advanced": true,
+              "requires": "bt_wireless_proxy"
+            },
+            "bt_wireless_proxy_wifi_association_timeout_secs": {
+              "typ": "integer",
+              "description": "EXPERIMENTAL Proxy car-wifi-mitm: seconds to wait for the STA interface to associate to the HU/car SSID and have an IPv4 address after a Wi-Fi join attempt. Default: 30.",
+              "advanced": true,
+              "requires": "bt_wireless_proxy"
+            },
+            "bt_wireless_proxy_dhcp_timeout_secs": {
+              "typ": "integer",
+              "description": "EXPERIMENTAL Proxy car-wifi-mitm: seconds to allow udhcpc/DHCP attempts to run. Default: 30.",
+              "advanced": true,
+              "requires": "bt_wireless_proxy"
+            },
+            "bt_wireless_proxy_car_wifi_keep_ap": {
+              "typ": "boolean",
+              "description": "EXPERIMENTAL Proxy car-wifi-mitm: keep aa-proxy AP up and join HU Wi-Fi through a separate managed STA interface. Requires AP+managed support on the same channel.",
+              "advanced": true,
+              "requires": "bt_wireless_proxy"
+            },
+            "bt_wireless_proxy_car_wifi_sta_iface": {
+              "typ": "string",
+              "description": "EXPERIMENTAL Proxy car-wifi-mitm: managed STA interface used to join HU/car Wi-Fi. In external_ap, empty auto-detects a USB WLAN interface and falls back to wlan1.",
+              "advanced": true,
+              "requires": "bt_wireless_proxy"
+            },
+            "bt_wireless_proxy_car_wifi_sta_phy": {
+              "typ": "string",
+              "description": "EXPERIMENTAL Proxy car-wifi-mitm: optional PHY used to create the managed STA interface in keep_ap/proxy_ap mode. Empty auto-detects from the AP interface. Example: phy1.",
+              "advanced": true,
+              "requires": "bt_wireless_proxy"
+            },
+            "bt_wireless_proxy_car_wifi_ap_iface": {
+              "typ": "string",
+              "description": "EXPERIMENTAL Proxy car-wifi-mitm: existing AP interface to keep when keep_ap is true. Empty falls back to iface.",
+              "advanced": true,
+              "requires": "bt_wireless_proxy"
+            },
+            "bt_wireless_proxy_rewrite_ip": {
+              "typ": "string",
+              "description": "EXPERIMENTAL Proxy car-wifi-mitm: IP address to place in the phone-facing WifiStartRequest. Empty means auto-detect using route/interface IPv4.",
+              "advanced": true,
+              "requires": "bt_wireless_proxy"
+            },
+            "bt_wireless_proxy_listen_port": {
+              "typ": "integer",
+              "description": "EXPERIMENTAL Proxy car-wifi-mitm: local TCP port where aa-proxy listens for the phone, default 5288.",
+              "advanced": true,
+              "requires": "bt_wireless_proxy"
+            },
+            "bt_wireless_proxy_use_version_projection_fallback": {
+              "typ": "boolean",
+              "description": "EXPERIMENTAL Proxy car-wifi-mitm: if WifiVersionRequest includes WifiProjectionProtocolInfo ip/port and HU does not send explicit WifiStartRequest, synthesize WifiStartRequest from that endpoint. Default: true.",
+              "advanced": true,
+              "requires": "bt_wireless_proxy"
+            },
+            "bt_wireless_proxy_wpp_keepalive": {
+              "typ": "boolean",
+              "description": "EXPERIMENTAL Proxy car-wifi-mitm: send synthetic WPP WifiPingRequest keepalive frames to the HU while aa-proxy is joining Wi-Fi / starting proxy_ap and waiting for phone Wi-Fi bootstrap. Default: false.",
+              "advanced": true,
+              "requires": "bt_wireless_proxy"
+            },
+            "bt_wireless_proxy_wpp_keepalive_interval_ms": {
+              "typ": "integer",
+              "description": "EXPERIMENTAL Proxy car-wifi-mitm: interval in milliseconds for synthetic HU WPP WifiPingRequest keepalives. Default: 2000; minimum used by code: 250.",
+              "advanced": true,
+              "requires": "bt_wireless_proxy"
+            }
+          }
+        }
+      ]
     },
     {
       "title": "🚗 HEAD UNIT LINK",
