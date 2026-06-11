@@ -772,6 +772,41 @@
           "typ": "string",
           "description": "Webserver bind address/port; empty = disabled"
         },
+        "webdav_enabled": {
+          "typ": "boolean",
+          "description": "Enable the built-in WebDAV file server. Disabled by default. Requires non-empty webdav_password.",
+          "advanced": true
+        },
+        "webdav_bind_addr": {
+          "typ": "string",
+          "description": "WebDAV bind address including port. Default: 0.0.0.0:8181.",
+          "advanced": true,
+          "requires": "webdav_enabled"
+        },
+        "webdav_root_dir": {
+          "typ": "string",
+          "description": "Filesystem root exposed through WebDAV. Default: /. Keep this restricted if the device is reachable from untrusted networks.",
+          "advanced": true,
+          "requires": "webdav_enabled"
+        },
+        "webdav_username": {
+          "typ": "string",
+          "description": "WebDAV Basic Auth username. Default: aa.",
+          "advanced": true,
+          "requires": "webdav_enabled"
+        },
+        "webdav_password": {
+          "typ": "string",
+          "description": "WebDAV Basic Auth password. Must be non-empty when WebDAV is enabled.",
+          "advanced": true,
+          "requires": "webdav_enabled"
+        },
+        "webdav_read_only": {
+          "typ": "boolean",
+          "description": "Expose WebDAV as read-only. PUT, DELETE, MKCOL and MOVE return 403 when enabled.",
+          "advanced": true,
+          "requires": "webdav_enabled"
+        },
         "logfile": {
           "typ": "string",
           "description": "Log file path. By default it is saved to `/var/log` in `tmpfs`/memory. To save it to SD card (appended, not replaced), change it to e.g. `/data/aa-proxy-rs.log`."

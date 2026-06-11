@@ -31,6 +31,7 @@ use aa_proxy_rs::usb_gadget::uevent_listener;
 use aa_proxy_rs::usb_gadget::UsbGadgetState;
 use aa_proxy_rs::web;
 use aa_proxy_rs::web::ServerEvent;
+use aa_proxy_rs::webdav;
 use clap::Parser;
 use humantime::format_duration;
 use simplelog::*;
@@ -757,6 +758,13 @@ async fn tokio_main(
             Err(e) => {
                 error!("{} webserver address/port parse: {}", NAME, e);
             }
+        }
+    }
+
+    if cfg.webdav_enabled {
+        let options = webdav::WebDavOptions::from_config(&cfg);
+        if let Err(e) = webdav::spawn(options).await {
+            error!("{} WebDAV server was not started: {}", NAME, e);
         }
     }
 

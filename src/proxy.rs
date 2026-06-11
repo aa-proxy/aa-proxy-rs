@@ -61,8 +61,32 @@ const TCP_CLIENT_TIMEOUT: Duration = Duration::new(30, 0);
 const COMP_APP_TCP_PORT: u16 = 9999;
 const COMP_APP_TCP_PORT_WS: u16 = 9998;
 const COMP_APP_TCP_PORT_SWUPDATE: u16 = 9997;
+const COMP_APP_TCP_PORT_WEBDAV: u16 = 9996;
 // Original queue depth was 10. Keep this small to avoid queue-induced latency.
 const MITM_QUEUE_CAPACITY: usize = 10;
+
+fn webdav_reverse_bridge_local_addr(bind_addr: &str) -> Option<String> {
+    let addr = match bind_addr.parse::<SocketAddr>() {
+        Ok(addr) => addr,
+        Err(e) => {
+            warn!(
+                "{} companion reverse bridge WebDAV disabled: invalid webdav_bind_addr {:?}: {}",
+                NAME, bind_addr, e
+            );
+            return None;
+        }
+    };
+
+    if addr.ip().is_unspecified() {
+        let loopback = match addr {
+            SocketAddr::V4(_) => "127.0.0.1",
+            SocketAddr::V6(_) => "[::1]",
+        };
+        Some(format!("{}:{}", loopback, addr.port()))
+    } else {
+        Some(addr.to_string())
+    }
+}
 
 use crate::config::{Action, SharedConfig};
 use crate::config::{TCP_DHU_PORT, TCP_SERVER_PORT};
@@ -478,6 +502,7 @@ macro_rules! impl_tcp_wait_for_connection {
         async fn tcp_wait_for_connection(
             listener: $listener_type,
             start_companion_bridges: bool,
+            webdav_reverse_bridge_target: Option<String>,
             _media_tap_endpoints: SharedMediaTapEndpoints,
             companion_ip: SharedCompanionIp,
         ) -> Result<($stream_type, SocketAddr, CancellationToken)> {
@@ -575,6 +600,21 @@ macro_rules! impl_tcp_wait_for_connection {
             )
             .await;
         });
+
+        if let Some(local_webdav_addr) = webdav_reverse_bridge_target {
+            let c = cancel.clone();
+            let remote_webdav_addr = format!("{}:{}", addr.ip(), COMP_APP_TCP_PORT_WEBDAV);
+            tokio::spawn(async move {
+                info!(
+                    "{} starting companion reverse bridge WEBDAV, Android IP: {}, remote={} local={}",
+                    NAME,
+                    addr.ip(),
+                    remote_webdav_addr,
+                    local_webdav_addr
+                );
+                tcp_bridge("WEBDAV", &remote_webdav_addr, &local_webdav_addr, c, true).await;
+            });
+        }
 
         debug!(
             "{} media reverse bridges are opened on demand through /media-taps/:endpoint_id/open",
@@ -768,6 +808,7 @@ pub async fn io_loop(
                     if let Ok((s, ip, cancel)) = tcp_wait_for_connection(
                             listener_ref!(md_listener),
                             true,
+                            if config.webdav_enabled { webdav_reverse_bridge_local_addr(&config.webdav_bind_addr) } else { None },
                             media_tap_endpoints.clone(),
                             companion_ip.clone(),
                         )
@@ -799,6 +840,11 @@ pub async fn io_loop(
             if let Ok((s, ip, cancel)) = tcp_wait_for_connection(
                 listener_ref!(md_listener),
                 true,
+                if config.webdav_enabled {
+                    webdav_reverse_bridge_local_addr(&config.webdav_bind_addr)
+                } else {
+                    None
+                },
                 media_tap_endpoints.clone(),
                 companion_ip.clone(),
             )
@@ -847,6 +893,7 @@ pub async fn io_loop(
             if let Ok((s, _, _)) = tcp_wait_for_connection(
                 listener_ref!(dhu_listener),
                 false,
+                None,
                 media_tap_endpoints.clone(),
                 companion_ip.clone(),
             )

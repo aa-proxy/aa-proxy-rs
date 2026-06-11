@@ -193,6 +193,18 @@ fn webserver_default_bind() -> Option<String> {
     Some("0.0.0.0:80".into())
 }
 
+fn webdav_default_bind_addr() -> String {
+    "0.0.0.0:8181".into()
+}
+
+fn webdav_default_root_dir() -> PathBuf {
+    "/".into()
+}
+
+fn webdav_default_username() -> String {
+    "aa".into()
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum Requires {
@@ -525,6 +537,21 @@ pub struct AppConfig {
         deserialize_with = "empty_string_as_none"
     )]
     pub webserver: Option<String>,
+    /// Enable a small built-in WebDAV file server.
+    pub webdav_enabled: bool,
+    /// WebDAV bind address, including port. Example: 0.0.0.0:8081.
+    #[serde(default = "webdav_default_bind_addr")]
+    pub webdav_bind_addr: String,
+    /// WebDAV filesystem root. The default is / so the device root is visible when enabled.
+    #[serde(default = "webdav_default_root_dir")]
+    pub webdav_root_dir: PathBuf,
+    /// WebDAV Basic Auth username.
+    #[serde(default = "webdav_default_username")]
+    pub webdav_username: String,
+    /// WebDAV Basic Auth password. Must be non-empty when webdav_enabled is true.
+    pub webdav_password: String,
+    /// Expose WebDAV as read-only; write methods return 403.
+    pub webdav_read_only: bool,
     pub bt_timeout_secs: u16,
     pub mitm: bool,
     pub dpi: u16,
@@ -913,6 +940,12 @@ impl Default for AppConfig {
             btalias: None,
             timeout_secs: 10,
             webserver: webserver_default_bind(),
+            webdav_enabled: false,
+            webdav_bind_addr: webdav_default_bind_addr(),
+            webdav_root_dir: webdav_default_root_dir(),
+            webdav_username: webdav_default_username(),
+            webdav_password: String::new(),
+            webdav_read_only: false,
             bt_timeout_secs: 120,
             mitm: false,
             dpi: 0,
@@ -1250,6 +1283,12 @@ impl AppConfig {
         if let Some(webserver) = &self.webserver {
             doc["webserver"] = value(webserver);
         }
+        doc["webdav_enabled"] = value(self.webdav_enabled);
+        doc["webdav_bind_addr"] = value(self.webdav_bind_addr.clone());
+        doc["webdav_root_dir"] = value(self.webdav_root_dir.display().to_string());
+        doc["webdav_username"] = value(self.webdav_username.clone());
+        doc["webdav_password"] = value(self.webdav_password.clone());
+        doc["webdav_read_only"] = value(self.webdav_read_only);
         doc["bt_timeout_secs"] = value(self.bt_timeout_secs as i64);
         doc["mitm"] = value(self.mitm);
         doc["dpi"] = value(self.dpi as i64);
