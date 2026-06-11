@@ -1691,12 +1691,9 @@ pub async fn pkt_modify_hook(
             // BT real-HU passthrough owns its synthetic channel lifecycle locally.
             // Handle channel-0 opens here so the channel is marked active before
             // Bluetooth pairing messages arrive on the service channel.
-            if let Some(action) = bt_maybe_handle_real_hu_passthrough_packet(
-                proxy_type,
-                pkt,
-                ctx,
-                cfg,
-            )? {
+            if let Some(action) =
+                bt_maybe_handle_real_hu_passthrough_packet(proxy_type, pkt, ctx, cfg)?
+            {
                 return Ok(action);
             }
 

@@ -57,7 +57,11 @@ pub(crate) fn bt_add_real_hu_passthrough_service(
         return;
     }
 
-    if msg.services.iter().any(|svc| svc.bluetooth_service.is_some()) {
+    if msg
+        .services
+        .iter()
+        .any(|svc| svc.bluetooth_service.is_some())
+    {
         warn!(
             "{} <blue>real HU Bluetooth passthrough:</> SDR already contains a Bluetooth service; leaving it unchanged. Enable remove_bluetooth to replace the HU-advertised Bluetooth service with the passthrough address.",
             get_name(proxy_type)
