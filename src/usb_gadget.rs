@@ -35,11 +35,14 @@ pub fn uevent_listener(accessory_started: Arc<tokio::sync::Notify>) -> Result<()
         match socket.recv(&mut buf, 0) {
             Ok(n) => match UEvent::from_netlink_packet(&buf) {
                 Ok(u) => {
+                    info!("{} 🔍 Detected uevent - {:#?}'", NAME, u.env);
+
                     if u.env.get("DEVNAME").is_some_and(|x| x == "usb_accessory")
                         && u.env.get("ACCESSORY").is_some_and(|x| x == "START")
                     {
                         debug!("got uevent: {:#?}", u);
                         accessory_started.notify_one();
+                    
                     }
                 }
                 Err(e) => {
@@ -51,6 +54,7 @@ pub fn uevent_listener(accessory_started: Arc<tokio::sync::Notify>) -> Result<()
                 thread::sleep(Duration::from_millis(10));
             }
         }
+        buf.fill(0);
     }
 }
 
@@ -106,9 +110,18 @@ impl UsbGadgetState {
         info!("{} 🔌 Initializing USB Manager", NAME);
         if self.legacy {
             self.disable(DEFAULT_GADGET_NAME)?;
+            thread::sleep(Duration::from_millis(50));
+            if let Err(e) = self.enable(DEFAULT_GADGET_NAME) {
+                error!(
+                    "{} 🔌 USB Manager: failed to enable default gadget: {e}",
+                    NAME
+                );
+            } else {
+                info!("{} 🔌 USB Manager: Enabled default gadget", NAME);
+            }
         }
         self.disable(ACCESSORY_GADGET_NAME)?;
-        info!("{} 🔌 USB Manager: Disabled all USB gadgets", NAME);
+        info!("{} 🔌 USB Manager: Disabled accessory - reset default gadget", NAME);
 
         Ok(())
     }
@@ -118,23 +131,14 @@ impl UsbGadgetState {
         accessory_started: Arc<tokio::sync::Notify>,
     ) {
         if self.legacy {
-            const PER_TRY_TIMEOUT: Duration = Duration::from_secs(6);
+            const PER_TRY_TIMEOUT: Duration = Duration::from_secs(2);
             const COOLDOWN_MS: u64 = 100;
 
             let mut got_accessory = false;
 
             for _try in 1..=2 {
                 // Register the waiter BEFORE enabling the gadget to avoid missing the notification
-                let notified_fut = accessory_started.notified();
-
-                if let Err(e) = self.enable(DEFAULT_GADGET_NAME) {
-                    error!(
-                        "{} 🔌 USB Manager: failed to enable default gadget: {e}",
-                        NAME
-                    );
-                } else {
-                    info!("{} 🔌 USB Manager: Enabled default gadget", NAME);
-                }
+                let notified_fut = accessory_started.notified(); //not sure if this always catches
 
                 match timeout(PER_TRY_TIMEOUT, notified_fut).await {
                     Ok(()) => {
@@ -154,7 +158,7 @@ impl UsbGadgetState {
             }
 
             if got_accessory {
-                info!("{} 🔌 USB Manager: Received accessory start request", NAME);
+                info!("{} 🔌 USB Manager: Received accessory start request - disable default", NAME);
                 let _ = self.disable(DEFAULT_GADGET_NAME);
                 // 0.5s so the host perceives the change
                 tokio::time::sleep(Duration::from_millis(500)).await;
