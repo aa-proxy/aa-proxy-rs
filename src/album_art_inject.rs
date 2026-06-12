@@ -10,6 +10,8 @@ use crate::packet_fragment::{
 use log::{debug, info, warn};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
+use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// MediaPlaybackStatusMessageId::MEDIA_PLAYBACK_METADATA.
 /// Kept as a constant here so this helper only needs raw packet/protobuf bytes.
@@ -18,6 +20,9 @@ const NO_MEDIA_PLAYBACK_CHANNEL: u16 = u16::MAX;
 
 static GLOBAL_MEDIA_PLAYBACK_CHANNEL: AtomicU16 = AtomicU16::new(NO_MEDIA_PLAYBACK_CHANNEL);
 static GLOBAL_MEDIA_PLAYBACK_CHANNEL_GENERATION: AtomicU64 = AtomicU64::new(0);
+static GLOBAL_METADATA_TEXT_PREFIX: Mutex<Option<String>> = Mutex::new(None);
+static GLOBAL_METADATA_TEXT_PREFIX_GENERATION: AtomicU64 = AtomicU64::new(0);
+static GLOBAL_METADATA_TEXT_PREFIX_UPDATED_MS: AtomicU64 = AtomicU64::new(0);
 
 fn encode_channel(channel: Option<u8>) -> u16 {
     channel.map(u16::from).unwrap_or(NO_MEDIA_PLAYBACK_CHANNEL)
@@ -49,6 +54,53 @@ fn set_global_media_playback_channel(channel: Option<u8>) -> u64 {
     }
 }
 
+pub(crate) fn set_global_metadata_text_prefix(prefix: Option<String>) -> u64 {
+    let normalized = prefix
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    let mut guard = match GLOBAL_METADATA_TEXT_PREFIX.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+
+    if *guard == normalized {
+        return GLOBAL_METADATA_TEXT_PREFIX_GENERATION.load(Ordering::SeqCst);
+    }
+
+    *guard = normalized;
+    GLOBAL_METADATA_TEXT_PREFIX_UPDATED_MS.store(now_millis(), Ordering::SeqCst);
+    GLOBAL_METADATA_TEXT_PREFIX_GENERATION.fetch_add(1, Ordering::SeqCst) + 1
+}
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
+}
+
+fn global_metadata_text_prefix(cfg: &AppConfig) -> Option<String> {
+    let prefix = match GLOBAL_METADATA_TEXT_PREFIX.lock() {
+        Ok(guard) => guard.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    };
+
+    if prefix.is_some() && cfg.map_album_art_ev_prefix_max_age_ms > 0 {
+        let updated = GLOBAL_METADATA_TEXT_PREFIX_UPDATED_MS.load(Ordering::SeqCst);
+        let now = now_millis();
+        if updated == 0 || now.saturating_sub(updated) > cfg.map_album_art_ev_prefix_max_age_ms {
+            return None;
+        }
+    }
+
+    prefix
+}
+
+fn global_metadata_text_prefix_generation() -> u64 {
+    GLOBAL_METADATA_TEXT_PREFIX_GENERATION.load(Ordering::SeqCst)
+}
+
 #[derive(Default)]
 pub(crate) struct MapAlbumArtInjector {
     states: HashMap<u8, AlbumArtRewriteState>,
@@ -57,6 +109,7 @@ pub(crate) struct MapAlbumArtInjector {
     media_playback_channel: Option<u8>,
     media_playback_channel_generation: u64,
     last_emitted_art_version: u64,
+    last_emitted_prefix_generation: u64,
     last_missing_template_log_version: u64,
     duration_tick_flip: bool,
 }
@@ -171,7 +224,10 @@ impl MapAlbumArtInjector {
                 return None;
             }
         };
-        if replacement.version == self.last_emitted_art_version {
+        let prefix_generation = global_metadata_text_prefix_generation();
+        if replacement.version == self.last_emitted_art_version
+            && prefix_generation == self.last_emitted_prefix_generation
+        {
             return None;
         }
 
@@ -185,6 +241,7 @@ impl MapAlbumArtInjector {
             ) {
                 Ok((packets, rewritten_payload_len)) => {
                     self.last_emitted_art_version = replacement.version;
+                    self.last_emitted_prefix_generation = global_metadata_text_prefix_generation();
                     debug!(
                         "map album art: emitted cached MEDIA_PLAYBACK_METADATA after artwork update (source={} version={} channel={:#04x} payload={} replacement_png={} fragments={})",
                         replacement.source,
@@ -223,6 +280,7 @@ impl MapAlbumArtInjector {
             &replacement.png,
             cfg.map_album_art_duration_tick_enabled,
             duration_tick,
+            cfg,
         );
         let rewritten_payload_len = synthetic_payload.len();
         let packets = self.fragment_metadata(
@@ -232,6 +290,7 @@ impl MapAlbumArtInjector {
             cfg,
         );
         self.last_emitted_art_version = replacement.version;
+        self.last_emitted_prefix_generation = global_metadata_text_prefix_generation();
         debug!(
             "map album art: emitted synthetic MEDIA_PLAYBACK_METADATA artwork update (source={} version={} channel={:#04x} payload={} replacement_png={} fragments={} duration_tick={})",
             replacement.source,
@@ -435,6 +494,7 @@ impl MapAlbumArtInjector {
             Ok((rewritten, rewritten_payload_len)) => {
                 let rewritten_final_length = Some(rewritten_payload_len as u32);
                 self.last_emitted_art_version = replacement_version;
+                self.last_emitted_prefix_generation = global_metadata_text_prefix_generation();
                 info!(
                     "map album art: rewrote MEDIA_PLAYBACK_METADATA album_art on channel {:#04x} (source={} mode=dynamic version={} original_payload={} rewritten_payload={} replacement_png={} original_fragments={} rewritten_fragments={} chunk_bytes={} original_final_length={:?} rewritten_final_length={:?})",
                     channel,
@@ -458,6 +518,7 @@ impl MapAlbumArtInjector {
                 );
                 let rewritten = self.fragment_metadata(channel, base_flags, &original_payload, cfg);
                 self.last_emitted_art_version = replacement_version;
+                self.last_emitted_prefix_generation = global_metadata_text_prefix_generation();
                 AlbumArtProcessResult::Replace(rewritten)
             }
         }
@@ -473,7 +534,7 @@ impl MapAlbumArtInjector {
     ) -> Result<(Vec<Packet>, usize), RewriteError> {
         let duration_tick = self.take_duration_tick(cfg);
         let rewritten_payload =
-            rewrite_album_art_payload(original_payload, replacement, duration_tick)?;
+            rewrite_album_art_payload(original_payload, replacement, duration_tick, cfg)?;
         let rewritten_payload_len = rewritten_payload.len();
         let packets = self.fragment_metadata(channel, base_flags, &rewritten_payload, cfg);
         Ok((packets, rewritten_payload_len))
@@ -515,10 +576,17 @@ fn build_synthetic_metadata_payload(
     replacement: &[u8],
     duration_tick_enabled: bool,
     duration_tick: bool,
+    cfg: &AppConfig,
 ) -> Vec<u8> {
     let mut payload = Vec::with_capacity(replacement.len().saturating_add(16));
     payload.push(((MEDIA_PLAYBACK_METADATA_ID as u16) >> 8) as u8);
     payload.push(((MEDIA_PLAYBACK_METADATA_ID as u16) & 0xff) as u8);
+
+    if let Some(prefix) = global_metadata_text_prefix(cfg) {
+        write_varint((1 << 3) | 2, &mut payload);
+        write_varint(prefix.len() as u64, &mut payload);
+        payload.extend_from_slice(prefix.as_bytes());
+    }
 
     if duration_tick_enabled {
         write_varint((6 << 3) | 0, &mut payload);
@@ -671,15 +739,18 @@ fn rewrite_album_art_payload(
     payload: &[u8],
     replacement: &[u8],
     duration_tick: bool,
+    cfg: &AppConfig,
 ) -> Result<Vec<u8>, RewriteError> {
     if payload.len() < 2 {
         return Err(RewriteError::Malformed);
     }
 
+    let prefix = global_metadata_text_prefix(cfg);
     let mut out = Vec::with_capacity(
         payload
             .len()
             .saturating_add(replacement.len())
+            .saturating_add(prefix.as_ref().map(|value| value.len() + 1).unwrap_or(0))
             .saturating_add(16),
     );
     out.extend_from_slice(&payload[..2]);
@@ -687,6 +758,7 @@ fn rewrite_album_art_payload(
     let data = &payload[2..];
     let mut pos = 0usize;
     let mut replaced = false;
+    let mut song_prefixed = false;
 
     while pos < data.len() {
         let field_start = pos;
@@ -722,7 +794,18 @@ fn rewrite_album_art_payload(
                 let len = read_varint(data, &mut pos)? as usize;
                 skip_checked(data, &mut pos, len)?;
 
-                if field_no == 4 && !replaced {
+                if field_no == 1 && !song_prefixed {
+                    if let Some(prefix) = prefix.as_deref() {
+                        let original = &data[pos - len..pos];
+                        let prefixed = build_prefixed_song(prefix, original);
+                        write_varint(key, &mut out);
+                        write_varint(prefixed.len() as u64, &mut out);
+                        out.extend_from_slice(&prefixed);
+                    } else {
+                        out.extend_from_slice(&data[field_start..pos]);
+                    }
+                    song_prefixed = true;
+                } else if field_no == 4 && !replaced {
                     write_varint(key, &mut out);
                     write_varint(replacement.len() as u64, &mut out);
                     out.extend_from_slice(replacement);
@@ -740,6 +823,15 @@ fn rewrite_album_art_payload(
         }
     }
 
+    if !song_prefixed {
+        if let Some(prefix) = prefix.as_deref() {
+            let prefixed = build_prefixed_song(prefix, b"");
+            write_varint((1 << 3) | 2, &mut out);
+            write_varint(prefixed.len() as u64, &mut out);
+            out.extend_from_slice(&prefixed);
+        }
+    }
+
     if !replaced {
         // Dynamic re-fragment mode can grow the protobuf, so an existing album_art
         // field is no longer required. Append field 4 when the cached template did
@@ -750,6 +842,23 @@ fn rewrite_album_art_payload(
     }
 
     Ok(out)
+}
+
+fn build_prefixed_song(prefix: &str, original: &[u8]) -> Vec<u8> {
+    let prefix = prefix.trim();
+    if prefix.is_empty() {
+        return original.to_vec();
+    }
+
+    let original = String::from_utf8_lossy(original);
+    let original = original.trim();
+    if original.is_empty() {
+        prefix.as_bytes().to_vec()
+    } else if original.starts_with(prefix) {
+        original.as_bytes().to_vec()
+    } else {
+        format!("{} {}", prefix, original).into_bytes()
+    }
 }
 
 #[cfg(test)]
@@ -858,7 +967,7 @@ mod tests {
         let replacement = vec![0x89, b'P', b'N', b'G', 1, 2, 3, 4, 5, 6];
         let payload = metadata_payload(&original_art);
 
-        let rewritten = rewrite_album_art_payload(&payload, &replacement, false).unwrap();
+        let rewritten = rewrite_album_art_payload(&payload, &replacement, false, &AppConfig::default()).unwrap();
 
         assert_eq!(extract_album_art(&rewritten), replacement);
         assert!(rewritten.len() > payload.len());
@@ -869,7 +978,7 @@ mod tests {
         let replacement = vec![0x89, b'P', b'N', b'G', 1, 2, 3, 4, 5, 6];
         let payload = metadata_payload_without_album_art();
 
-        let rewritten = rewrite_album_art_payload(&payload, &replacement, false).unwrap();
+        let rewritten = rewrite_album_art_payload(&payload, &replacement, false, &AppConfig::default()).unwrap();
 
         assert_eq!(extract_album_art(&rewritten), replacement);
     }
@@ -880,7 +989,7 @@ mod tests {
         let replacement = vec![0x89, b'P', b'N', b'G', 1, 2, 3, 4, 5, 6];
         let payload = metadata_payload(&original_art);
 
-        let rewritten = rewrite_album_art_payload(&payload, &replacement, true).unwrap();
+        let rewritten = rewrite_album_art_payload(&payload, &replacement, true, &AppConfig::default()).unwrap();
 
         assert_eq!(extract_duration(&payload), Some(10));
         assert_eq!(extract_duration(&rewritten), Some(11));

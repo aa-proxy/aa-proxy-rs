@@ -592,6 +592,11 @@ pub struct AppConfig {
     pub wpa_passphrase: String,
     pub eth_mode: String,
     pub startup_delay: u8,
+    /// Optional protocol/PDK version override applied to early AA/WPP version handshakes.
+    /// Useful for enabling phone-side features gated by newer HU PDK versions.
+    pub protocol_version_override_enabled: bool,
+    pub protocol_version_override_major: u16,
+    pub protocol_version_override_minor: u16,
     pub external_antenna: bool,
     /// Base TCP port for media stream tapping. One port is allocated per media sink
     /// by order in the rewritten ServiceDiscoveryResponse: first media sink uses +0,
@@ -640,6 +645,11 @@ pub struct AppConfig {
     /// by +0/+1 on outbound rewritten metadata so strict HUs notice artwork-only updates.
     /// The cached phone metadata template is never modified.
     pub map_album_art_duration_tick_enabled: bool,
+    /// Prefix MediaPlaybackMetadata.song with EV route forecast text when AA sends
+    /// VehicleEnergyForecast on the navigation channel. Example: `38% 12km Song`.
+    pub map_album_art_ev_prefix_enabled: bool,
+    /// Drop EV route forecast prefixes older than this many milliseconds. 0 disables expiry.
+    pub map_album_art_ev_prefix_max_age_ms: u64,
     pub collect_speed: bool,
     pub disable_driving_status: bool,
     /// Optional shell command invoked on HU media-key long press.
@@ -977,6 +987,9 @@ impl Default for AppConfig {
             wpa_passphrase: String::from(IDENTITY_NAME),
             eth_mode: String::new(),
             startup_delay: 0,
+            protocol_version_override_enabled: false,
+            protocol_version_override_major: 5,
+            protocol_version_override_minor: 1,
             external_antenna: false,
             media_dump_base_port: None,
             media_wait_for_live_idr: true,
@@ -995,6 +1008,8 @@ impl Default for AppConfig {
             map_album_art_crop_w: 40,
             map_album_art_crop_h: 40,
             map_album_art_duration_tick_enabled: false,
+            map_album_art_ev_prefix_enabled: false,
+            map_album_art_ev_prefix_max_age_ms: 15_000,
             collect_speed: false,
             disable_driving_status: false,
             hu_button_handler: None,
@@ -1306,6 +1321,9 @@ impl AppConfig {
         doc["wpa_passphrase"] = value(&self.wpa_passphrase);
         doc["eth_mode"] = value(&self.eth_mode);
         doc["startup_delay"] = value(self.startup_delay as i64);
+        doc["protocol_version_override_enabled"] = value(self.protocol_version_override_enabled);
+        doc["protocol_version_override_major"] = value(self.protocol_version_override_major as i64);
+        doc["protocol_version_override_minor"] = value(self.protocol_version_override_minor as i64);
         doc["external_antenna"] = value(self.external_antenna);
         if let Some(port) = self.media_dump_base_port {
             doc["media_dump_base_port"] = value(port as i64);
@@ -1329,6 +1347,9 @@ impl AppConfig {
         doc["map_album_art_crop_h"] = value(self.map_album_art_crop_h as i64);
         doc["map_album_art_duration_tick_enabled"] =
             value(self.map_album_art_duration_tick_enabled);
+        doc["map_album_art_ev_prefix_enabled"] = value(self.map_album_art_ev_prefix_enabled);
+        doc["map_album_art_ev_prefix_max_age_ms"] =
+            value(self.map_album_art_ev_prefix_max_age_ms as i64);
         doc["collect_speed"] = value(self.collect_speed);
         doc["disable_driving_status"] = value(self.disable_driving_status);
         if let Some(cmd) = &self.hu_button_handler {

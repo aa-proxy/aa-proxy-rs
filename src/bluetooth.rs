@@ -644,6 +644,10 @@ pub struct CarWifiMitmProxyOptions {
     /// If HU WifiVersionRequest contains WifiProjectionProtocolInfo(ip/port) and no explicit
     /// WifiStartRequest arrives, synthesize WifiStartRequest from that endpoint.
     pub use_version_projection_fallback: bool,
+    /// Optional early AA/WPP protocol/PDK version override before the phone sees HU capabilities.
+    pub protocol_version_override_enabled: bool,
+    pub protocol_version_override_major: u16,
+    pub protocol_version_override_minor: u16,
     /// Send synthetic WifiPingRequest frames to the HU RFCOMM/WPP socket while
     /// aa-proxy is busy joining Wi-Fi / starting proxy_ap and waiting for the
     /// phone's Wi-Fi bootstrap response. This keeps impatient HUs from timing
@@ -1256,6 +1260,49 @@ fn skip_proto_value(payload: &[u8], offset: &mut usize, wire: u8) -> bool {
     }
 }
 
+
+fn override_wifi_version_request_payload(payload: &[u8], major: u16, minor: u16) -> Option<Vec<u8>> {
+    let mut offset = 0usize;
+    let mut out = Vec::with_capacity(payload.len().saturating_add(8));
+    let mut saw_major = false;
+    let mut saw_minor = false;
+
+    while offset < payload.len() {
+        let field_start = offset;
+        let key = read_proto_varint(payload, &mut offset)?;
+        let field_no = key >> 3;
+        let wire = (key & 0x07) as u8;
+
+        if wire == 0 && (field_no == 1 || field_no == 2) {
+            read_proto_varint(payload, &mut offset)?;
+            encode_proto_varint(key, &mut out);
+            encode_proto_varint(if field_no == 1 { major as u64 } else { minor as u64 }, &mut out);
+            if field_no == 1 {
+                saw_major = true;
+            } else {
+                saw_minor = true;
+            }
+            continue;
+        }
+
+        if !skip_proto_value(payload, &mut offset, wire) {
+            return None;
+        }
+        out.extend_from_slice(&payload[field_start..offset]);
+    }
+
+    if !saw_major {
+        encode_proto_varint((1 << 3) | 0, &mut out);
+        encode_proto_varint(major as u64, &mut out);
+    }
+    if !saw_minor {
+        encode_proto_varint((2 << 3) | 0, &mut out);
+        encode_proto_varint(minor as u64, &mut out);
+    }
+
+    Some(out)
+}
+
 fn merge_wifi_version_head_unit_info(
     dst: &mut WifiVersionRequestDebugInfo,
     src: WifiVersionRequestDebugInfo,
@@ -1639,6 +1686,9 @@ async fn read_hu_wifi_start_with_prebootstrap_passthrough(
     hu_stream: &mut Stream,
     phone_stream: &mut Stream,
     use_version_projection_fallback: bool,
+    protocol_version_override_enabled: bool,
+    protocol_version_override_major: u16,
+    protocol_version_override_minor: u16,
     mut initial_hu_frames: Vec<(u16, Vec<u8>)>,
 ) -> Result<Vec<u8>> {
     // Some HUs start the AA Wireless RFCOMM bootstrap with a version exchange
@@ -1661,7 +1711,7 @@ async fn read_hu_wifi_start_with_prebootstrap_passthrough(
     }
 
     loop {
-        let (hu_id, hu_payload) = if let Some(frame) = pending_hu_frame.take() {
+        let (hu_id, mut hu_payload) = if let Some(frame) = pending_hu_frame.take() {
             frame
         } else if let Some(frame) = initial_hu_frames.pop() {
             info!(
@@ -1717,6 +1767,30 @@ async fn read_hu_wifi_start_with_prebootstrap_passthrough(
                     req_info.projection.port
                 );
                 last_projection_endpoint = Some(req_info.projection.clone());
+            }
+
+            if protocol_version_override_enabled {
+                match override_wifi_version_request_payload(
+                    &hu_payload,
+                    protocol_version_override_major,
+                    protocol_version_override_minor,
+                ) {
+                    Some(rewritten) => {
+                        info!(
+                            "{} 🧪 bt-wireless-proxy car-wifi-mitm: overriding HU WifiVersionRequest major/minor {:?}.{:?} -> {}.{} before forwarding to phone",
+                            NAME,
+                            req_info.major_version,
+                            req_info.minor_version,
+                            protocol_version_override_major,
+                            protocol_version_override_minor
+                        );
+                        hu_payload = rewritten;
+                    }
+                    None => warn!(
+                        "{} 🧪 bt-wireless-proxy car-wifi-mitm: failed to override malformed HU WifiVersionRequest; forwarding original",
+                        NAME
+                    ),
+                }
             }
         }
 
@@ -6492,6 +6566,9 @@ impl Bluetooth {
                 &mut hu_stream,
                 &mut phone_stream,
                 options.use_version_projection_fallback,
+                options.protocol_version_override_enabled,
+                options.protocol_version_override_major,
+                options.protocol_version_override_minor,
                 buffered_hu_frames,
             ),
         )

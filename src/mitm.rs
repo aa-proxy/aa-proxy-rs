@@ -1,4 +1,6 @@
-use crate::album_art_inject::{AlbumArtProcessResult, MapAlbumArtInjector};
+use crate::album_art_inject::{
+    set_global_metadata_text_prefix, AlbumArtProcessResult, MapAlbumArtInjector,
+};
 use crate::bt_sco;
 use crate::bt_sco_media_bridge;
 use crate::ev::send_ev_data;
@@ -1022,6 +1024,215 @@ async fn update_last_service_discovery_response(
     }
 }
 
+
+const VEHICLE_ENERGY_FORECAST_MESSAGE_ID: i32 = 0x8008;
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ParsedEnergyAtDistance {
+    distance_meters: Option<i32>,
+    arrival_battery_energy_wh: Option<i32>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ParsedVehicleEnergyForecast {
+    energy_at_next_stop: Option<ParsedEnergyAtDistance>,
+    distance_to_empty: Option<ParsedEnergyAtDistance>,
+}
+
+fn read_proto_varint(data: &[u8], pos: &mut usize) -> Option<u64> {
+    let mut value = 0u64;
+    let mut shift = 0u32;
+    while *pos < data.len() {
+        let byte = data[*pos];
+        *pos += 1;
+        value |= ((byte & 0x7f) as u64) << shift;
+        if byte & 0x80 == 0 {
+            return Some(value);
+        }
+        shift += 7;
+        if shift >= 64 {
+            return None;
+        }
+    }
+    None
+}
+
+fn skip_proto_field(data: &[u8], pos: &mut usize, wire_type: u64) -> Option<()> {
+    match wire_type {
+        0 => {
+            read_proto_varint(data, pos)?;
+        }
+        1 => {
+            if data.len().saturating_sub(*pos) < 8 {
+                return None;
+            }
+            *pos += 8;
+        }
+        2 => {
+            let len = read_proto_varint(data, pos)? as usize;
+            if data.len().saturating_sub(*pos) < len {
+                return None;
+            }
+            *pos += len;
+        }
+        5 => {
+            if data.len().saturating_sub(*pos) < 4 {
+                return None;
+            }
+            *pos += 4;
+        }
+        _ => return None,
+    }
+    Some(())
+}
+
+fn read_first_len_field<'a>(data: &'a [u8], target_field: u64) -> Option<&'a [u8]> {
+    let mut pos = 0usize;
+    while pos < data.len() {
+        let key = read_proto_varint(data, &mut pos)?;
+        let field_no = key >> 3;
+        let wire_type = key & 0x07;
+        if wire_type == 2 {
+            let len = read_proto_varint(data, &mut pos)? as usize;
+            if data.len().saturating_sub(pos) < len {
+                return None;
+            }
+            if field_no == target_field {
+                return Some(&data[pos..pos + len]);
+            }
+            pos += len;
+        } else {
+            skip_proto_field(data, &mut pos, wire_type)?;
+        }
+    }
+    None
+}
+
+fn zigzag_to_i32(value: u64) -> Option<i32> {
+    i32::try_from(value).ok()
+}
+
+fn parse_energy_at_distance(data: &[u8]) -> Option<ParsedEnergyAtDistance> {
+    let mut pos = 0usize;
+    let mut out = ParsedEnergyAtDistance::default();
+    while pos < data.len() {
+        let key = read_proto_varint(data, &mut pos)?;
+        let field_no = key >> 3;
+        let wire_type = key & 0x07;
+        match (field_no, wire_type) {
+            (1, 0) => out.distance_meters = zigzag_to_i32(read_proto_varint(data, &mut pos)?),
+            (2, 0) => {
+                out.arrival_battery_energy_wh = zigzag_to_i32(read_proto_varint(data, &mut pos)?)
+            }
+            _ => skip_proto_field(data, &mut pos, wire_type)?,
+        }
+    }
+    Some(out)
+}
+
+fn parse_vehicle_energy_forecast_message(data: &[u8]) -> Option<ParsedVehicleEnergyForecast> {
+    // 0x8008 is a proto2 wrapper with field 1 = serialized VehicleEnergyForecast bytes.
+    let inner = read_first_len_field(data, 1)?;
+    let mut pos = 0usize;
+    let mut out = ParsedVehicleEnergyForecast::default();
+    while pos < inner.len() {
+        let key = read_proto_varint(inner, &mut pos)?;
+        let field_no = key >> 3;
+        let wire_type = key & 0x07;
+        if wire_type == 2 {
+            let len = read_proto_varint(inner, &mut pos)? as usize;
+            if inner.len().saturating_sub(pos) < len {
+                return None;
+            }
+            let value = &inner[pos..pos + len];
+            match field_no {
+                1 => out.energy_at_next_stop = parse_energy_at_distance(value),
+                2 => out.distance_to_empty = parse_energy_at_distance(value),
+                _ => {}
+            }
+            pos += len;
+        } else {
+            skip_proto_field(inner, &mut pos, wire_type)?;
+        }
+    }
+    Some(out)
+}
+
+fn battery_percent_from_last_battery(batt: &BatteryData) -> Option<u32> {
+    if let Some(percent) = batt.battery_level_percentage {
+        if percent.is_finite() {
+            return Some(percent.round().clamp(0.0, 100.0) as u32);
+        }
+    }
+
+    match (batt.battery_level_wh, batt.battery_capacity_wh) {
+        (Some(level_wh), Some(capacity_wh)) if capacity_wh > 0 => Some(
+            ((level_wh as f64 / capacity_wh as f64) * 100.0)
+                .round()
+                .clamp(0.0, 100.0) as u32,
+        ),
+        _ => None,
+    }
+}
+
+fn rounded_km_from_distance_meters(distance_meters: i32) -> Option<u32> {
+    if distance_meters <= 0 {
+        return None;
+    }
+    Some(((distance_meters as f64) / 1000.0).round().max(1.0) as u32)
+}
+
+fn build_ev_album_art_prefix(
+    batt: Option<&BatteryData>,
+    forecast: ParsedVehicleEnergyForecast,
+) -> Option<String> {
+    let percent = batt.and_then(battery_percent_from_last_battery);
+    let distance_meters = forecast
+        .distance_to_empty
+        .and_then(|value| value.distance_meters)
+        .or_else(|| forecast.energy_at_next_stop.and_then(|value| value.distance_meters));
+    let km = distance_meters.and_then(rounded_km_from_distance_meters);
+
+    match (percent, km) {
+        (Some(percent), Some(km)) => Some(format!("{}% {}km", percent, km)),
+        (Some(percent), None) => Some(format!("{}%", percent)),
+        (None, Some(km)) => Some(format!("{}km", km)),
+        (None, None) => None,
+    }
+}
+
+async fn maybe_update_album_art_ev_prefix_from_nav(
+    proxy_type: ProxyType,
+    data: &[u8],
+    last_battery: Arc<RwLock<Option<BatteryData>>>,
+) {
+    let forecast = match parse_vehicle_energy_forecast_message(data) {
+        Some(forecast) => forecast,
+        None => {
+            debug!(
+                "{} map album art EV prefix: failed to parse VehicleEnergyForecast 0x8008",
+                get_name(proxy_type)
+            );
+            return;
+        }
+    };
+
+    let batt = last_battery.read().await;
+    let prefix = build_ev_album_art_prefix(batt.as_ref(), forecast);
+    let generation = set_global_metadata_text_prefix(prefix.clone());
+
+    if let Some(prefix) = prefix {
+        info!(
+            "{} map album art EV prefix: updated from VehicleEnergyForecast prefix={:?} generation={} distance_to_empty={:?} energy_at_next_stop={:?}",
+            get_name(proxy_type),
+            prefix,
+            generation,
+            forecast.distance_to_empty,
+            forecast.energy_at_next_stop
+        );
+    }
+}
+
 /// packet modification hook
 pub async fn pkt_modify_hook(
     proxy_type: ProxyType,
@@ -1347,10 +1558,25 @@ pub async fn pkt_modify_hook(
         }
     }
 
-    // apply waze workaround on navigation data
+    // apply navigation-channel helpers
     if let Some(ch) = ctx.nav_channel {
-        // check for channel and a specific packet header only
-        if ch == pkt.channel
+        if cfg.map_album_art_ev_prefix_enabled
+            && ch == pkt.channel
+            && proxy_type == ProxyType::HeadUnit
+            && message_id == VEHICLE_ENERGY_FORECAST_MESSAGE_ID
+        {
+            maybe_update_album_art_ev_prefix_from_nav(
+                proxy_type,
+                data,
+                last_battery.clone(),
+            )
+            .await;
+            return Ok(PacketAction::Forward);
+        }
+
+        // apply waze workaround on navigation data: check for channel and a specific packet header only
+        if cfg.waze_lht_workaround
+            && ch == pkt.channel
             && proxy_type == ProxyType::HeadUnit
             && pkt.payload[0] == 0x80
             && pkt.payload[1] == 0x06
@@ -1970,7 +2196,7 @@ pub async fn pkt_modify_hook(
             }
 
             // save navigation channel in context
-            if cfg.waze_lht_workaround {
+            if cfg.waze_lht_workaround || cfg.map_album_art_ev_prefix_enabled {
                 if let Some(svc) = msg
                     .services
                     .iter()

@@ -955,6 +955,9 @@ async fn tokio_main(
                                 tcp_phone_connection_seq: tcp_phone_connection_seq.clone(),
                                 use_version_projection_fallback: cfg
                                     .bt_wireless_proxy_use_version_projection_fallback,
+                                protocol_version_override_enabled: cfg.protocol_version_override_enabled,
+                                protocol_version_override_major: cfg.protocol_version_override_major,
+                                protocol_version_override_minor: cfg.protocol_version_override_minor,
                                 wpp_keepalive: cfg.bt_wireless_proxy_wpp_keepalive,
                                 wpp_keepalive_interval: Duration::from_millis(
                                     cfg.bt_wireless_proxy_wpp_keepalive_interval_ms.max(250),
