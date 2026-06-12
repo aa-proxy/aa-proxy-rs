@@ -1303,6 +1303,13 @@ fn override_wifi_version_request_payload(payload: &[u8], major: u16, minor: u16)
     Some(out)
 }
 
+fn override_wifi_version_response_payload(payload: &[u8], major: u16, minor: u16) -> Option<Vec<u8>> {
+    // WifiVersionResponse uses the same top-level field numbers for major/minor
+    // as WifiVersionRequest. Reuse the safe proto field rewriter and preserve all
+    // status/device/connectivity fields unchanged.
+    override_wifi_version_request_payload(payload, major, minor)
+}
+
 fn merge_wifi_version_head_unit_info(
     dst: &mut WifiVersionRequestDebugInfo,
     src: WifiVersionRequestDebugInfo,
@@ -1814,7 +1821,7 @@ async fn read_hu_wifi_start_with_prebootstrap_passthrough(
                 "{} 🧪 bt-wireless-proxy car-wifi-mitm: waiting for PHONE WifiVersionResponse to forward back to HU",
                 NAME
             );
-            let (phone_id, phone_payload) = read_phone_bootstrap_frame(
+            let (phone_id, mut phone_payload) = read_phone_bootstrap_frame(
                 phone_stream,
                 ProxyMessageId::WifiVersionResponse,
                 None,
@@ -1829,6 +1836,29 @@ async fn read_hu_wifi_start_with_prebootstrap_passthrough(
                     phone_id,
                     ProxyMessageId::name(phone_id)
                 );
+            } else if protocol_version_override_enabled {
+                let resp_info = inspect_wifi_version_response(&phone_payload);
+                match override_wifi_version_response_payload(
+                    &phone_payload,
+                    protocol_version_override_major,
+                    protocol_version_override_minor,
+                ) {
+                    Some(rewritten) => {
+                        info!(
+                            "{} 🧪 bt-wireless-proxy car-wifi-mitm: overriding PHONE WifiVersionResponse major/minor {:?}.{:?} -> {}.{} before forwarding to HU",
+                            NAME,
+                            resp_info.major_version,
+                            resp_info.minor_version,
+                            protocol_version_override_major,
+                            protocol_version_override_minor
+                        );
+                        phone_payload = rewritten;
+                    }
+                    None => warn!(
+                        "{} 🧪 bt-wireless-proxy car-wifi-mitm: failed to override malformed PHONE WifiVersionResponse; forwarding original",
+                        NAME
+                    ),
+                }
             }
 
             send_proxy_frame_raw(

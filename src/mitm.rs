@@ -1024,6 +1024,70 @@ async fn update_last_service_discovery_response(
     }
 }
 
+fn raw_control_version_name(message_id: u16) -> Option<&'static str> {
+    match message_id {
+        x if x == MESSAGE_VERSION_REQUEST as u16 => Some("MESSAGE_VERSION_REQUEST"),
+        x if x == MESSAGE_VERSION_RESPONSE as u16 => Some("MESSAGE_VERSION_RESPONSE"),
+        _ => None,
+    }
+}
+
+fn maybe_override_raw_control_protocol_version(
+    proxy_type: ProxyType,
+    direction: &str,
+    pkt: &mut Packet,
+    cfg: &AppConfig,
+) {
+    if !cfg.protocol_version_override_enabled {
+        return;
+    }
+    if pkt.channel != 0 || pkt.payload.len() < 6 {
+        return;
+    }
+
+    let message_id = u16::from_be_bytes([pkt.payload[0], pkt.payload[1]]);
+    let Some(message_name) = raw_control_version_name(message_id) else {
+        return;
+    };
+
+    // The early plaintext AA transport version frame is not protobuf.
+    // Layout observed on DHU / direct TCP:
+    //   VERSION_REQUEST:  message_id(2) + major_be_u16 + minor_be_u16
+    //   VERSION_RESPONSE: message_id(2) + major_be_u16 + minor_be_u16 + status_be_u16
+    // Keep any response status/trailing bytes intact and rewrite only major/minor.
+    let old_major = u16::from_be_bytes([pkt.payload[2], pkt.payload[3]]);
+    let old_minor = u16::from_be_bytes([pkt.payload[4], pkt.payload[5]]);
+    let new_major = cfg.protocol_version_override_major;
+    let new_minor = cfg.protocol_version_override_minor;
+
+    pkt.payload[2..4].copy_from_slice(&new_major.to_be_bytes());
+    pkt.payload[4..6].copy_from_slice(&new_minor.to_be_bytes());
+
+    if old_major != new_major || old_minor != new_minor {
+        info!(
+            "{} protocol version override {}: {} {}.{} -> {}.{} payload_len={}",
+            get_name(proxy_type),
+            direction,
+            message_name,
+            old_major,
+            old_minor,
+            new_major,
+            new_minor,
+            pkt.payload.len()
+        );
+    } else {
+        debug!(
+            "{} protocol version override {}: {} already {}.{} payload_len={}",
+            get_name(proxy_type),
+            direction,
+            message_name,
+            new_major,
+            new_minor,
+            pkt.payload.len()
+        );
+    }
+}
+
 
 const VEHICLE_ENERGY_FORECAST_MESSAGE_ID: i32 = 0x8008;
 
@@ -3029,8 +3093,9 @@ pub async fn proxy<D: IoDeviceTrait>(
         loop {
             tokio::select! {
             // handling data from opposite device's thread, which needs to be transmitted
-            Some(pkt) = rx.recv() => {
+            Some(mut pkt) = rx.recv() => {
                 debug!("{} rx.recv", get_name(proxy_type));
+                maybe_override_raw_control_protocol_version(proxy_type, "passthrough rx -> endpoint", &mut pkt, &cfg);
                 let _ = pkt_debug(proxy_type, HexdumpLevel::RawOutput, hex_requested, &pkt, &cfg, None).await;
 
                 pkt.transmit(&mut device)
@@ -3043,8 +3108,9 @@ pub async fn proxy<D: IoDeviceTrait>(
             }
 
             // handling input data from the reader thread
-            Some(pkt) = rxr.recv() => {
+            Some(mut pkt) = rxr.recv() => {
                 debug!("{} rxr.recv", get_name(proxy_type));
+                maybe_override_raw_control_protocol_version(proxy_type, "passthrough endpoint -> tx", &mut pkt, &cfg);
                 let _ = pkt_debug(proxy_type, HexdumpLevel::RawOutput, hex_requested, &pkt, &cfg, None).await;
 
                 tx.send(pkt).await?;
@@ -3065,7 +3131,8 @@ pub async fn proxy<D: IoDeviceTrait>(
     // for both HU and MD
     if proxy_type == ProxyType::HeadUnit {
         // waiting for initial version frame (HU is starting transmission)
-        let pkt = rxr.recv().await.ok_or("reader channel hung up")?;
+        let mut pkt = rxr.recv().await.ok_or("reader channel hung up")?;
+        maybe_override_raw_control_protocol_version(proxy_type, "HU rxr -> MD tx", &mut pkt, &cfg);
         let _ = pkt_debug(
             proxy_type,
             HexdumpLevel::DecryptedInput, // the packet is not encrypted
@@ -3078,7 +3145,8 @@ pub async fn proxy<D: IoDeviceTrait>(
         // sending to the MD
         tx.send(pkt).await?;
         // waiting for MD reply
-        let pkt = rx.recv().await.ok_or("rx channel hung up")?;
+        let mut pkt = rx.recv().await.ok_or("rx channel hung up")?;
+        maybe_override_raw_control_protocol_version(proxy_type, "MD rx -> HU tx", &mut pkt, &cfg);
         // sending reply back to the HU
         let _ = pkt_debug(
             proxy_type,
@@ -3151,7 +3219,8 @@ pub async fn proxy<D: IoDeviceTrait>(
         }
     } else if proxy_type == ProxyType::MobileDevice {
         // expecting version request from the HU here...
-        let pkt = rx.recv().await.ok_or("rx channel hung up")?;
+        let mut pkt = rx.recv().await.ok_or("rx channel hung up")?;
+        maybe_override_raw_control_protocol_version(proxy_type, "HU rx -> MD endpoint", &mut pkt, &cfg);
         // sending to the MD
         let _ = pkt_debug(
             proxy_type,
@@ -3166,7 +3235,8 @@ pub async fn proxy<D: IoDeviceTrait>(
             .await
             .with_context(|| format!("proxy/{}: transmit failed", get_name(proxy_type)))?;
         // waiting for MD reply
-        let pkt = rxr.recv().await.ok_or("reader channel hung up")?;
+        let mut pkt = rxr.recv().await.ok_or("reader channel hung up")?;
+        maybe_override_raw_control_protocol_version(proxy_type, "MD endpoint -> HU tx", &mut pkt, &cfg);
         let _ = pkt_debug(
             proxy_type,
             HexdumpLevel::DecryptedInput, // the packet is not encrypted
