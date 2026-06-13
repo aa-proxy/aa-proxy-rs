@@ -30,7 +30,7 @@ use crate::vendor_ext::{
 };
 use crate::web::ServerEvent;
 use anyhow::Context;
-use openssl::ssl::{ErrorCode, Ssl, SslContextBuilder, SslFiletype, SslMethod};
+use crate::ssl_rustls::{AaConnection, SslMemBuf};
 use serde::{Deserialize, Serialize};
 use simplelog::*;
 use std::collections::HashMap;
@@ -41,7 +41,7 @@ use std::io::{Read, Write};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::sync::Mutex;
+
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast::Sender as BroadcastSender;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -711,47 +711,7 @@ fn update_map_album_art_media_playback_channel_from_sdr(
         .set_media_playback_channel(channel);
 }
 
-/// rust-openssl doesn't support BIO_s_mem
-/// This SslMemBuf is about to provide `Read` and `Write` implementations
-/// to be used with `openssl::ssl::SslStream`
-/// more info:
-/// https://github.com/sfackler/rust-openssl/issues/1697
-type LocalDataBuffer = Arc<Mutex<VecDeque<u8>>>;
-#[derive(Clone)]
-pub struct SslMemBuf {
-    /// a data buffer that the server writes to and the client reads from
-    pub server_stream: LocalDataBuffer,
-    /// a data buffer that the client writes to and the server reads from
-    pub client_stream: LocalDataBuffer,
-}
-
-// Read implementation used internally by OpenSSL
-impl Read for SslMemBuf {
-    fn read(&mut self, buf: &mut [u8]) -> std::result::Result<usize, std::io::Error> {
-        self.client_stream.lock().unwrap().read(buf)
-    }
-}
-
-// Write implementation used internally by OpenSSL
-impl Write for SslMemBuf {
-    fn write(&mut self, buf: &[u8]) -> std::result::Result<usize, std::io::Error> {
-        self.server_stream.lock().unwrap().write(buf)
-    }
-
-    fn flush(&mut self) -> std::result::Result<(), std::io::Error> {
-        self.server_stream.lock().unwrap().flush()
-    }
-}
-
-// Own functions for accessing shared data
-impl SslMemBuf {
-    fn read_to(&mut self, buf: &mut Vec<u8>) -> std::result::Result<usize, std::io::Error> {
-        self.server_stream.lock().unwrap().read_to_end(buf)
-    }
-    fn write_from(&mut self, buf: &[u8]) -> std::result::Result<usize, std::io::Error> {
-        self.client_stream.lock().unwrap().write(buf)
-    }
-}
+// SslMemBuf and AaConnection are defined in ssl_rustls.rs
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Packet {
@@ -766,17 +726,13 @@ impl Packet {
     async fn encrypt_payload(
         &mut self,
         mem_buf: &mut SslMemBuf,
-        server: &mut openssl::ssl::SslStream<SslMemBuf>,
+        conn: &mut AaConnection,
     ) -> Result<()> {
         if (self.flags & ENCRYPTED) == ENCRYPTED {
-            // save plain data for encryption
-            server.ssl_write(&self.payload)?;
-            // read encrypted data
-            let mut res: Vec<u8> = Vec::new();
-            mem_buf.read_to(&mut res)?;
-            self.payload = res;
+            conn.encrypt(&self.payload, mem_buf)
+                .map_err(|e| format!("SSL encrypt: {e}"))?;
+            self.payload = mem_buf.drain_outgoing();
         }
-
         Ok(())
     }
 
@@ -784,17 +740,13 @@ impl Packet {
     async fn decrypt_payload(
         &mut self,
         mem_buf: &mut SslMemBuf,
-        server: &mut openssl::ssl::SslStream<SslMemBuf>,
+        conn: &mut AaConnection,
     ) -> Result<()> {
         if (self.flags & ENCRYPTED) == ENCRYPTED {
-            // save encrypted data
-            mem_buf.write_from(&self.payload)?;
-            // read plain data
-            let mut res: Vec<u8> = Vec::new();
-            server.read_to_end(&mut res)?;
-            self.payload = res;
+            self.payload = conn
+                .decrypt(&self.payload, mem_buf)
+                .map_err(|e| format!("SSL decrypt: {e}"))?;
         }
-
         Ok(())
     }
 
@@ -820,11 +772,11 @@ impl Packet {
         device.write_data(&frame).await
     }
 
-    /// decapsulates SSL payload and writes to SslStream
+    /// decapsulates SSL payload and feeds it into rustls
     async fn ssl_decapsulate_write(&self, mem_buf: &mut SslMemBuf) -> Result<()> {
         let message_type = u16::from_be_bytes(self.payload[0..=1].try_into()?);
         if message_type == ControlMessageType::MESSAGE_ENCAPSULATED_SSL as u16 {
-            mem_buf.write_from(&self.payload[2..])?;
+            mem_buf.feed_incoming(&self.payload[2..]);
         }
         Ok(())
     }
@@ -2687,52 +2639,20 @@ pub async fn send_tire_pressure_data(
 }
 
 /// encapsulates SSL data into Packet
-async fn ssl_encapsulate(mut mem_buf: SslMemBuf) -> Result<Packet> {
-    // read SSL-generated data
-    let mut res: Vec<u8> = Vec::new();
-    mem_buf.read_to(&mut res)?;
-
-    // create MESSAGE_ENCAPSULATED_SSL Packet
+fn ssl_encapsulate(outgoing: Vec<u8>) -> Packet {
     let message_type = ControlMessageType::MESSAGE_ENCAPSULATED_SSL as u16;
-    res.insert(0, (message_type >> 8) as u8);
-    res.insert(1, (message_type & 0xff) as u8);
-    Ok(Packet {
+    let mut payload = outgoing;
+    payload.insert(0, (message_type >> 8) as u8);
+    payload.insert(1, (message_type & 0xff) as u8);
+    Packet {
         channel: 0x00,
         flags: FRAME_TYPE_FIRST | FRAME_TYPE_LAST,
         final_length: None,
-        payload: res,
-    })
-}
-
-/// creates Ssl for HeadUnit (SSL server) and MobileDevice (SSL client)
-async fn ssl_builder(proxy_type: ProxyType) -> Result<Ssl> {
-    let mut ctx_builder = SslContextBuilder::new(SslMethod::tls())?;
-
-    // for HU/headunit we need to act as a MD/mobiledevice, so load "md" key and cert
-    // and vice versa
-    let prefix = match proxy_type {
-        ProxyType::HeadUnit => "md",
-        ProxyType::MobileDevice => "hu",
-    };
-    ctx_builder.set_certificate_file(format!("{KEYS_PATH}/{prefix}_cert.pem"), SslFiletype::PEM)?;
-    ctx_builder.set_private_key_file(format!("{KEYS_PATH}/{prefix}_key.pem"), SslFiletype::PEM)?;
-    ctx_builder.check_private_key()?;
-    // trusted root certificates:
-    ctx_builder.set_ca_file(format!("{KEYS_PATH}/galroot_cert.pem"))?;
-
-    ctx_builder.set_min_proto_version(Some(openssl::ssl::SslVersion::TLS1_2))?;
-    ctx_builder.set_options(openssl::ssl::SslOptions::NO_TLSV1_3);
-
-    let openssl_ctx = ctx_builder.build();
-    let mut ssl = Ssl::new(&openssl_ctx)?;
-    if proxy_type == ProxyType::HeadUnit {
-        ssl.set_accept_state(); // SSL server
-    } else if proxy_type == ProxyType::MobileDevice {
-        ssl.set_connect_state(); // SSL client
+        payload,
     }
-
-    Ok(ssl)
 }
+
+// ssl_builder is now in ssl_rustls.rs
 
 /// runtime musl detection
 fn is_musl() -> bool {
@@ -2819,20 +2739,7 @@ impl_endpoint_reader!([A: Endpoint<A>], IoDevice<A>);
 #[cfg(not(feature = "io-uring"))]
 impl_endpoint_reader!([D: IoDeviceTrait], D);
 
-/// checking if there was a true fatal SSL error
-/// Note that the error may not be fatal. For example if the underlying
-/// stream is an asynchronous one then `HandshakeError::WouldBlock` may
-/// just mean to wait for more I/O to happen later.
-fn ssl_check_failure<T>(res: std::result::Result<T, openssl::ssl::Error>) -> Result<()> {
-    if let Err(err) = res {
-        match err.code() {
-            ErrorCode::WANT_READ | ErrorCode::WANT_WRITE | ErrorCode::SYSCALL => Ok(()),
-            _ => return Err(Box::new(err)),
-        }
-    } else {
-        Ok(())
-    }
-}
+
 
 fn build_control_reply(message_id: ControlMessageType, payload: Vec<u8>) -> Packet {
     let mut payload = payload;
@@ -2922,19 +2829,14 @@ pub async fn proxy<D: IoDeviceTrait>(
         }
     }
 
-    let ssl = match ssl_builder(proxy_type).await {
-        Ok(s) => s,
-        Err(e) => {
-            config.write().await.runtime_mitm_failed = true;
-            return Err(e);
-        }
-    };
-
-    let mut mem_buf = SslMemBuf {
-        client_stream: Arc::new(Mutex::new(VecDeque::new())),
-        server_stream: Arc::new(Mutex::new(VecDeque::new())),
-    };
-    let mut server = openssl::ssl::SslStream::new(ssl, mem_buf.clone())?;
+    let (mut ssl_conn, mut mem_buf) =
+        match crate::ssl_rustls::ssl_builder(proxy_type, KEYS_PATH) {
+            Ok(s) => s,
+            Err(e) => {
+                config.write().await.runtime_mitm_failed = true;
+                return Err(e);
+            }
+        };
 
     // initial phase: passing version and doing SSL handshake
     // for both HU and MD
@@ -2969,8 +2871,7 @@ pub async fn proxy<D: IoDeviceTrait>(
             .with_context(|| format!("proxy/{}: transmit failed", get_name(proxy_type)))?;
 
         // doing SSL handshake
-        const STEPS: u8 = 2;
-        for i in 1..=STEPS {
+        loop {
             let pkt = rxr.recv().await.ok_or("reader channel hung up")?;
             let _ = pkt_debug(
                 proxy_type,
@@ -2982,37 +2883,41 @@ pub async fn proxy<D: IoDeviceTrait>(
             )
             .await;
             pkt.ssl_decapsulate_write(&mut mem_buf).await?;
-            if let Err(e) = ssl_check_failure(server.accept()) {
-                config.write().await.runtime_mitm_failed = true;
-                return Err(e);
+            match ssl_conn.process(&mut mem_buf) {
+                Err(e) => {
+                    config.write().await.runtime_mitm_failed = true;
+                    return Err(Box::new(e));
+                }
+                Ok(still_handshaking) => {
+                    info!(
+                        "{} 🔒 SSL handshake: {}",
+                        get_name(proxy_type),
+                        if still_handshaking { "in progress" } else { "complete" },
+                    );
+                    if !still_handshaking {
+                        info!("{} 🔒 SSL init complete", get_name(proxy_type));
+                    }
+                }
             }
-            info!(
-                "{} 🔒 stage #{} of {}: SSL handshake: {}",
-                get_name(proxy_type),
-                i,
-                STEPS,
-                server.ssl().state_string_long(),
-            );
-            if server.ssl().is_init_finished() {
-                info!(
-                    "{} 🔒 SSL init complete, negotiated cipher: <b><blue>{}</>",
-                    get_name(proxy_type),
-                    server.ssl().current_cipher().unwrap().name(),
-                );
+            let outgoing = mem_buf.drain_outgoing();
+            if !outgoing.is_empty() {
+                let pkt = ssl_encapsulate(outgoing);
+                let _ = pkt_debug(
+                    proxy_type,
+                    HexdumpLevel::RawOutput,
+                    hex_requested,
+                    &pkt,
+                    &cfg,
+                    None,
+                )
+                .await;
+                pkt.transmit(&mut device)
+                    .await
+                    .with_context(|| format!("proxy/{}: transmit failed", get_name(proxy_type)))?;
             }
-            let pkt = ssl_encapsulate(mem_buf.clone()).await?;
-            let _ = pkt_debug(
-                proxy_type,
-                HexdumpLevel::RawOutput,
-                hex_requested,
-                &pkt,
-                &cfg,
-                None,
-            )
-            .await;
-            pkt.transmit(&mut device)
-                .await
-                .with_context(|| format!("proxy/{}: transmit failed", get_name(proxy_type)))?;
+            if !ssl_conn.is_handshaking() {
+                break;
+            }
         }
     } else if proxy_type == ProxyType::MobileDevice {
         // expecting version request from the HU here...
@@ -3045,44 +2950,42 @@ pub async fn proxy<D: IoDeviceTrait>(
         tx.send(pkt).await?;
 
         // doing SSL handshake
-        const STEPS: u8 = 3;
-        for i in 1..=STEPS {
-            if let Err(e) = ssl_check_failure(server.do_handshake()) {
-                config.write().await.runtime_mitm_failed = true;
-                return Err(e);
+        loop {
+            match ssl_conn.process(&mut mem_buf) {
+                Err(e) => {
+                    config.write().await.runtime_mitm_failed = true;
+                    return Err(Box::new(e));
+                }
+                Ok(still_handshaking) => {
+                    info!(
+                        "{} 🔒 SSL handshake: {}",
+                        get_name(proxy_type),
+                        if still_handshaking { "in progress" } else { "complete" },
+                    );
+                    if !still_handshaking {
+                        info!("{} 🔒 SSL init complete", get_name(proxy_type));
+                    }
+                }
             }
-            info!(
-                "{} 🔒 stage #{} of {}: SSL handshake: {}",
-                get_name(proxy_type),
-                i,
-                STEPS,
-                server.ssl().state_string_long(),
-            );
-            if server.ssl().is_init_finished() {
-                info!(
-                    "{} 🔒 SSL init complete, negotiated cipher: <b><blue>{}</>",
-                    get_name(proxy_type),
-                    server.ssl().current_cipher().unwrap().name(),
-                );
+            let outgoing = mem_buf.drain_outgoing();
+            if !outgoing.is_empty() {
+                let pkt = ssl_encapsulate(outgoing);
+                let _ = pkt_debug(
+                    proxy_type,
+                    HexdumpLevel::RawOutput,
+                    hex_requested,
+                    &pkt,
+                    &cfg,
+                    None,
+                )
+                .await;
+                pkt.transmit(&mut device)
+                    .await
+                    .with_context(|| format!("proxy/{}: transmit failed", get_name(proxy_type)))?;
             }
-            if i == 3 {
-                // this was the last handshake step, need to break here
+            if !ssl_conn.is_handshaking() {
                 break;
-            };
-            let pkt = ssl_encapsulate(mem_buf.clone()).await?;
-            let _ = pkt_debug(
-                proxy_type,
-                HexdumpLevel::RawOutput,
-                hex_requested,
-                &pkt,
-                &cfg,
-                None,
-            )
-            .await;
-            pkt.transmit(&mut device)
-                .await
-                .with_context(|| format!("proxy/{}: transmit failed", get_name(proxy_type)))?;
-
+            }
             let pkt = rxr.recv().await.ok_or("reader channel hung up")?;
             let _ = pkt_debug(
                 proxy_type,
@@ -3284,7 +3187,7 @@ pub async fn proxy<D: IoDeviceTrait>(
                     tx.send(pkt).await?;
                 }
                 PacketAction::Forward => {
-                    pkt.encrypt_payload(&mut mem_buf, &mut server).await?;
+                    pkt.encrypt_payload(&mut mem_buf, &mut ssl_conn).await?;
                     let _ =
                         pkt_debug(proxy_type, HexdumpLevel::RawOutput, hex_requested, &pkt, &cfg, Some(&ctx.debug_channel_kinds)).await;
                     pkt.transmit(&mut device).await.with_context(|| {
@@ -3311,7 +3214,7 @@ pub async fn proxy<D: IoDeviceTrait>(
                             Some(&ctx.debug_channel_kinds),
                         )
                         .await;
-                        out_pkt.encrypt_payload(&mut mem_buf, &mut server).await?;
+                        out_pkt.encrypt_payload(&mut mem_buf, &mut ssl_conn).await?;
                         let _ = pkt_debug(
                             proxy_type,
                             HexdumpLevel::RawOutput,
@@ -3336,7 +3239,7 @@ pub async fn proxy<D: IoDeviceTrait>(
         // handling input data from the reader thread
         Some(mut pkt) = rxr.recv() => {
             let _ = pkt_debug(proxy_type, HexdumpLevel::RawInput, hex_requested, &pkt, &cfg, Some(&ctx.debug_channel_kinds)).await;
-            match pkt.decrypt_payload(&mut mem_buf, &mut server).await {
+            match pkt.decrypt_payload(&mut mem_buf, &mut ssl_conn).await {
                 Ok(_) => {
                     let action = pkt_modify_hook(
                         proxy_type,

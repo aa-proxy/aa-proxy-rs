@@ -17,6 +17,7 @@ pub mod device_info;
 pub mod display;
 pub mod ev;
 pub mod hu_input;
+pub mod ssl_rustls;
 pub mod inject_displays;
 pub mod io_backend;
 #[cfg(not(feature = "io-uring"))]
