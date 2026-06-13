@@ -1394,7 +1394,7 @@ fn maybe_publish_vehicle_energy_forecast_ws(
     match serde_json::to_string(&forecast) {
         Ok(payload) => {
             let _ = ws_event_tx.send(ServerEvent {
-                topic: "ver".to_string(),
+                topic: "vehicle_energy_forecast".to_string(),
                 payload,
             });
         }
