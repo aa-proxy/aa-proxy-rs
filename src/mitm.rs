@@ -1032,6 +1032,37 @@ fn raw_control_version_name(message_id: u16) -> Option<&'static str> {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct TcpProtocolVersionOverrideState {
+    original: (u16, u16),
+    target: (u16, u16),
+    applied: bool,
+}
+
+static TCP_PROTOCOL_VERSION_OVERRIDE_STATE: Mutex<Option<TcpProtocolVersionOverrideState>> =
+    Mutex::new(None);
+
+fn protocol_version_less_than(left: (u16, u16), right: (u16, u16)) -> bool {
+    left.0 < right.0 || (left.0 == right.0 && left.1 < right.1)
+}
+
+fn current_tcp_protocol_override_state() -> Option<TcpProtocolVersionOverrideState> {
+    TCP_PROTOCOL_VERSION_OVERRIDE_STATE
+        .lock()
+        .ok()
+        .and_then(|guard| *guard)
+}
+
+fn should_drop_override_induced_vehicle_energy_forecast(cfg: &AppConfig) -> Option<TcpProtocolVersionOverrideState> {
+    if !cfg.protocol_version_override_enabled
+        || !cfg.protocol_version_override_drop_induced_vehicle_energy_forecast
+    {
+        return None;
+    }
+
+    current_tcp_protocol_override_state().filter(|state| state.applied)
+}
+
 fn maybe_override_raw_control_protocol_version(
     proxy_type: ProxyType,
     direction: &str,
@@ -1054,37 +1085,159 @@ fn maybe_override_raw_control_protocol_version(
     // Layout observed on DHU / direct TCP:
     //   VERSION_REQUEST:  message_id(2) + major_be_u16 + minor_be_u16
     //   VERSION_RESPONSE: message_id(2) + major_be_u16 + minor_be_u16 + status_be_u16
-    // Keep any response status/trailing bytes intact and rewrite only major/minor.
+    //
+    // Important: the AA APK uses the HU-requested version for CarInfo/PDK gating.
+    // We only raise the request when the HU asks for an older version than the
+    // configured target. If the HU already advertises the target or a newer
+    // version (for example 6.0), the override is bypassed completely and the
+    // response is not normalized.
     let old_major = u16::from_be_bytes([pkt.payload[2], pkt.payload[3]]);
     let old_minor = u16::from_be_bytes([pkt.payload[4], pkt.payload[5]]);
-    let new_major = cfg.protocol_version_override_major;
-    let new_minor = cfg.protocol_version_override_minor;
 
-    pkt.payload[2..4].copy_from_slice(&new_major.to_be_bytes());
-    pkt.payload[4..6].copy_from_slice(&new_minor.to_be_bytes());
+    if message_id == MESSAGE_VERSION_REQUEST as u16 {
+        let target = (
+            cfg.protocol_version_override_major,
+            cfg.protocol_version_override_minor,
+        );
+        let original = (old_major, old_minor);
 
-    if old_major != new_major || old_minor != new_minor {
+        if !protocol_version_less_than(original, target) {
+            // The raw version request is seen twice in the current proxy pipeline:
+            //   HU proxy: original HU request is raised (for example 1.7 -> 5.1)
+            //   MD proxy: the already-raised request is transmitted to the phone
+            // Do not let the second observation overwrite the applied=true state,
+            // otherwise protocol-version-induced drops (0x8008 VEF) are disarmed.
+            if let Some(state) = current_tcp_protocol_override_state() {
+                if state.applied && state.target == original {
+                    info!(
+                        "{} protocol version override {}: {} observed already-raised request {}.{}; keeping applied state original={}.{} target={}.{} payload_len={}",
+                        get_name(proxy_type),
+                        direction,
+                        message_name,
+                        old_major,
+                        old_minor,
+                        state.original.0,
+                        state.original.1,
+                        state.target.0,
+                        state.target.1,
+                        pkt.payload.len()
+                    );
+                    return;
+                }
+            }
+
+            if let Ok(mut guard) = TCP_PROTOCOL_VERSION_OVERRIDE_STATE.lock() {
+                *guard = Some(TcpProtocolVersionOverrideState {
+                    original,
+                    target,
+                    applied: false,
+                });
+            }
+
+            info!(
+                "{} protocol version override {}: {} bypassed because HU request {}.{} is already >= target {}.{}; leaving request unchanged payload_len={}",
+                get_name(proxy_type),
+                direction,
+                message_name,
+                old_major,
+                old_minor,
+                target.0,
+                target.1,
+                pkt.payload.len()
+            );
+            return;
+        }
+
+        if let Ok(mut guard) = TCP_PROTOCOL_VERSION_OVERRIDE_STATE.lock() {
+            *guard = Some(TcpProtocolVersionOverrideState {
+                original,
+                target,
+                applied: true,
+            });
+        }
+
+        pkt.payload[2..4].copy_from_slice(&target.0.to_be_bytes());
+        pkt.payload[4..6].copy_from_slice(&target.1.to_be_bytes());
+
         info!(
-            "{} protocol version override {}: {} {}.{} -> {}.{} payload_len={}",
+            "{} protocol version override {}: {} phone-side request {}.{} -> {}.{} payload_len={}",
             get_name(proxy_type),
             direction,
             message_name,
             old_major,
             old_minor,
-            new_major,
-            new_minor,
+            target.0,
+            target.1,
             pkt.payload.len()
         );
-    } else {
-        debug!(
-            "{} protocol version override {}: {} already {}.{} payload_len={}",
-            get_name(proxy_type),
-            direction,
-            message_name,
-            new_major,
-            new_minor,
-            pkt.payload.len()
-        );
+        return;
+    }
+
+    if message_id == MESSAGE_VERSION_RESPONSE as u16 {
+        let Some(state) = current_tcp_protocol_override_state() else {
+            debug!(
+                "{} protocol version override {}: {} no HU request state cached; leaving response {}.{} unchanged payload_len={}",
+                get_name(proxy_type),
+                direction,
+                message_name,
+                old_major,
+                old_minor,
+                pkt.payload.len()
+            );
+            return;
+        };
+
+        if !state.applied {
+            debug!(
+                "{} protocol version override {}: {} bypass state active original={}.{} target={}.{}; leaving response {}.{} unchanged payload_len={}",
+                get_name(proxy_type),
+                direction,
+                message_name,
+                state.original.0,
+                state.original.1,
+                state.target.0,
+                state.target.1,
+                old_major,
+                old_minor,
+                pkt.payload.len()
+            );
+            return;
+        }
+
+        let (target_major, target_minor) = state.original;
+        if old_major != target_major || old_minor != target_minor {
+            let status = if pkt.payload.len() >= 8 {
+                Some(u16::from_be_bytes([pkt.payload[6], pkt.payload[7]]))
+            } else {
+                None
+            };
+
+            pkt.payload[2..4].copy_from_slice(&target_major.to_be_bytes());
+            pkt.payload[4..6].copy_from_slice(&target_minor.to_be_bytes());
+
+            info!(
+                "{} protocol version normalize {}: {} HU-side response {}.{} -> original {}.{} status={:?} payload_len={}",
+                get_name(proxy_type),
+                direction,
+                message_name,
+                old_major,
+                old_minor,
+                target_major,
+                target_minor,
+                status,
+                pkt.payload.len()
+            );
+        } else {
+            debug!(
+                "{} protocol version normalize {}: {} already original {}.{} payload_len={}",
+                get_name(proxy_type),
+                direction,
+                message_name,
+                target_major,
+                target_minor,
+                pkt.payload.len()
+            );
+        }
     }
 }
 
@@ -1624,17 +1777,32 @@ pub async fn pkt_modify_hook(
 
     // apply navigation-channel helpers
     if let Some(ch) = ctx.nav_channel {
-        if cfg.map_album_art_ev_prefix_enabled
-            && ch == pkt.channel
+        if ch == pkt.channel
             && proxy_type == ProxyType::HeadUnit
+            && flow == PacketFlow::ToEndpoint
             && message_id == VEHICLE_ENERGY_FORECAST_MESSAGE_ID
         {
-            maybe_update_album_art_ev_prefix_from_nav(
-                proxy_type,
-                data,
-                last_battery.clone(),
-            )
-            .await;
+            if cfg.map_album_art_ev_prefix_enabled {
+                maybe_update_album_art_ev_prefix_from_nav(
+                    proxy_type,
+                    data,
+                    last_battery.clone(),
+                )
+                .await;
+            }
+
+            if let Some(state) = should_drop_override_induced_vehicle_energy_forecast(cfg) {
+                info!(
+                    "{} protocol version override: consumed VehicleEnergyForecast 0x8008 locally and dropped before HU because request was raised {}.{} -> {}.{}",
+                    get_name(proxy_type),
+                    state.original.0,
+                    state.original.1,
+                    state.target.0,
+                    state.target.1
+                );
+                return Ok(PacketAction::Drop);
+            }
+
             return Ok(PacketAction::Forward);
         }
 
@@ -2259,8 +2427,17 @@ pub async fn pkt_modify_hook(
                 );
             }
 
-            // save navigation channel in context
-            if cfg.waze_lht_workaround || cfg.map_album_art_ev_prefix_enabled {
+            // Save navigation channel in context when any feature needs to inspect it.
+            // Keep protocol-version-induced VehicleEnergyForecast dropping independent
+            // from album art / Waze options: the drop is a compatibility guard for
+            // old HUs that only see 0x8008 because we raised the phone-side PDK
+            // version request.
+            let needs_navigation_status_channel = cfg.waze_lht_workaround
+                || cfg.map_album_art_ev_prefix_enabled
+                || (cfg.protocol_version_override_enabled
+                    && cfg.protocol_version_override_drop_induced_vehicle_energy_forecast);
+
+            if needs_navigation_status_channel {
                 if let Some(svc) = msg
                     .services
                     .iter()

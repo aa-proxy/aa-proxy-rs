@@ -352,6 +352,11 @@
           "description": "Protocol/PDK minor version to advertise when protocol_version_override_enabled is true. Default: 1.",
           "requires": "protocol_version_override_enabled"
         },
+        "protocol_version_override_drop_induced_vehicle_energy_forecast": {
+          "typ": "boolean",
+          "description": "Drop VehicleEnergyForecast (0x8008) before it reaches the HU only when protocol_version_override actually raised the HU-requested version. Automatically does nothing when the HU already advertises the target or a newer protocol version. Default: true.",
+          "requires": "protocol_version_override_enabled"
+        },
         "wired": {
           "typ": "string",
           "description": "Enable wired USB connection to phone (VID:PID should be specified; zero is wildcard and can be used for single or both fields).\nYou can obtain it e.g. using `lsusb` after connecting the phone, then use e.g. \"18d1:0\" which will handle the specified phone vendor ID (Google Pixel in this example).",

@@ -412,6 +412,7 @@ enum MessageId {
     WifiStartResponse = 7,
     WifiPingRequest = 8,
     WifiPingResponse = 9,
+    WifiSetupInfo = 11,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -427,6 +428,7 @@ enum ProxyMessageId {
     WifiStartResponse = 7,
     WifiPingRequest = 8,
     WifiPingResponse = 9,
+    WifiSetupInfo = 11,
 }
 
 impl ProxyMessageId {
@@ -441,6 +443,7 @@ impl ProxyMessageId {
             7 => "WifiStartResponse",
             8 => "WifiPingRequest",
             9 => "WifiPingResponse",
+            11 => "WifiSetupInfo",
             _ => "Unknown",
         }
     }
@@ -536,6 +539,9 @@ impl ProxyFrameSniffer {
             }
             x if x == ProxyMessageId::WifiVersionResponse as u16 => {
                 log_wifi_version_response(self.direction, payload);
+            }
+            x if x == ProxyMessageId::WifiSetupInfo as u16 => {
+                log_wifi_setup_info(self.direction, payload);
             }
             _ => {}
         }
@@ -1206,6 +1212,12 @@ struct WifiVersionResponseDebugInfo {
     connectivity_lifetime_id: Option<String>,
 }
 
+#[derive(Debug, Default, Clone)]
+struct WifiSetupInfoDebugInfo {
+    major_version: Option<u64>,
+    minor_version: Option<u64>,
+}
+
 fn read_proto_varint(buf: &[u8], offset: &mut usize) -> Option<u64> {
     let mut shift = 0u32;
     let mut value = 0u64;
@@ -1261,6 +1273,28 @@ fn skip_proto_value(payload: &[u8], offset: &mut usize, wire: u8) -> bool {
 }
 
 
+
+fn protocol_version_less_than_pair(left_major: u64, left_minor: u64, right_major: u16, right_minor: u16) -> bool {
+    left_major < right_major as u64
+        || (left_major == right_major as u64 && left_minor < right_minor as u64)
+}
+
+fn should_override_inspected_protocol_version(
+    major: Option<u64>,
+    minor: Option<u64>,
+    target_major: u16,
+    target_minor: u16,
+) -> bool {
+    match (major, minor) {
+        (Some(major), Some(minor)) => {
+            protocol_version_less_than_pair(major, minor, target_major, target_minor)
+        }
+        // If the fields are missing/malformed, keep previous behavior and try to
+        // write the configured override fields into the proto.
+        _ => true,
+    }
+}
+
 fn override_wifi_version_request_payload(payload: &[u8], major: u16, minor: u16) -> Option<Vec<u8>> {
     let mut offset = 0usize;
     let mut out = Vec::with_capacity(payload.len().saturating_add(8));
@@ -1307,6 +1341,12 @@ fn override_wifi_version_response_payload(payload: &[u8], major: u16, minor: u16
     // WifiVersionResponse uses the same top-level field numbers for major/minor
     // as WifiVersionRequest. Reuse the safe proto field rewriter and preserve all
     // status/device/connectivity fields unchanged.
+    override_wifi_version_request_payload(payload, major, minor)
+}
+
+fn override_wifi_setup_info_payload(payload: &[u8], major: u16, minor: u16) -> Option<Vec<u8>> {
+    // Latest Gearhead WifiSetupInfo also carries top-level major/minor as fields
+    // 1/2. Preserve every other setup field unchanged.
     override_wifi_version_request_payload(payload, major, minor)
 }
 
@@ -1674,6 +1714,48 @@ fn log_wifi_version_response(direction: &str, payload: &[u8]) -> WifiVersionResp
     info_msg
 }
 
+fn inspect_wifi_setup_info(payload: &[u8]) -> WifiSetupInfoDebugInfo {
+    let mut info = WifiSetupInfoDebugInfo::default();
+    let mut offset = 0usize;
+    while offset < payload.len() {
+        let Some(key) = read_proto_varint(payload, &mut offset) else {
+            break;
+        };
+        let field_no = key >> 3;
+        let wire = (key & 0x07) as u8;
+        match (field_no, wire) {
+            (1, 0) => info.major_version = read_proto_varint(payload, &mut offset),
+            (2, 0) => info.minor_version = read_proto_varint(payload, &mut offset),
+            _ => {
+                if !skip_proto_value(payload, &mut offset, wire) {
+                    warn!(
+                        "{} 🧪 bt-wireless-proxy: unsupported WifiSetupInfo proto wire type {} at field {} offset {}; stopping debug parse",
+                        NAME,
+                        wire,
+                        field_no,
+                        offset
+                    );
+                    break;
+                }
+            }
+        }
+    }
+    info
+}
+
+fn log_wifi_setup_info(direction: &str, payload: &[u8]) -> WifiSetupInfoDebugInfo {
+    let info_msg = inspect_wifi_setup_info(payload);
+    info!(
+        "{} 🧪 bt-wireless-proxy: {} parsed WifiSetupInfo major={:?} minor={:?} len={}",
+        NAME,
+        direction,
+        info_msg.major_version,
+        info_msg.minor_version,
+        payload.len()
+    );
+    info_msg
+}
+
 fn build_wifi_start_request_payload(ip_address: &str, port: u32) -> Result<Vec<u8>> {
     if port > i32::MAX as u32 {
         return Err(format!(
@@ -1706,6 +1788,7 @@ async fn read_hu_wifi_start_with_prebootstrap_passthrough(
     // WifiStartRequest. When enabled, synthesize WifiStartRequest from that
     // endpoint after a short wait to avoid a deadlock.
     let mut forwarded_frames = 0usize;
+    let mut wifi_version_override_applied = false;
     let mut last_projection_endpoint: Option<WifiProjectionProtocolDebugInfo> = None;
     let mut pending_hu_frame: Option<(u16, Vec<u8>)> = None;
     initial_hu_frames.reverse();
@@ -1777,26 +1860,85 @@ async fn read_hu_wifi_start_with_prebootstrap_passthrough(
             }
 
             if protocol_version_override_enabled {
-                match override_wifi_version_request_payload(
-                    &hu_payload,
+                if should_override_inspected_protocol_version(
+                    req_info.major_version,
+                    req_info.minor_version,
                     protocol_version_override_major,
                     protocol_version_override_minor,
                 ) {
-                    Some(rewritten) => {
-                        info!(
-                            "{} 🧪 bt-wireless-proxy car-wifi-mitm: overriding HU WifiVersionRequest major/minor {:?}.{:?} -> {}.{} before forwarding to phone",
-                            NAME,
-                            req_info.major_version,
-                            req_info.minor_version,
-                            protocol_version_override_major,
-                            protocol_version_override_minor
-                        );
-                        hu_payload = rewritten;
+                    match override_wifi_version_request_payload(
+                        &hu_payload,
+                        protocol_version_override_major,
+                        protocol_version_override_minor,
+                    ) {
+                        Some(rewritten) => {
+                            wifi_version_override_applied = true;
+                            info!(
+                                "{} 🧪 bt-wireless-proxy car-wifi-mitm: overriding HU WifiVersionRequest major/minor {:?}.{:?} -> {}.{} before forwarding to phone",
+                                NAME,
+                                req_info.major_version,
+                                req_info.minor_version,
+                                protocol_version_override_major,
+                                protocol_version_override_minor
+                            );
+                            hu_payload = rewritten;
+                        }
+                        None => warn!(
+                            "{} 🧪 bt-wireless-proxy car-wifi-mitm: failed to override malformed HU WifiVersionRequest; forwarding original",
+                            NAME
+                        ),
                     }
-                    None => warn!(
-                        "{} 🧪 bt-wireless-proxy car-wifi-mitm: failed to override malformed HU WifiVersionRequest; forwarding original",
-                        NAME
-                    ),
+                } else {
+                    wifi_version_override_applied = false;
+                    info!(
+                        "{} 🧪 bt-wireless-proxy car-wifi-mitm: bypassing HU WifiVersionRequest override because HU version {:?}.{:?} is already >= target {}.{}",
+                        NAME,
+                        req_info.major_version,
+                        req_info.minor_version,
+                        protocol_version_override_major,
+                        protocol_version_override_minor
+                    );
+                }
+            }
+        } else if hu_id == ProxyMessageId::WifiSetupInfo as u16 {
+            let setup_info = inspect_wifi_setup_info(&hu_payload);
+            if protocol_version_override_enabled {
+                if should_override_inspected_protocol_version(
+                    setup_info.major_version,
+                    setup_info.minor_version,
+                    protocol_version_override_major,
+                    protocol_version_override_minor,
+                ) {
+                    match override_wifi_setup_info_payload(
+                        &hu_payload,
+                        protocol_version_override_major,
+                        protocol_version_override_minor,
+                    ) {
+                        Some(rewritten) => {
+                            info!(
+                                "{} 🧪 bt-wireless-proxy car-wifi-mitm: overriding HU WifiSetupInfo major/minor {:?}.{:?} -> {}.{} before forwarding to phone",
+                                NAME,
+                                setup_info.major_version,
+                                setup_info.minor_version,
+                                protocol_version_override_major,
+                                protocol_version_override_minor
+                            );
+                            hu_payload = rewritten;
+                        }
+                        None => warn!(
+                            "{} 🧪 bt-wireless-proxy car-wifi-mitm: failed to override malformed HU WifiSetupInfo; forwarding original",
+                            NAME
+                        ),
+                    }
+                } else {
+                    info!(
+                        "{} 🧪 bt-wireless-proxy car-wifi-mitm: bypassing HU WifiSetupInfo override because HU version {:?}.{:?} is already >= target {}.{}",
+                        NAME,
+                        setup_info.major_version,
+                        setup_info.minor_version,
+                        protocol_version_override_major,
+                        protocol_version_override_minor
+                    );
                 }
             }
         }
@@ -1836,7 +1978,7 @@ async fn read_hu_wifi_start_with_prebootstrap_passthrough(
                     phone_id,
                     ProxyMessageId::name(phone_id)
                 );
-            } else if protocol_version_override_enabled {
+            } else if protocol_version_override_enabled && wifi_version_override_applied {
                 let resp_info = inspect_wifi_version_response(&phone_payload);
                 match override_wifi_version_response_payload(
                     &phone_payload,
@@ -1859,6 +2001,11 @@ async fn read_hu_wifi_start_with_prebootstrap_passthrough(
                         NAME
                     ),
                 }
+            } else if protocol_version_override_enabled {
+                debug!(
+                    "{} 🧪 bt-wireless-proxy car-wifi-mitm: WifiVersionRequest override was bypassed; leaving PHONE WifiVersionResponse unchanged",
+                    NAME
+                );
             }
 
             send_proxy_frame_raw(
