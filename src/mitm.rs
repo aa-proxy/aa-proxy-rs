@@ -1244,13 +1244,13 @@ fn maybe_override_raw_control_protocol_version(
 
 const VEHICLE_ENERGY_FORECAST_MESSAGE_ID: i32 = 0x8008;
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, Serialize)]
 struct ParsedEnergyAtDistance {
     distance_meters: Option<i32>,
     arrival_battery_energy_wh: Option<i32>,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, Serialize)]
 struct ParsedVehicleEnergyForecast {
     energy_at_next_stop: Option<ParsedEnergyAtDistance>,
     distance_to_empty: Option<ParsedEnergyAtDistance>,
@@ -1373,6 +1373,39 @@ fn parse_vehicle_energy_forecast_message(data: &[u8]) -> Option<ParsedVehicleEne
         }
     }
     Some(out)
+}
+
+fn maybe_publish_vehicle_energy_forecast_ws(
+    proxy_type: ProxyType,
+    data: &[u8],
+    ws_event_tx: &BroadcastSender<ServerEvent>,
+) {
+    let forecast = match parse_vehicle_energy_forecast_message(data) {
+        Some(forecast) => forecast,
+        None => {
+            debug!(
+                "{} ver: failed to parse VehicleEnergyForecast 0x8008",
+                get_name(proxy_type)
+            );
+            return;
+        }
+    };
+
+    match serde_json::to_string(&forecast) {
+        Ok(payload) => {
+            let _ = ws_event_tx.send(ServerEvent {
+                topic: "ver".to_string(),
+                payload,
+            });
+        }
+        Err(e) => {
+            warn!(
+                "{} ver: failed to serialize ParsedVehicleEnergyForecast: {:?}",
+                get_name(proxy_type),
+                e
+            );
+        }
+    }
 }
 
 fn battery_percent_from_last_battery(batt: &BatteryData) -> Option<u32> {
@@ -1782,6 +1815,8 @@ pub async fn pkt_modify_hook(
             && flow == PacketFlow::ToEndpoint
             && message_id == VEHICLE_ENERGY_FORECAST_MESSAGE_ID
         {
+            maybe_publish_vehicle_energy_forecast_ws(proxy_type, data, &ws_event_tx);
+
             if cfg.map_album_art_ev_prefix_enabled {
                 maybe_update_album_art_ev_prefix_from_nav(
                     proxy_type,
@@ -1792,7 +1827,7 @@ pub async fn pkt_modify_hook(
             }
 
             if let Some(state) = should_drop_override_induced_vehicle_energy_forecast(cfg) {
-                info!(
+                debug!(
                     "{} protocol version override: consumed VehicleEnergyForecast 0x8008 locally and dropped before HU because request was raised {}.{} -> {}.{}",
                     get_name(proxy_type),
                     state.original.0,
