@@ -83,3 +83,9 @@ protobuf-codegen = "3.7.1"
 [[bin]]
 name = "generate_config"
 path = "src/bin/generate_config.rs"
+
+[profile.release]
+strip = true      # Automatically strips symbols and debug info
+lto = true        # Optional: Enables Link-Time Optimization for even smaller binaries
+codegen-units = 1 # Optional: Reduces parallel code generation, allowing better optimization
+
