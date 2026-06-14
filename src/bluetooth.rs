@@ -1272,9 +1272,12 @@ fn skip_proto_value(payload: &[u8], offset: &mut usize, wire: u8) -> bool {
     }
 }
 
-
-
-fn protocol_version_less_than_pair(left_major: u64, left_minor: u64, right_major: u16, right_minor: u16) -> bool {
+fn protocol_version_less_than_pair(
+    left_major: u64,
+    left_minor: u64,
+    right_major: u16,
+    right_minor: u16,
+) -> bool {
     left_major < right_major as u64
         || (left_major == right_major as u64 && left_minor < right_minor as u64)
 }
@@ -1295,7 +1298,11 @@ fn should_override_inspected_protocol_version(
     }
 }
 
-fn override_wifi_version_request_payload(payload: &[u8], major: u16, minor: u16) -> Option<Vec<u8>> {
+fn override_wifi_version_request_payload(
+    payload: &[u8],
+    major: u16,
+    minor: u16,
+) -> Option<Vec<u8>> {
     let mut offset = 0usize;
     let mut out = Vec::with_capacity(payload.len().saturating_add(8));
     let mut saw_major = false;
@@ -1310,7 +1317,14 @@ fn override_wifi_version_request_payload(payload: &[u8], major: u16, minor: u16)
         if wire == 0 && (field_no == 1 || field_no == 2) {
             read_proto_varint(payload, &mut offset)?;
             encode_proto_varint(key, &mut out);
-            encode_proto_varint(if field_no == 1 { major as u64 } else { minor as u64 }, &mut out);
+            encode_proto_varint(
+                if field_no == 1 {
+                    major as u64
+                } else {
+                    minor as u64
+                },
+                &mut out,
+            );
             if field_no == 1 {
                 saw_major = true;
             } else {
@@ -1337,7 +1351,11 @@ fn override_wifi_version_request_payload(payload: &[u8], major: u16, minor: u16)
     Some(out)
 }
 
-fn override_wifi_version_response_payload(payload: &[u8], major: u16, minor: u16) -> Option<Vec<u8>> {
+fn override_wifi_version_response_payload(
+    payload: &[u8],
+    major: u16,
+    minor: u16,
+) -> Option<Vec<u8>> {
     // WifiVersionResponse uses the same top-level field numbers for major/minor
     // as WifiVersionRequest. Reuse the safe proto field rewriter and preserve all
     // status/device/connectivity fields unchanged.

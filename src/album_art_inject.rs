@@ -81,6 +81,10 @@ fn now_millis() -> u64 {
 }
 
 fn global_metadata_text_prefix(cfg: &AppConfig) -> Option<String> {
+    if album_art_ev_text_mode(cfg) == AlbumArtEvTextMode::AlbumArt {
+        return None;
+    }
+
     let prefix = match GLOBAL_METADATA_TEXT_PREFIX.lock() {
         Ok(guard) => guard.clone(),
         Err(poisoned) => poisoned.into_inner().clone(),
@@ -99,6 +103,41 @@ fn global_metadata_text_prefix(cfg: &AppConfig) -> Option<String> {
 
 fn global_metadata_text_prefix_generation() -> u64 {
     GLOBAL_METADATA_TEXT_PREFIX_GENERATION.load(Ordering::SeqCst)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AlbumArtEvTextMode {
+    /// Only replace/update the album-art image. Do not touch song/artist text.
+    AlbumArt,
+    /// Prefix song/title with the EV text.
+    SongPrefix,
+    /// Move original artist in front of song/title and write EV text into artist.
+    ArtistField,
+    /// Prefix artist with the EV text. Song/title is left unchanged.
+    ArtistPrefix,
+}
+
+fn normalized_ev_text_mode(value: &str) -> String {
+    value
+        .trim()
+        .to_ascii_lowercase()
+        .replace('-', "_")
+        .replace(' ', "_")
+}
+
+fn album_art_ev_text_mode(cfg: &AppConfig) -> AlbumArtEvTextMode {
+    match normalized_ev_text_mode(&cfg.map_album_art_ev_text_mode).as_str() {
+        "song_prefix" | "prefix" | "song" | "title_prefix" => AlbumArtEvTextMode::SongPrefix,
+        "artist_field" | "artist" | "artist_slot" | "replace_artist" => {
+            AlbumArtEvTextMode::ArtistField
+        }
+        "artist_prefix" | "prefix_artist" | "artist_title_prefix" => {
+            AlbumArtEvTextMode::ArtistPrefix
+        }
+        "album_art" | "albumart" | "art" | "only_album_art" | "album_art_only" | "off" | "none"
+        | "" => AlbumArtEvTextMode::AlbumArt,
+        _ => AlbumArtEvTextMode::AlbumArt,
+    }
 }
 
 #[derive(Default)]
@@ -582,10 +621,17 @@ fn build_synthetic_metadata_payload(
     payload.push(((MEDIA_PLAYBACK_METADATA_ID as u16) >> 8) as u8);
     payload.push(((MEDIA_PLAYBACK_METADATA_ID as u16) & 0xff) as u8);
 
-    if let Some(prefix) = global_metadata_text_prefix(cfg) {
-        write_varint((1 << 3) | 2, &mut payload);
-        write_varint(prefix.len() as u64, &mut payload);
-        payload.extend_from_slice(prefix.as_bytes());
+    if let Some(ev_text) = global_metadata_text_prefix(cfg) {
+        let field_no = match album_art_ev_text_mode(cfg) {
+            AlbumArtEvTextMode::SongPrefix => 1,
+            AlbumArtEvTextMode::ArtistField | AlbumArtEvTextMode::ArtistPrefix => 2,
+            AlbumArtEvTextMode::AlbumArt => 0,
+        };
+        if field_no != 0 {
+            write_varint((field_no << 3) | 2, &mut payload);
+            write_varint(ev_text.len() as u64, &mut payload);
+            payload.extend_from_slice(ev_text.as_bytes());
+        }
     }
 
     if duration_tick_enabled {
@@ -735,6 +781,54 @@ fn skip_checked(data: &[u8], pos: &mut usize, len: usize) -> Result<(), RewriteE
     Ok(())
 }
 
+fn read_metadata_text_field(payload: &[u8], target_field: u64) -> Option<Vec<u8>> {
+    if payload.len() < 2 {
+        return None;
+    }
+
+    let data = &payload[2..];
+    let mut pos = 0usize;
+    while pos < data.len() {
+        let key = read_varint(data, &mut pos).ok()?;
+        if key == 0 {
+            return None;
+        }
+
+        let field_no = key >> 3;
+        let wire_type = key & 0x07;
+        match wire_type {
+            0 => {
+                let _ = read_varint(data, &mut pos).ok()?;
+            }
+            1 => {
+                if data.len().saturating_sub(pos) < 8 {
+                    return None;
+                }
+                pos += 8;
+            }
+            2 => {
+                let len = read_varint(data, &mut pos).ok()? as usize;
+                if data.len().saturating_sub(pos) < len {
+                    return None;
+                }
+                if field_no == target_field {
+                    return Some(data[pos..pos + len].to_vec());
+                }
+                pos += len;
+            }
+            5 => {
+                if data.len().saturating_sub(pos) < 4 {
+                    return None;
+                }
+                pos += 4;
+            }
+            _ => return None,
+        }
+    }
+
+    None
+}
+
 fn rewrite_album_art_payload(
     payload: &[u8],
     replacement: &[u8],
@@ -745,12 +839,37 @@ fn rewrite_album_art_payload(
         return Err(RewriteError::Malformed);
     }
 
-    let prefix = global_metadata_text_prefix(cfg);
+    let ev_text = global_metadata_text_prefix(cfg);
+    let ev_text_mode = if ev_text.is_some() {
+        album_art_ev_text_mode(cfg)
+    } else {
+        AlbumArtEvTextMode::AlbumArt
+    };
+    let original_artist = if matches!(
+        ev_text_mode,
+        AlbumArtEvTextMode::ArtistField | AlbumArtEvTextMode::ArtistPrefix
+    ) {
+        read_metadata_text_field(payload, 2)
+    } else {
+        None
+    };
+    let original_song = if ev_text_mode == AlbumArtEvTextMode::ArtistField {
+        read_metadata_text_field(payload, 1)
+    } else {
+        None
+    };
+
     let mut out = Vec::with_capacity(
         payload
             .len()
             .saturating_add(replacement.len())
-            .saturating_add(prefix.as_ref().map(|value| value.len() + 1).unwrap_or(0))
+            .saturating_add(ev_text.as_ref().map(|value| value.len() + 1).unwrap_or(0))
+            .saturating_add(
+                original_artist
+                    .as_ref()
+                    .map(|value| value.len() + 1)
+                    .unwrap_or(0),
+            )
             .saturating_add(16),
     );
     out.extend_from_slice(&payload[..2]);
@@ -758,7 +877,8 @@ fn rewrite_album_art_payload(
     let data = &payload[2..];
     let mut pos = 0usize;
     let mut replaced = false;
-    let mut song_prefixed = false;
+    let mut song_written = false;
+    let mut artist_written = false;
 
     while pos < data.len() {
         let field_start = pos;
@@ -794,17 +914,46 @@ fn rewrite_album_art_payload(
                 let len = read_varint(data, &mut pos)? as usize;
                 skip_checked(data, &mut pos, len)?;
 
-                if field_no == 1 && !song_prefixed {
-                    if let Some(prefix) = prefix.as_deref() {
-                        let original = &data[pos - len..pos];
-                        let prefixed = build_prefixed_song(prefix, original);
-                        write_varint(key, &mut out);
-                        write_varint(prefixed.len() as u64, &mut out);
-                        out.extend_from_slice(&prefixed);
-                    } else {
-                        out.extend_from_slice(&data[field_start..pos]);
+                if field_no == 1 && !song_written {
+                    match (ev_text_mode, ev_text.as_deref()) {
+                        (AlbumArtEvTextMode::SongPrefix, Some(prefix)) => {
+                            let original = &data[pos - len..pos];
+                            let prefixed = build_prefixed_song(prefix, original);
+                            write_varint(key, &mut out);
+                            write_varint(prefixed.len() as u64, &mut out);
+                            out.extend_from_slice(&prefixed);
+                        }
+                        (AlbumArtEvTextMode::ArtistField, Some(_)) => {
+                            let original = &data[pos - len..pos];
+                            let moved =
+                                build_artist_song_prefix(original_artist.as_deref(), original);
+                            write_varint(key, &mut out);
+                            write_varint(moved.len() as u64, &mut out);
+                            out.extend_from_slice(&moved);
+                        }
+                        _ => out.extend_from_slice(&data[field_start..pos]),
                     }
-                    song_prefixed = true;
+                    song_written = true;
+                } else if field_no == 2
+                    && !artist_written
+                    && matches!(
+                        ev_text_mode,
+                        AlbumArtEvTextMode::ArtistField | AlbumArtEvTextMode::ArtistPrefix
+                    )
+                    && ev_text.is_some()
+                {
+                    let original = &data[pos - len..pos];
+                    let text = match (ev_text_mode, ev_text.as_deref()) {
+                        (AlbumArtEvTextMode::ArtistField, Some(text)) => text.as_bytes().to_vec(),
+                        (AlbumArtEvTextMode::ArtistPrefix, Some(prefix)) => {
+                            build_prefixed_song(prefix, original)
+                        }
+                        _ => original.to_vec(),
+                    };
+                    write_varint(key, &mut out);
+                    write_varint(text.len() as u64, &mut out);
+                    out.extend_from_slice(&text);
+                    artist_written = true;
                 } else if field_no == 4 && !replaced {
                     write_varint(key, &mut out);
                     write_varint(replacement.len() as u64, &mut out);
@@ -823,12 +972,44 @@ fn rewrite_album_art_payload(
         }
     }
 
-    if !song_prefixed {
-        if let Some(prefix) = prefix.as_deref() {
-            let prefixed = build_prefixed_song(prefix, b"");
-            write_varint((1 << 3) | 2, &mut out);
-            write_varint(prefixed.len() as u64, &mut out);
-            out.extend_from_slice(&prefixed);
+    if !song_written {
+        match (ev_text_mode, ev_text.as_deref()) {
+            (AlbumArtEvTextMode::SongPrefix, Some(prefix)) => {
+                let prefixed = build_prefixed_song(prefix, b"");
+                write_varint((1 << 3) | 2, &mut out);
+                write_varint(prefixed.len() as u64, &mut out);
+                out.extend_from_slice(&prefixed);
+            }
+            (AlbumArtEvTextMode::ArtistField, Some(_)) => {
+                let moved = build_artist_song_prefix(
+                    original_artist.as_deref(),
+                    original_song.as_deref().unwrap_or(b""),
+                );
+                if !moved.is_empty() {
+                    write_varint((1 << 3) | 2, &mut out);
+                    write_varint(moved.len() as u64, &mut out);
+                    out.extend_from_slice(&moved);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if !artist_written
+        && matches!(
+            ev_text_mode,
+            AlbumArtEvTextMode::ArtistField | AlbumArtEvTextMode::ArtistPrefix
+        )
+    {
+        if let Some(text) = ev_text.as_deref() {
+            let text = match ev_text_mode {
+                AlbumArtEvTextMode::ArtistField => text.as_bytes().to_vec(),
+                AlbumArtEvTextMode::ArtistPrefix => build_prefixed_song(text, b""),
+                _ => Vec::new(),
+            };
+            write_varint((2 << 3) | 2, &mut out);
+            write_varint(text.len() as u64, &mut out);
+            out.extend_from_slice(&text);
         }
     }
 
@@ -858,6 +1039,22 @@ fn build_prefixed_song(prefix: &str, original: &[u8]) -> Vec<u8> {
         original.as_bytes().to_vec()
     } else {
         format!("{} {}", prefix, original).into_bytes()
+    }
+}
+
+fn build_artist_song_prefix(original_artist: Option<&[u8]>, original_song: &[u8]) -> Vec<u8> {
+    let artist = original_artist
+        .map(String::from_utf8_lossy)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let song = String::from_utf8_lossy(original_song).trim().to_string();
+
+    match (artist, song.is_empty()) {
+        (Some(artist), false) if song.starts_with(&artist) => song.into_bytes(),
+        (Some(artist), false) => format!("{} {}", artist, song).into_bytes(),
+        (Some(artist), true) => artist.into_bytes(),
+        (None, false) => song.into_bytes(),
+        (None, true) => Vec::new(),
     }
 }
 
@@ -967,7 +1164,9 @@ mod tests {
         let replacement = vec![0x89, b'P', b'N', b'G', 1, 2, 3, 4, 5, 6];
         let payload = metadata_payload(&original_art);
 
-        let rewritten = rewrite_album_art_payload(&payload, &replacement, false, &AppConfig::default()).unwrap();
+        let rewritten =
+            rewrite_album_art_payload(&payload, &replacement, false, &AppConfig::default())
+                .unwrap();
 
         assert_eq!(extract_album_art(&rewritten), replacement);
         assert!(rewritten.len() > payload.len());
@@ -978,7 +1177,9 @@ mod tests {
         let replacement = vec![0x89, b'P', b'N', b'G', 1, 2, 3, 4, 5, 6];
         let payload = metadata_payload_without_album_art();
 
-        let rewritten = rewrite_album_art_payload(&payload, &replacement, false, &AppConfig::default()).unwrap();
+        let rewritten =
+            rewrite_album_art_payload(&payload, &replacement, false, &AppConfig::default())
+                .unwrap();
 
         assert_eq!(extract_album_art(&rewritten), replacement);
     }
@@ -989,7 +1190,8 @@ mod tests {
         let replacement = vec![0x89, b'P', b'N', b'G', 1, 2, 3, 4, 5, 6];
         let payload = metadata_payload(&original_art);
 
-        let rewritten = rewrite_album_art_payload(&payload, &replacement, true, &AppConfig::default()).unwrap();
+        let rewritten =
+            rewrite_album_art_payload(&payload, &replacement, true, &AppConfig::default()).unwrap();
 
         assert_eq!(extract_duration(&payload), Some(10));
         assert_eq!(extract_duration(&rewritten), Some(11));

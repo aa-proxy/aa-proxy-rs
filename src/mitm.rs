@@ -1053,14 +1053,36 @@ fn current_tcp_protocol_override_state() -> Option<TcpProtocolVersionOverrideSta
         .and_then(|guard| *guard)
 }
 
-fn should_drop_override_induced_vehicle_energy_forecast(cfg: &AppConfig) -> Option<TcpProtocolVersionOverrideState> {
-    if !cfg.protocol_version_override_enabled
-        || !cfg.protocol_version_override_drop_induced_vehicle_energy_forecast
-    {
+fn should_drop_override_induced_vehicle_energy_forecast(
+    cfg: &AppConfig,
+) -> Option<TcpProtocolVersionOverrideState> {
+    if !cfg.protocol_version_override_enabled {
         return None;
     }
 
     current_tcp_protocol_override_state().filter(|state| state.applied)
+}
+
+fn map_album_art_ev_metadata_text_enabled(cfg: &AppConfig) -> bool {
+    matches!(
+        cfg.map_album_art_ev_text_mode
+            .trim()
+            .to_ascii_lowercase()
+            .replace('-', "_")
+            .replace(' ', "_")
+            .as_str(),
+        "song_prefix"
+            | "prefix"
+            | "song"
+            | "title_prefix"
+            | "artist_field"
+            | "artist"
+            | "artist_slot"
+            | "replace_artist"
+            | "artist_prefix"
+            | "prefix_artist"
+            | "artist_title_prefix"
+    )
 }
 
 fn maybe_override_raw_control_protocol_version(
@@ -1240,7 +1262,6 @@ fn maybe_override_raw_control_protocol_version(
         }
     }
 }
-
 
 const VEHICLE_ENERGY_FORECAST_MESSAGE_ID: i32 = 0x8008;
 
@@ -1440,7 +1461,11 @@ fn build_ev_album_art_prefix(
     let distance_meters = forecast
         .distance_to_empty
         .and_then(|value| value.distance_meters)
-        .or_else(|| forecast.energy_at_next_stop.and_then(|value| value.distance_meters));
+        .or_else(|| {
+            forecast
+                .energy_at_next_stop
+                .and_then(|value| value.distance_meters)
+        });
     let km = distance_meters.and_then(rounded_km_from_distance_meters);
 
     match (percent, km) {
@@ -1817,13 +1842,9 @@ pub async fn pkt_modify_hook(
         {
             maybe_publish_vehicle_energy_forecast_ws(proxy_type, data, &ws_event_tx);
 
-            if cfg.map_album_art_ev_prefix_enabled {
-                maybe_update_album_art_ev_prefix_from_nav(
-                    proxy_type,
-                    data,
-                    last_battery.clone(),
-                )
-                .await;
+            if map_album_art_ev_metadata_text_enabled(cfg) {
+                maybe_update_album_art_ev_prefix_from_nav(proxy_type, data, last_battery.clone())
+                    .await;
             }
 
             if let Some(state) = should_drop_override_induced_vehicle_energy_forecast(cfg) {
@@ -2463,14 +2484,12 @@ pub async fn pkt_modify_hook(
             }
 
             // Save navigation channel in context when any feature needs to inspect it.
-            // Keep protocol-version-induced VehicleEnergyForecast dropping independent
-            // from album art / Waze options: the drop is a compatibility guard for
-            // old HUs that only see 0x8008 because we raised the phone-side PDK
-            // version request.
+            // Protocol-version-induced VehicleEnergyForecast dropping is always armed
+            // when protocol override is enabled, but it only actually drops if the
+            // current HU request was raised by the override state.
             let needs_navigation_status_channel = cfg.waze_lht_workaround
-                || cfg.map_album_art_ev_prefix_enabled
-                || (cfg.protocol_version_override_enabled
-                    && cfg.protocol_version_override_drop_induced_vehicle_energy_forecast);
+                || map_album_art_ev_metadata_text_enabled(cfg)
+                || cfg.protocol_version_override_enabled;
 
             if needs_navigation_status_channel {
                 if let Some(svc) = msg
@@ -3432,7 +3451,12 @@ pub async fn proxy<D: IoDeviceTrait>(
     } else if proxy_type == ProxyType::MobileDevice {
         // expecting version request from the HU here...
         let mut pkt = rx.recv().await.ok_or("rx channel hung up")?;
-        maybe_override_raw_control_protocol_version(proxy_type, "HU rx -> MD endpoint", &mut pkt, &cfg);
+        maybe_override_raw_control_protocol_version(
+            proxy_type,
+            "HU rx -> MD endpoint",
+            &mut pkt,
+            &cfg,
+        );
         // sending to the MD
         let _ = pkt_debug(
             proxy_type,
@@ -3448,7 +3472,12 @@ pub async fn proxy<D: IoDeviceTrait>(
             .with_context(|| format!("proxy/{}: transmit failed", get_name(proxy_type)))?;
         // waiting for MD reply
         let mut pkt = rxr.recv().await.ok_or("reader channel hung up")?;
-        maybe_override_raw_control_protocol_version(proxy_type, "MD endpoint -> HU tx", &mut pkt, &cfg);
+        maybe_override_raw_control_protocol_version(
+            proxy_type,
+            "MD endpoint -> HU tx",
+            &mut pkt,
+            &cfg,
+        );
         let _ = pkt_debug(
             proxy_type,
             HexdumpLevel::DecryptedInput, // the packet is not encrypted

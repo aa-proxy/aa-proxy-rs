@@ -601,12 +601,6 @@ pub struct AppConfig {
     pub protocol_version_override_enabled: bool,
     pub protocol_version_override_major: u16,
     pub protocol_version_override_minor: u16,
-    /// Drop VehicleEnergyForecast (0x8008) before it reaches the HU only when
-    /// protocol_version_override actually raised the HU-requested PDK version.
-    /// This protects older HUs/DHU builds while automatically bypassing the drop
-    /// when the HU already advertises the configured or a newer protocol version.
-    #[serde(default = "default_true")]
-    pub protocol_version_override_drop_induced_vehicle_energy_forecast: bool,
     pub external_antenna: bool,
     /// Base TCP port for media stream tapping. One port is allocated per media sink
     /// by order in the rewritten ServiceDiscoveryResponse: first media sink uses +0,
@@ -655,9 +649,12 @@ pub struct AppConfig {
     /// by +0/+1 on outbound rewritten metadata so strict HUs notice artwork-only updates.
     /// The cached phone metadata template is never modified.
     pub map_album_art_duration_tick_enabled: bool,
-    /// Prefix MediaPlaybackMetadata.song with EV route forecast text when AA sends
-    /// VehicleEnergyForecast on the navigation channel. Example: `38% 12km Song`.
-    pub map_album_art_ev_prefix_enabled: bool,
+    /// How EV route forecast text is written into rewritten MediaPlaybackMetadata.
+    /// album_art = artwork only, no text changes.
+    /// song_prefix = prefix song with EV text, e.g. `38% 12km Song`.
+    /// artist_field = move original artist before song and put EV text in artist field.
+    /// artist_prefix = prefix artist field with EV text, song/title unchanged.
+    pub map_album_art_ev_text_mode: String,
     /// Drop EV route forecast prefixes older than this many milliseconds. 0 disables expiry.
     pub map_album_art_ev_prefix_max_age_ms: u64,
     pub collect_speed: bool,
@@ -1000,7 +997,6 @@ impl Default for AppConfig {
             protocol_version_override_enabled: false,
             protocol_version_override_major: 5,
             protocol_version_override_minor: 1,
-            protocol_version_override_drop_induced_vehicle_energy_forecast: true,
             external_antenna: false,
             media_dump_base_port: None,
             media_wait_for_live_idr: true,
@@ -1019,7 +1015,7 @@ impl Default for AppConfig {
             map_album_art_crop_w: 40,
             map_album_art_crop_h: 40,
             map_album_art_duration_tick_enabled: false,
-            map_album_art_ev_prefix_enabled: false,
+            map_album_art_ev_text_mode: "album_art".to_string(),
             map_album_art_ev_prefix_max_age_ms: 15_000,
             collect_speed: false,
             disable_driving_status: false,
@@ -1335,7 +1331,6 @@ impl AppConfig {
         doc["protocol_version_override_enabled"] = value(self.protocol_version_override_enabled);
         doc["protocol_version_override_major"] = value(self.protocol_version_override_major as i64);
         doc["protocol_version_override_minor"] = value(self.protocol_version_override_minor as i64);
-        doc["protocol_version_override_drop_induced_vehicle_energy_forecast"] = value(self.protocol_version_override_drop_induced_vehicle_energy_forecast);
         doc["external_antenna"] = value(self.external_antenna);
         if let Some(port) = self.media_dump_base_port {
             doc["media_dump_base_port"] = value(port as i64);
@@ -1359,7 +1354,7 @@ impl AppConfig {
         doc["map_album_art_crop_h"] = value(self.map_album_art_crop_h as i64);
         doc["map_album_art_duration_tick_enabled"] =
             value(self.map_album_art_duration_tick_enabled);
-        doc["map_album_art_ev_prefix_enabled"] = value(self.map_album_art_ev_prefix_enabled);
+        doc["map_album_art_ev_text_mode"] = value(self.map_album_art_ev_text_mode.to_string());
         doc["map_album_art_ev_prefix_max_age_ms"] =
             value(self.map_album_art_ev_prefix_max_age_ms as i64);
         doc["collect_speed"] = value(self.collect_speed);
