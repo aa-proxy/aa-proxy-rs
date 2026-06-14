@@ -52,6 +52,10 @@ pub struct MediaSink {
     tx: broadcast::Sender<Arc<(u64, Vec<u8>)>>,
     /// Cached codec config frame sent to every new client on connect.
     codec_cfg: Arc<tokio::sync::Mutex<Option<Arc<Vec<u8>>>>>,
+    /// Most recently seen IDR access unit (pts_us, raw Annex-B data), used to
+    /// bootstrap a client straight back into sync after a resync instead of
+    /// waiting for the next naturally-occurring IDR.
+    last_idr: Arc<tokio::sync::Mutex<Option<Arc<(u64, Vec<u8>)>>>>,
     /// Stream metadata learned from ServiceDiscovery.
     stream_info: Arc<tokio::sync::Mutex<Option<MediaStreamInfo>>>,
     /// Monotonic counter bumped each time a TCP client connects to this sink.
@@ -64,6 +68,7 @@ impl MediaSink {
         Self {
             tx,
             codec_cfg: Arc::new(tokio::sync::Mutex::new(None)),
+            last_idr: Arc::new(tokio::sync::Mutex::new(None)),
             stream_info: Arc::new(tokio::sync::Mutex::new(None)),
             client_connect_gen: Arc::new(AtomicU64::new(0)),
         }
@@ -123,6 +128,14 @@ impl MediaSink {
 
     pub async fn get_codec_cfg(&self) -> Option<Arc<Vec<u8>>> {
         self.codec_cfg.lock().await.clone()
+    }
+
+    pub async fn set_last_idr(&self, pts_us: u64, access_unit: Vec<u8>) {
+        *self.last_idr.lock().await = Some(Arc::new((pts_us, access_unit)));
+    }
+
+    pub async fn get_last_idr(&self) -> Option<Arc<(u64, Vec<u8>)>> {
+        self.last_idr.lock().await.clone()
     }
 }
 
@@ -473,6 +486,7 @@ pub async fn media_tcp_server(port: u16, label: String, sink: MediaSink, _wait_f
                     let mut unsynced_access_units: u64 = 0;
                     let mut write_lag_events: u64 = 0;
                     let mut missing_codec_cfg_warned = false;
+                    let mut pending_resync_payload: Option<Vec<u8>> = None;
 
                     let initial_psi = ts.pat_pmt();
                     if tx_out.send(initial_psi).await.is_err() {
@@ -519,12 +533,15 @@ pub async fn media_tcp_server(port: u16, label: String, sink: MediaSink, _wait_f
                                                 let access_unit = std::mem::take(&mut pending_au);
                                                 let is_idr = is_idr_frame(&access_unit);
 
-                                                if is_idr && first_idr_seen_at.is_none() {
-                                                    first_idr_seen_at = Some(Instant::now());
-                                                    info!(
-                                                        "media_tcp_server: {addr} ({label}) first live IDR observed after {}ms",
-                                                        connected_at.elapsed().as_millis()
-                                                    );
+                                                if is_idr {
+                                                    sink.set_last_idr(flush_pts_us, access_unit.clone()).await;
+                                                    if first_idr_seen_at.is_none() {
+                                                        first_idr_seen_at = Some(Instant::now());
+                                                        info!(
+                                                            "media_tcp_server: {addr} ({label}) first live IDR observed after {}ms",
+                                                            connected_at.elapsed().as_millis()
+                                                        );
+                                                    }
                                                 }
 
                                                 if !synced {
@@ -603,6 +620,7 @@ pub async fn media_tcp_server(port: u16, label: String, sink: MediaSink, _wait_f
                                                             );
                                                             synced = false;
                                                             ts = MpegTsState::new(); // reset PTS baseline on resync
+                                                            pending_resync_payload = build_resync_payload(&sink, &mut ts).await;
                                                         }
                                                         Err(mpsc::error::TrySendError::Closed(_)) => break,
                                                     }
@@ -624,6 +642,7 @@ pub async fn media_tcp_server(port: u16, label: String, sink: MediaSink, _wait_f
                                         sync_resets = sync_resets.saturating_add(1);
                                         synced = false;
                                         ts = MpegTsState::new(); // reset PTS baseline on resync
+                                        pending_resync_payload = build_resync_payload(&sink, &mut ts).await;
                                         pending_pts_us = None;
                                         pending_au.clear();
                                     }
@@ -631,9 +650,25 @@ pub async fn media_tcp_server(port: u16, label: String, sink: MediaSink, _wait_f
                                 }
                             }
                             _ = null_ticker.tick(), if !synced => {
-                                match tx_out.try_send(null_pkt.clone()) {
-                                    Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => {}
-                                    Err(mpsc::error::TrySendError::Closed(_)) => break,
+                                if let Some(payload) = pending_resync_payload.take() {
+                                    match tx_out.try_send(payload) {
+                                        Ok(()) => {
+                                            synced = true;
+                                            info!(
+                                                "media_tcp_server: {addr} ({label}) resynced from cached IDR after {}ms",
+                                                connected_at.elapsed().as_millis()
+                                            );
+                                        }
+                                        Err(mpsc::error::TrySendError::Full(payload)) => {
+                                            pending_resync_payload = Some(payload);
+                                        }
+                                        Err(mpsc::error::TrySendError::Closed(_)) => break,
+                                    }
+                                } else {
+                                    match tx_out.try_send(null_pkt.clone()) {
+                                        Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => {}
+                                        Err(mpsc::error::TrySendError::Closed(_)) => break,
+                                    }
                                 }
                             }
                         }
@@ -665,6 +700,26 @@ pub async fn media_tcp_server(port: u16, label: String, sink: MediaSink, _wait_f
             }
         }
     }
+}
+
+/// Build a PAT/PMT + codec_cfg + IDR payload from the sink's cached IDR, to
+/// bootstrap a resyncing client back into sync immediately instead of
+/// waiting for the next naturally-occurring IDR. Returns `None` if no IDR
+/// has been cached yet (e.g. before the first live IDR on this sink).
+async fn build_resync_payload(sink: &MediaSink, ts: &mut MpegTsState) -> Option<Vec<u8>> {
+    let cached = sink.get_last_idr().await?;
+    let (pts_us, ref au) = *cached;
+    let mut out = ts.pat_pmt();
+    let payload = if let Some(cfg) = sink.get_codec_cfg().await {
+        let mut v = Vec::with_capacity(cfg.len() + au.len());
+        v.extend_from_slice(&cfg);
+        v.extend_from_slice(au);
+        v
+    } else {
+        au.clone()
+    };
+    out.extend_from_slice(&ts.video_pes(pts_us, &payload, true));
+    Some(out)
 }
 
 /// Scan all NAL units in an Annex-B buffer looking for IDR (type 5).
