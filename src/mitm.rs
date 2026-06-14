@@ -43,6 +43,7 @@ use std::io::Read;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast::Sender as BroadcastSender;
@@ -1277,6 +1278,85 @@ struct ParsedVehicleEnergyForecast {
     distance_to_empty: Option<ParsedEnergyAtDistance>,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct CachedVehicleEnergyForecast {
+    forecast: ParsedVehicleEnergyForecast,
+    updated_ms: u64,
+}
+
+static LAST_VEHICLE_ENERGY_FORECAST: Mutex<Option<CachedVehicleEnergyForecast>> = Mutex::new(None);
+
+impl ParsedEnergyAtDistance {
+    fn has_any_value(self) -> bool {
+        self.distance_meters.is_some() || self.arrival_battery_energy_wh.is_some()
+    }
+}
+
+impl ParsedVehicleEnergyForecast {
+    fn has_any_value(self) -> bool {
+        self.energy_at_next_stop
+            .map(|value| value.has_any_value())
+            .unwrap_or(false)
+            || self
+                .distance_to_empty
+                .map(|value| value.has_any_value())
+                .unwrap_or(false)
+    }
+}
+
+fn vehicle_energy_forecast_now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
+}
+
+fn resolve_vehicle_energy_forecast_for_null_policy(
+    proxy_type: ProxyType,
+    forecast: ParsedVehicleEnergyForecast,
+    cfg: &AppConfig,
+) -> ParsedVehicleEnergyForecast {
+    if forecast.has_any_value() {
+        if let Ok(mut guard) = LAST_VEHICLE_ENERGY_FORECAST.lock() {
+            *guard = Some(CachedVehicleEnergyForecast {
+                forecast,
+                updated_ms: vehicle_energy_forecast_now_millis(),
+            });
+        }
+        return forecast;
+    }
+
+    if !cfg.vehicle_energy_forecast_keep_last_on_null {
+        debug!(
+            "{} ver: VehicleEnergyForecast 0x8008 is empty/null; cache fallback disabled",
+            get_name(proxy_type)
+        );
+        return forecast;
+    }
+
+    let cached = LAST_VEHICLE_ENERGY_FORECAST
+        .lock()
+        .ok()
+        .and_then(|guard| *guard);
+
+    if let Some(cached) = cached {
+        debug!(
+            "{} ver: VehicleEnergyForecast 0x8008 is empty/null; using cached forecast age_ms={} distance_to_empty={:?} energy_at_next_stop={:?}",
+            get_name(proxy_type),
+            vehicle_energy_forecast_now_millis().saturating_sub(cached.updated_ms),
+            cached.forecast.distance_to_empty,
+            cached.forecast.energy_at_next_stop
+        );
+        cached.forecast
+    } else {
+        debug!(
+            "{} ver: VehicleEnergyForecast 0x8008 is empty/null; no cached forecast available",
+            get_name(proxy_type)
+        );
+        forecast
+    }
+}
+
 fn read_proto_varint(data: &[u8], pos: &mut usize) -> Option<u64> {
     let mut value = 0u64;
     let mut shift = 0u32;
@@ -1398,20 +1478,9 @@ fn parse_vehicle_energy_forecast_message(data: &[u8]) -> Option<ParsedVehicleEne
 
 fn maybe_publish_vehicle_energy_forecast_ws(
     proxy_type: ProxyType,
-    data: &[u8],
+    forecast: ParsedVehicleEnergyForecast,
     ws_event_tx: &BroadcastSender<ServerEvent>,
 ) {
-    let forecast = match parse_vehicle_energy_forecast_message(data) {
-        Some(forecast) => forecast,
-        None => {
-            debug!(
-                "{} ver: failed to parse VehicleEnergyForecast 0x8008",
-                get_name(proxy_type)
-            );
-            return;
-        }
-    };
-
     match serde_json::to_string(&forecast) {
         Ok(payload) => {
             let _ = ws_event_tx.send(ServerEvent {
@@ -1478,20 +1547,9 @@ fn build_ev_album_art_prefix(
 
 async fn maybe_update_album_art_ev_prefix_from_nav(
     proxy_type: ProxyType,
-    data: &[u8],
+    forecast: ParsedVehicleEnergyForecast,
     last_battery: Arc<RwLock<Option<BatteryData>>>,
 ) {
-    let forecast = match parse_vehicle_energy_forecast_message(data) {
-        Some(forecast) => forecast,
-        None => {
-            debug!(
-                "{} map album art EV prefix: failed to parse VehicleEnergyForecast 0x8008",
-                get_name(proxy_type)
-            );
-            return;
-        }
-    };
-
     let batt = last_battery.read().await;
     let prefix = build_ev_album_art_prefix(batt.as_ref(), forecast);
     let generation = set_global_metadata_text_prefix(prefix.clone());
@@ -1840,11 +1898,39 @@ pub async fn pkt_modify_hook(
             && flow == PacketFlow::ToEndpoint
             && message_id == VEHICLE_ENERGY_FORECAST_MESSAGE_ID
         {
-            maybe_publish_vehicle_energy_forecast_ws(proxy_type, data, &ws_event_tx);
+            let Some(parsed_forecast) = parse_vehicle_energy_forecast_message(data) else {
+                debug!(
+                    "{} ver: failed to parse VehicleEnergyForecast 0x8008",
+                    get_name(proxy_type)
+                );
+
+                if let Some(state) = should_drop_override_induced_vehicle_energy_forecast(cfg) {
+                    debug!(
+                        "{} protocol version override: consumed unparsable VehicleEnergyForecast 0x8008 locally and dropped before HU because request was raised {}.{} -> {}.{}",
+                        get_name(proxy_type),
+                        state.original.0,
+                        state.original.1,
+                        state.target.0,
+                        state.target.1
+                    );
+                    return Ok(PacketAction::Drop);
+                }
+
+                return Ok(PacketAction::Forward);
+            };
+
+            let forecast =
+                resolve_vehicle_energy_forecast_for_null_policy(proxy_type, parsed_forecast, cfg);
+
+            maybe_publish_vehicle_energy_forecast_ws(proxy_type, forecast, &ws_event_tx);
 
             if map_album_art_ev_metadata_text_enabled(cfg) {
-                maybe_update_album_art_ev_prefix_from_nav(proxy_type, data, last_battery.clone())
-                    .await;
+                maybe_update_album_art_ev_prefix_from_nav(
+                    proxy_type,
+                    forecast,
+                    last_battery.clone(),
+                )
+                .await;
             }
 
             if let Some(state) = should_drop_override_induced_vehicle_energy_forecast(cfg) {

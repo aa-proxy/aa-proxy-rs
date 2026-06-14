@@ -579,6 +579,11 @@
               "description": "Maximum age for EV forecast prefix in milliseconds. 0 disables expiry. Default: 15000.",
               "requires": "map_album_art_enabled"
             },
+            "vehicle_energy_forecast_keep_last_on_null": {
+              "typ": "boolean",
+              "description": "When Android Auto sends an empty/null VehicleEnergyForecast, keep using the last valid forecast for websocket consumers and album-art EV text instead of clearing the EV prefix. Default: true.",
+              "requires": "map_album_art_enabled"
+            },
             "map_album_art_video_display_id": {
               "typ": "string",
               "description": "Injected display id to sample when map_album_art_source is companion or rust_h264, for example aux-1 or cluster-1 from inject-displays.toml."

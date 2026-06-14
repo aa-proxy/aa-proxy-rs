@@ -657,6 +657,10 @@ pub struct AppConfig {
     pub map_album_art_ev_text_mode: String,
     /// Drop EV route forecast prefixes older than this many milliseconds. 0 disables expiry.
     pub map_album_art_ev_prefix_max_age_ms: u64,
+    /// When Android Auto sends an empty/null VehicleEnergyForecast, keep using the last
+    /// parsed forecast for websocket consumers and map album-art EV text.
+    #[serde(default = "default_true")]
+    pub vehicle_energy_forecast_keep_last_on_null: bool,
     pub collect_speed: bool,
     pub disable_driving_status: bool,
     /// Optional shell command invoked on HU media-key long press.
@@ -1017,6 +1021,7 @@ impl Default for AppConfig {
             map_album_art_duration_tick_enabled: false,
             map_album_art_ev_text_mode: "album_art".to_string(),
             map_album_art_ev_prefix_max_age_ms: 15_000,
+            vehicle_energy_forecast_keep_last_on_null: true,
             collect_speed: false,
             disable_driving_status: false,
             hu_button_handler: None,
@@ -1357,6 +1362,8 @@ impl AppConfig {
         doc["map_album_art_ev_text_mode"] = value(self.map_album_art_ev_text_mode.to_string());
         doc["map_album_art_ev_prefix_max_age_ms"] =
             value(self.map_album_art_ev_prefix_max_age_ms as i64);
+        doc["vehicle_energy_forecast_keep_last_on_null"] =
+            value(self.vehicle_energy_forecast_keep_last_on_null);
         doc["collect_speed"] = value(self.collect_speed);
         doc["disable_driving_status"] = value(self.disable_driving_status);
         if let Some(cmd) = &self.hu_button_handler {
