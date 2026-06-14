@@ -1633,10 +1633,11 @@ pub async fn pkt_modify_hook(
             return handle_vendor_channel_packet(pkt, ctx, vec_event_runtime).await;
         }
 
-        let control_allowed_on_service_channel = matches!(
-            control,
-            Some(MESSAGE_CHANNEL_OPEN_REQUEST | MESSAGE_CHANNEL_OPEN_RESPONSE)
-        );
+        let control_allowed_on_service_channel = (pkt.flags & _CONTROL) == _CONTROL
+            && matches!(
+                control,
+                Some(MESSAGE_CHANNEL_OPEN_REQUEST | MESSAGE_CHANNEL_OPEN_RESPONSE)
+            );
 
         if !control_allowed_on_service_channel {
             return Ok(PacketAction::Forward);
@@ -3146,10 +3147,16 @@ pub async fn proxy<D: IoDeviceTrait>(
                 && pkt.channel != 0
                 && ctx.injected_channels.contains(&pkt.channel)
             {
-                let raw_msg_id = pkt
-                    .payload
-                    .get(0..2)
-                    .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]));
+                // Only FIRST/standalone frames carry a real control message-id header;
+                // MIDDLE/LAST media fragments are raw continuation bytes and must not
+                // be misread as control messages here.
+                let raw_msg_id = if (pkt.flags & _CONTROL) == _CONTROL {
+                    pkt.payload
+                        .get(0..2)
+                        .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]))
+                } else {
+                    None
+                };
 
                 if let Some(action) = bt_maybe_handle_real_hu_passthrough_packet(
                     proxy_type,
