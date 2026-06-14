@@ -3,7 +3,7 @@ use simplelog::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc};
@@ -338,10 +338,21 @@ pub async fn media_tcp_server(port: u16, label: String, sink: MediaSink, _wait_f
                     // through this queue, so a slow/blocking socket write
                     // never delays draining the broadcast channel.
                     let (tx_out, mut rx_out) = mpsc::channel::<Vec<u8>>(CLIENT_WRITE_QUEUE_CAPACITY);
+                    let writer_addr = addr;
+                    let writer_label = label.clone();
                     tokio::spawn(async move {
                         while let Some(buf) = rx_out.recv().await {
+                            let write_started = Instant::now();
                             if stream.write_all(&buf).await.is_err() {
                                 break;
+                            }
+                            let write_elapsed = write_started.elapsed();
+                            if write_elapsed > Duration::from_millis(250) {
+                                warn!(
+                                    "media_tcp_server: {writer_addr} ({writer_label}) write_all took {}ms ({} bytes) - client read side may be stalled",
+                                    write_elapsed.as_millis(),
+                                    buf.len()
+                                );
                             }
                         }
                     });
