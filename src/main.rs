@@ -1419,6 +1419,33 @@ fn main() -> Result<()> {
 
     // build and spawn main tokio runtime
     let mut runtime = Builder::new_multi_thread().enable_all().build().unwrap();
+
+    // Scheduler-latency probe: one task per worker thread, each ticking
+    // every 200ms. If a tick's actual gap exceeds 1s, something blocked
+    // that worker thread for a while (e.g. a synchronous syscall or
+    // long-running computation on the async runtime). Used to root-cause
+    // the periodic video write-queue-full/resync stalls.
+    let probe_workers = thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    for probe_id in 0..probe_workers {
+        runtime.spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_millis(200));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut last = Instant::now();
+            loop {
+                ticker.tick().await;
+                let now = Instant::now();
+                let gap = now.duration_since(last);
+                if gap > Duration::from_secs(1) {
+                    warn!(
+                        "scheduler_probe[{probe_id}]: tick gap {}ms (expected ~200ms) - possible tokio runtime stall",
+                        gap.as_millis()
+                    );
+                }
+                last = now;
+            }
+        });
+    }
+
     let restart_tx_cloned = restart_tx.clone();
     let profile_connected_cloned = profile_connected.clone();
 
