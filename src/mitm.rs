@@ -1265,6 +1265,9 @@ fn maybe_override_raw_control_protocol_version(
 }
 
 const VEHICLE_ENERGY_FORECAST_MESSAGE_ID: i32 = 0x8008;
+// Latest Gearhead/AA builds can send this when PDK >= 5.1.
+// Our generated protos do not know it yet, so keep the raw id here.
+const MEDIA_MESSAGE_MEDIA_OPTIONS_MESSAGE_ID: i32 = 0x8015;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
 struct ParsedEnergyAtDistance {
@@ -1637,6 +1640,122 @@ fn rounded_km_from_distance_meters(distance_meters: i32) -> Option<u32> {
     Some(((distance_meters as f64) / 1000.0).round().max(1.0) as u32)
 }
 
+
+fn is_phone_to_hu_flow(proxy_type: ProxyType, flow: PacketFlow) -> bool {
+    matches!(
+        (proxy_type, flow),
+        (ProxyType::MobileDevice, PacketFlow::FromEndpoint)
+            | (ProxyType::HeadUnit, PacketFlow::ToEndpoint)
+    )
+}
+
+fn is_known_media_service_channel(ctx: &ModifyContext, channel: u8) -> bool {
+    ctx.media_channels.contains_key(&channel)
+        || ctx.audio_channels.contains(&channel)
+        || ctx.injected_media_display.contains_key(&channel)
+        || matches!(
+            ctx.debug_channel_kinds.get(&channel),
+            Some(PacketDebugServiceKind::MediaSink | PacketDebugServiceKind::MediaSource)
+        )
+}
+
+fn is_first_or_single_frame(pkt: &Packet) -> bool {
+    (pkt.flags & FRAME_TYPE_FIRST) == FRAME_TYPE_FIRST
+}
+
+fn maybe_handle_override_induced_media_options(
+    proxy_type: ProxyType,
+    flow: PacketFlow,
+    pkt: &Packet,
+    ctx: &ModifyContext,
+    message_id: i32,
+    cfg: &AppConfig,
+) -> Option<PacketAction> {
+    if message_id != MEDIA_MESSAGE_MEDIA_OPTIONS_MESSAGE_ID
+        || !is_phone_to_hu_flow(proxy_type, flow)
+        || !is_first_or_single_frame(pkt)
+    {
+        return None;
+    }
+
+    let media_channel = is_known_media_service_channel(ctx, pkt.channel);
+    let state = should_drop_override_induced_vehicle_energy_forecast(cfg);
+
+    if let Some(state) = state {
+        if media_channel {
+            info!(
+                "{} protocol version override: consumed MediaOptions 0x8015 locally and dropped before HU because request was raised {}.{} -> {}.{} ch={:#04x} flow={:?} flags={:#04x} len={}",
+                get_name(proxy_type),
+                state.original.0,
+                state.original.1,
+                state.target.0,
+                state.target.1,
+                pkt.channel,
+                flow,
+                pkt.flags,
+                pkt.payload.len()
+            );
+            return Some(PacketAction::Drop);
+        }
+
+        warn!(
+            "{} protocol version override: observed MediaOptions 0x8015 on non-media/unknown channel; forwarding ch={:#04x} flow={:?} flags={:#04x} len={} kind={:?}",
+            get_name(proxy_type),
+            pkt.channel,
+            flow,
+            pkt.flags,
+            pkt.payload.len(),
+            ctx.debug_channel_kinds.get(&pkt.channel)
+        );
+    } else {
+        info!(
+            "{} observed MediaOptions 0x8015 without override-induced state; forwarding ch={:#04x} flow={:?} flags={:#04x} len={} media_channel={} kind={:?}",
+            get_name(proxy_type),
+            pkt.channel,
+            flow,
+            pkt.flags,
+            pkt.payload.len(),
+            media_channel,
+            ctx.debug_channel_kinds.get(&pkt.channel)
+        );
+    }
+
+    None
+}
+
+fn maybe_log_unknown_override_pdk_candidate(
+    proxy_type: ProxyType,
+    flow: PacketFlow,
+    pkt: &Packet,
+    ctx: &ModifyContext,
+    message_id: i32,
+    cfg: &AppConfig,
+) {
+    if !cfg.protocol_version_override_enabled
+        || !is_phone_to_hu_flow(proxy_type, flow)
+        || pkt.channel == 0
+        || !is_known_media_service_channel(ctx, pkt.channel)
+        || !is_first_or_single_frame(pkt)
+        || message_id < 0x8000
+        || message_id == MEDIA_MESSAGE_MEDIA_OPTIONS_MESSAGE_ID
+        || protos::MediaMessageId::from_i32(message_id).is_some()
+    {
+        return;
+    }
+
+    info!(
+        "{} protocol version override: unknown media-channel PDK candidate msg=0x{:04X} ch={:#04x} flow={:?} flags={:#04x} len={} kind={:?} first={:02X?}",
+        get_name(proxy_type),
+        message_id as u16,
+        pkt.channel,
+        flow,
+        pkt.flags,
+        pkt.payload.len(),
+        ctx.debug_channel_kinds.get(&pkt.channel),
+        &pkt.payload[..pkt.payload.len().min(16)]
+    );
+}
+
 fn build_ev_album_art_prefix(
     batt: Option<&BatteryData>,
     forecast: ParsedVehicleEnergyForecast,
@@ -1741,6 +1860,19 @@ pub async fn pkt_modify_hook(
     // message_id is the first 2 bytes of payload
     let message_id: i32 = u16::from_be_bytes(pkt.payload[0..=1].try_into()?).into();
     let data = &pkt.payload[2..]; // start of message data
+
+    if let Some(action) = maybe_handle_override_induced_media_options(
+        proxy_type,
+        flow,
+        pkt,
+        ctx,
+        message_id,
+        cfg,
+    ) {
+        return Ok(action);
+    }
+
+    maybe_log_unknown_override_pdk_candidate(proxy_type, flow, pkt, ctx, message_id, cfg);
 
     // Optional map-preview album art injection.
     // This runs on the phone -> proxy ingress path. Fragmented metadata is buffered,
