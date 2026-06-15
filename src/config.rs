@@ -657,8 +657,8 @@ pub struct AppConfig {
     pub map_album_art_ev_text_mode: String,
     /// Drop EV route forecast prefixes older than this many milliseconds. 0 disables expiry.
     pub map_album_art_ev_prefix_max_age_ms: u64,
-    /// When Android Auto sends an empty/null VehicleEnergyForecast, keep using the last
-    /// parsed forecast for websocket consumers and map album-art EV text.
+    /// When Android Auto sends an empty/null or partially-null VehicleEnergyForecast,
+    /// keep using cached valid fields for websocket consumers and map album-art EV text.
     #[serde(default = "default_true")]
     pub vehicle_energy_forecast_keep_last_on_null: bool,
     pub collect_speed: bool,

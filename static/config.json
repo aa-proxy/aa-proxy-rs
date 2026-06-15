@@ -581,7 +581,7 @@
             },
             "vehicle_energy_forecast_keep_last_on_null": {
               "typ": "boolean",
-              "description": "When Android Auto sends an empty/null VehicleEnergyForecast, keep using the last valid forecast for websocket consumers and album-art EV text instead of clearing the EV prefix. Default: true.",
+              "description": "When Android Auto sends an empty/null or partially-null VehicleEnergyForecast, keep using cached valid fields for websocket consumers and album-art EV text instead of clearing the EV prefix. Default: true.",
               "requires": "map_album_art_enabled"
             },
             "map_album_art_video_display_id": {

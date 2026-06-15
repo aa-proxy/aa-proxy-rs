@@ -1266,13 +1266,13 @@ fn maybe_override_raw_control_protocol_version(
 
 const VEHICLE_ENERGY_FORECAST_MESSAGE_ID: i32 = 0x8008;
 
-#[derive(Clone, Copy, Debug, Default, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
 struct ParsedEnergyAtDistance {
     distance_meters: Option<i32>,
     arrival_battery_energy_wh: Option<i32>,
 }
 
-#[derive(Clone, Copy, Debug, Default, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
 struct ParsedVehicleEnergyForecast {
     energy_at_next_stop: Option<ParsedEnergyAtDistance>,
     distance_to_empty: Option<ParsedEnergyAtDistance>,
@@ -1302,6 +1302,25 @@ impl ParsedVehicleEnergyForecast {
                 .map(|value| value.has_any_value())
                 .unwrap_or(false)
     }
+
+    fn has_partial_null_over_cached(self, cached: ParsedVehicleEnergyForecast) -> bool {
+        let next_stop_lost_arrival = self
+            .energy_at_next_stop
+            .map(|value| value.arrival_battery_energy_wh.is_none())
+            .unwrap_or(true)
+            && cached
+                .energy_at_next_stop
+                .and_then(|value| value.arrival_battery_energy_wh)
+                .is_some();
+
+        let missing_distance_to_empty = self.distance_to_empty.is_none()
+            && cached
+                .distance_to_empty
+                .map(|value| value.has_any_value())
+                .unwrap_or(false);
+
+        next_stop_lost_arrival || missing_distance_to_empty
+    }
 }
 
 fn vehicle_energy_forecast_now_millis() -> u64 {
@@ -1311,26 +1330,100 @@ fn vehicle_energy_forecast_now_millis() -> u64 {
         .unwrap_or(0)
 }
 
+fn merge_energy_at_next_stop_keep_last(
+    incoming: Option<ParsedEnergyAtDistance>,
+    cached: Option<ParsedEnergyAtDistance>,
+) -> Option<ParsedEnergyAtDistance> {
+    match (incoming, cached) {
+        (Some(value), Some(cached_value)) => {
+            // When navigation is stopped Gearhead can keep sending the sub-message with a
+            // distance but with arrival_battery_energy_wh=null. Treat that as a stale/empty
+            // next-stop forecast and keep the last complete next-stop forecast instead of
+            // mixing an old Wh value with a new, unrelated distance.
+            if value.arrival_battery_energy_wh.is_none()
+                && cached_value.arrival_battery_energy_wh.is_some()
+            {
+                Some(cached_value)
+            } else if value.has_any_value() {
+                Some(value)
+            } else {
+                Some(cached_value)
+            }
+        }
+        (Some(value), None) if value.has_any_value() => Some(value),
+        (Some(_), None) => None,
+        (None, cached_value) => cached_value,
+    }
+}
+
+fn merge_distance_to_empty_keep_last(
+    incoming: Option<ParsedEnergyAtDistance>,
+    cached: Option<ParsedEnergyAtDistance>,
+) -> Option<ParsedEnergyAtDistance> {
+    match (incoming, cached) {
+        (Some(mut value), Some(cached_value)) => {
+            if !value.has_any_value() {
+                return Some(cached_value);
+            }
+
+            // distance_to_empty commonly has arrival_battery_energy_wh=null, so keep the
+            // fresh distance and only fill truly missing fields from cache.
+            if value.distance_meters.is_none() {
+                value.distance_meters = cached_value.distance_meters;
+            }
+            if value.arrival_battery_energy_wh.is_none() {
+                value.arrival_battery_energy_wh = cached_value.arrival_battery_energy_wh;
+            }
+            Some(value)
+        }
+        (Some(value), None) if value.has_any_value() => Some(value),
+        (Some(_), None) => None,
+        (None, cached_value) => cached_value,
+    }
+}
+
+fn merge_vehicle_energy_forecast_keep_last(
+    incoming: ParsedVehicleEnergyForecast,
+    cached: ParsedVehicleEnergyForecast,
+) -> ParsedVehicleEnergyForecast {
+    ParsedVehicleEnergyForecast {
+        energy_at_next_stop: merge_energy_at_next_stop_keep_last(
+            incoming.energy_at_next_stop,
+            cached.energy_at_next_stop,
+        ),
+        distance_to_empty: merge_distance_to_empty_keep_last(
+            incoming.distance_to_empty,
+            cached.distance_to_empty,
+        ),
+    }
+}
+
+fn store_vehicle_energy_forecast_cache(forecast: ParsedVehicleEnergyForecast) {
+    if !forecast.has_any_value() {
+        return;
+    }
+
+    if let Ok(mut guard) = LAST_VEHICLE_ENERGY_FORECAST.lock() {
+        *guard = Some(CachedVehicleEnergyForecast {
+            forecast,
+            updated_ms: vehicle_energy_forecast_now_millis(),
+        });
+    }
+}
+
 fn resolve_vehicle_energy_forecast_for_null_policy(
     proxy_type: ProxyType,
     forecast: ParsedVehicleEnergyForecast,
     cfg: &AppConfig,
 ) -> ParsedVehicleEnergyForecast {
-    if forecast.has_any_value() {
-        if let Ok(mut guard) = LAST_VEHICLE_ENERGY_FORECAST.lock() {
-            *guard = Some(CachedVehicleEnergyForecast {
-                forecast,
-                updated_ms: vehicle_energy_forecast_now_millis(),
-            });
-        }
-        return forecast;
-    }
-
     if !cfg.vehicle_energy_forecast_keep_last_on_null {
-        debug!(
-            "{} ver: VehicleEnergyForecast 0x8008 is empty/null; cache fallback disabled",
-            get_name(proxy_type)
-        );
+        store_vehicle_energy_forecast_cache(forecast);
+        if !forecast.has_any_value() {
+            debug!(
+                "{} ver: VehicleEnergyForecast 0x8008 is empty/null; cache fallback disabled",
+                get_name(proxy_type)
+            );
+        }
         return forecast;
     }
 
@@ -1339,22 +1432,44 @@ fn resolve_vehicle_energy_forecast_for_null_policy(
         .ok()
         .and_then(|guard| *guard);
 
-    if let Some(cached) = cached {
-        debug!(
-            "{} ver: VehicleEnergyForecast 0x8008 is empty/null; using cached forecast age_ms={} distance_to_empty={:?} energy_at_next_stop={:?}",
-            get_name(proxy_type),
-            vehicle_energy_forecast_now_millis().saturating_sub(cached.updated_ms),
-            cached.forecast.distance_to_empty,
-            cached.forecast.energy_at_next_stop
-        );
-        cached.forecast
-    } else {
-        debug!(
-            "{} ver: VehicleEnergyForecast 0x8008 is empty/null; no cached forecast available",
-            get_name(proxy_type)
-        );
-        forecast
-    }
+    let resolved = match (forecast.has_any_value(), cached) {
+        (true, Some(cached)) if forecast.has_partial_null_over_cached(cached.forecast) => {
+            let merged = merge_vehicle_energy_forecast_keep_last(forecast, cached.forecast);
+            if merged != forecast {
+                info!(
+                    "{} ver: VehicleEnergyForecast 0x8008 has partial/null fields; using cached fields age_ms={} raw_distance_to_empty={:?} raw_energy_at_next_stop={:?} merged_distance_to_empty={:?} merged_energy_at_next_stop={:?}",
+                    get_name(proxy_type),
+                    vehicle_energy_forecast_now_millis().saturating_sub(cached.updated_ms),
+                    forecast.distance_to_empty,
+                    forecast.energy_at_next_stop,
+                    merged.distance_to_empty,
+                    merged.energy_at_next_stop
+                );
+            }
+            merged
+        }
+        (true, _) => forecast,
+        (false, Some(cached)) => {
+            info!(
+                "{} ver: VehicleEnergyForecast 0x8008 is empty/null; using cached forecast age_ms={} distance_to_empty={:?} energy_at_next_stop={:?}",
+                get_name(proxy_type),
+                vehicle_energy_forecast_now_millis().saturating_sub(cached.updated_ms),
+                cached.forecast.distance_to_empty,
+                cached.forecast.energy_at_next_stop
+            );
+            cached.forecast
+        }
+        (false, None) => {
+            debug!(
+                "{} ver: VehicleEnergyForecast 0x8008 is empty/null; no cached forecast available",
+                get_name(proxy_type)
+            );
+            forecast
+        }
+    };
+
+    store_vehicle_energy_forecast_cache(resolved);
+    resolved
 }
 
 fn read_proto_varint(data: &[u8], pos: &mut usize) -> Option<u64> {
