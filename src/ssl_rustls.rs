@@ -306,21 +306,21 @@ impl AaConnection {
         mem_buf: &mut SslMemBuf,
     ) -> std::result::Result<(), rustls::Error> {
         match self {
-            AaConnection::Server(c) => {
-                c.writer()
-                    .write_all(plaintext)
-                    .map_err(|e| rustls::Error::General(e.to_string()))?;
-                c.write_tls(&mut mem_buf.outgoing)
-                    .map_err(|e| rustls::Error::General(e.to_string()))?;
-            }
-            AaConnection::Client(c) => {
-                c.writer()
-                    .write_all(plaintext)
-                    .map_err(|e| rustls::Error::General(e.to_string()))?;
-                c.write_tls(&mut mem_buf.outgoing)
-                    .map_err(|e| rustls::Error::General(e.to_string()))?;
-            }
+            AaConnection::Server(c) => Self::encrypt_conn(c, plaintext, mem_buf),
+            AaConnection::Client(c) => Self::encrypt_conn(c, plaintext, mem_buf),
         }
+    }
+
+    fn encrypt_conn<Data>(
+        conn: &mut rustls::ConnectionCommon<Data>,
+        plaintext: &[u8],
+        mem_buf: &mut SslMemBuf,
+    ) -> std::result::Result<(), rustls::Error> {
+        conn.writer()
+            .write_all(plaintext)
+            .map_err(|e| rustls::Error::General(e.to_string()))?;
+        // write_tls can only fail with io::Error from the sink — our Vec sink never fails
+        let _ = conn.write_tls(&mut mem_buf.outgoing);
         Ok(())
     }
 
@@ -341,12 +341,18 @@ impl AaConnection {
         conn: &mut rustls::ConnectionCommon<Data>,
         mem_buf: &mut SslMemBuf,
     ) -> std::result::Result<Vec<u8>, rustls::Error> {
-        let _ = conn.read_tls(mem_buf);
+        match conn.read_tls(mem_buf) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(e) => return Err(rustls::Error::General(e.to_string())),
+        }
         conn.process_new_packets()?;
         let mut plaintext = Vec::new();
-        conn.reader()
-            .read_to_end(&mut plaintext)
-            .map_err(|e| rustls::Error::General(e.to_string()))?;
+        match conn.reader().read_to_end(&mut plaintext) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(e) => return Err(rustls::Error::General(e.to_string())),
+        }
         Ok(plaintext)
     }
 }
