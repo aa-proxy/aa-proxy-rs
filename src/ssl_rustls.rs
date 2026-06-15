@@ -214,7 +214,34 @@ impl ClientCertVerifier for AaClientCertVerifier {
     }
 }
 
-/// ResolvesClientCert that returns a pre-loaded CertifiedKey without letting
+/// ResolvesServerCert that returns a pre-loaded CertifiedKey without letting
+/// rustls parse and validate the certificate — V1 workaround for the server path.
+/// with_single_cert() validates the cert version; with_cert_resolver() does not.
+#[derive(Debug)]
+struct AaServerCertResolver(Arc<CertifiedKey>);
+
+impl AaServerCertResolver {
+    fn new(cert: CertificateDer<'static>, key: PrivateKeyDer<'static>) -> Result<Arc<Self>> {
+        let signing_key = aws_lc_rs::default_provider()
+            .key_provider
+            .load_private_key(key)?;
+        Ok(Arc::new(Self(Arc::new(CertifiedKey::new(
+            vec![cert],
+            signing_key,
+        )))))
+    }
+}
+
+impl rustls::server::ResolvesServerCert for AaServerCertResolver {
+    fn resolve(
+        &self,
+        _client_hello: rustls::server::ClientHello<'_>,
+    ) -> Option<Arc<CertifiedKey>> {
+        Some(self.0.clone())
+    }
+}
+
+
 /// rustls parse and validate the certificate.  This is the V1 workaround for
 /// the client path: with_client_auth_cert() validates the cert version;
 /// with_client_cert_resolver() does not.
@@ -400,11 +427,13 @@ pub fn ssl_builder(
         }
         ProxyType::MobileDevice => {
             // TLS server — phone connects to us acting as HU.
-            // Use a custom ClientCertVerifier to avoid V1 rejection.
+            // Use with_cert_resolver instead of with_single_cert to avoid V1 rejection.
+            let cert0 = certs.into_iter().next().ok_or("no certificate in file")?;
+            let resolver = AaServerCertResolver::new(cert0, key)?;
             let config = ServerConfig::builder_with_provider(provider)
                 .with_protocol_versions(&[&TLS12])?
                 .with_client_cert_verifier(AaClientCertVerifier::new())
-                .with_single_cert(certs, key)?;
+                .with_cert_resolver(resolver);
             AaConnection::Server(rustls::ServerConnection::new(Arc::new(config))?)
         }
     };
