@@ -390,9 +390,9 @@ fn load_cert_and_key(
 
 /// Build an `AaConnection` for the given proxy side.
 ///
-/// SSL role mapping (same as the old openssl ssl_builder):
-///   ProxyType::HeadUnit     → we talk to the HU → we are MD → TLS **client**
-///   ProxyType::MobileDevice → we talk to the MD → we are HU → TLS **server**
+/// SSL role mapping (identical to original openssl ssl_builder):
+///   ProxyType::HeadUnit     → set_accept_state() → TLS **server** (phone connects to us)
+///   ProxyType::MobileDevice → set_connect_state() → TLS **client** (we connect to HU)
 pub fn ssl_builder(
     proxy_type: ProxyType,
     keys_path: &str,
@@ -410,24 +410,8 @@ pub fn ssl_builder(
 
     let conn = match proxy_type {
         ProxyType::HeadUnit => {
-            // TLS client — we connect to the real HU acting as MD.
-            // Use a resolver instead of with_client_auth_cert to avoid V1 rejection.
-            let cert0 = certs.into_iter().next().ok_or("no certificate in file")?;
-            let resolver = AaClientCertResolver::new(cert0, key)?;
-            let config = ClientConfig::builder_with_provider(provider)
-                .with_protocol_versions(&[&TLS12])?
-                .dangerous()
-                .with_custom_certificate_verifier(AaServerCertVerifier::new())
-                .with_client_cert_resolver(resolver);
-            // server_name is not verified (custom verifier) but rustls requires one
-            let server_name = "android.auto"
-                .try_into()
-                .map_err(|e| format!("server_name parse: {e}"))?;
-            AaConnection::Client(rustls::ClientConnection::new(Arc::new(config), server_name)?)
-        }
-        ProxyType::MobileDevice => {
-            // TLS server — phone connects to us acting as HU.
-            // Use with_cert_resolver instead of with_single_cert to avoid V1 rejection.
+            // Original: set_accept_state() → SSL server
+            // We talk to the phone acting as HU → we are TLS server
             let cert0 = certs.into_iter().next().ok_or("no certificate in file")?;
             let resolver = AaServerCertResolver::new(cert0, key)?;
             let config = ServerConfig::builder_with_provider(provider)
@@ -435,6 +419,21 @@ pub fn ssl_builder(
                 .with_client_cert_verifier(AaClientCertVerifier::new())
                 .with_cert_resolver(resolver);
             AaConnection::Server(rustls::ServerConnection::new(Arc::new(config))?)
+        }
+        ProxyType::MobileDevice => {
+            // Original: set_connect_state() → SSL client
+            // We talk to the HU acting as phone → we are TLS client
+            let cert0 = certs.into_iter().next().ok_or("no certificate in file")?;
+            let resolver = AaClientCertResolver::new(cert0, key)?;
+            let config = ClientConfig::builder_with_provider(provider)
+                .with_protocol_versions(&[&TLS12])?
+                .dangerous()
+                .with_custom_certificate_verifier(AaServerCertVerifier::new())
+                .with_client_cert_resolver(resolver);
+            let server_name = "android.auto"
+                .try_into()
+                .map_err(|e| format!("server_name parse: {e}"))?;
+            AaConnection::Client(rustls::ClientConnection::new(Arc::new(config), server_name)?)
         }
     };
 
