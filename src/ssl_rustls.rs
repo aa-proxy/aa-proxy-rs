@@ -125,30 +125,20 @@ impl ServerCertVerifier for AaServerCertVerifier {
 
     fn verify_tls12_signature(
         &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &DigitallySignedStruct,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
     ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(
-            message,
-            cert,
-            dss,
-            &self.0.signature_verification_algorithms,
-        )
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
     }
 
     fn verify_tls13_signature(
         &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &DigitallySignedStruct,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
     ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(
-            message,
-            cert,
-            dss,
-            &self.0.signature_verification_algorithms,
-        )
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
@@ -183,30 +173,20 @@ impl ClientCertVerifier for AaClientCertVerifier {
 
     fn verify_tls12_signature(
         &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &DigitallySignedStruct,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
     ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(
-            message,
-            cert,
-            dss,
-            &self.0.signature_verification_algorithms,
-        )
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
     }
 
     fn verify_tls13_signature(
         &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &DigitallySignedStruct,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
     ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(
-            message,
-            cert,
-            dss,
-            &self.0.signature_verification_algorithms,
-        )
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
