@@ -284,11 +284,18 @@ impl AaConnection {
         conn: &mut rustls::ConnectionCommon<Data>,
         mem_buf: &mut SslMemBuf,
     ) -> std::result::Result<bool, rustls::Error> {
-        // Read incoming TLS bytes (WouldBlock == no data yet, not an error)
-        let _ = conn.read_tls(mem_buf);
+        // Feed all available incoming bytes into rustls.
+        loop {
+            match conn.read_tls(mem_buf) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
         conn.process_new_packets()?;
-        conn.write_tls(&mut mem_buf.outgoing)
-            .map_err(|e| rustls::Error::General(e.to_string()))?;
+        // Flush all pending TLS records — may need multiple calls.
+        while conn.wants_write() {
+            let _ = conn.write_tls(&mut mem_buf.outgoing);
+        }
         Ok(conn.is_handshaking())
     }
 
@@ -319,8 +326,11 @@ impl AaConnection {
         conn.writer()
             .write_all(plaintext)
             .map_err(|e| rustls::Error::General(e.to_string()))?;
-        // write_tls can only fail with io::Error from the sink — our Vec sink never fails
-        let _ = conn.write_tls(&mut mem_buf.outgoing);
+        // write_tls may need multiple calls to flush all TLS records from
+        // the internal buffer — loop until nothing more to write.
+        while conn.wants_write() {
+            let _ = conn.write_tls(&mut mem_buf.outgoing);
+        }
         Ok(())
     }
 
@@ -341,12 +351,18 @@ impl AaConnection {
         conn: &mut rustls::ConnectionCommon<Data>,
         mem_buf: &mut SslMemBuf,
     ) -> std::result::Result<Vec<u8>, rustls::Error> {
-        match conn.read_tls(mem_buf) {
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(e) => return Err(rustls::Error::General(e.to_string())),
+        // Loop read_tls until no more data in mem_buf (WouldBlock).
+        loop {
+            match conn.read_tls(mem_buf) {
+                Ok(0) | Err(_) => break, // WouldBlock or EOF
+                Ok(_) => {}
+            }
         }
         conn.process_new_packets()?;
+        // Flush any TLS records generated in response (e.g. alerts, tickets).
+        while conn.wants_write() {
+            let _ = conn.write_tls(&mut mem_buf.outgoing);
+        }
         let mut plaintext = Vec::new();
         match conn.reader().read_to_end(&mut plaintext) {
             Ok(_) => {}
@@ -400,10 +416,16 @@ pub fn ssl_builder(
             // We talk to the phone acting as HU → we are TLS server
             let cert0 = certs.into_iter().next().ok_or("no certificate in file")?;
             let resolver = AaServerCertResolver::new(cert0, key)?;
-            let config = ServerConfig::builder_with_provider(provider)
+            let mut config = ServerConfig::builder_with_provider(provider)
                 .with_protocol_versions(&[&TLS12])?
                 .with_client_cert_verifier(AaClientCertVerifier::new())
                 .with_cert_resolver(resolver);
+            // Disable session resumption — AA devices may send tickets from a
+            // previous openssl session which rustls cannot honour, causing
+            // decryption failures on the application data.
+            config.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
+            // Send no tickets so the peer cannot try to resume.
+            config.send_tls13_tickets = 0;
             AaConnection::Server(rustls::ServerConnection::new(Arc::new(config))?)
         }
         ProxyType::MobileDevice => {
@@ -411,11 +433,13 @@ pub fn ssl_builder(
             // We talk to the HU acting as phone → we are TLS client
             let cert0 = certs.into_iter().next().ok_or("no certificate in file")?;
             let resolver = AaClientCertResolver::new(cert0, key)?;
-            let config = ClientConfig::builder_with_provider(provider)
+            let mut config = ClientConfig::builder_with_provider(provider)
                 .with_protocol_versions(&[&TLS12])?
                 .dangerous()
                 .with_custom_certificate_verifier(AaServerCertVerifier::new())
                 .with_client_cert_resolver(resolver);
+            // Disable session resumption on the client side too.
+            config.resumption = rustls::client::Resumption::disabled();
             let server_name = "android.auto"
                 .try_into()
                 .map_err(|e| format!("server_name parse: {e}"))?;
