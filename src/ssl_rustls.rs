@@ -17,8 +17,7 @@ use rustls::server::danger::ClientCertVerifier;
 use rustls::sign::CertifiedKey;
 use rustls::version::TLS12;
 use rustls::{
-    ClientConfig, DigitallySignedStruct, DistinguishedName, ServerConfig,
-    SignatureScheme,
+    ClientConfig, DigitallySignedStruct, DistinguishedName, ServerConfig, SignatureScheme,
 };
 use std::io::{Read, Write};
 use std::sync::Arc;
@@ -213,14 +212,10 @@ impl AaServerCertResolver {
 }
 
 impl rustls::server::ResolvesServerCert for AaServerCertResolver {
-    fn resolve(
-        &self,
-        _client_hello: rustls::server::ClientHello<'_>,
-    ) -> Option<Arc<CertifiedKey>> {
+    fn resolve(&self, _client_hello: rustls::server::ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
         Some(self.0.clone())
     }
 }
-
 
 /// rustls parse and validate the certificate.  This is the V1 workaround for
 /// the client path: with_client_auth_cert() validates the cert version;
@@ -313,7 +308,9 @@ impl AaConnection {
             AaConnection::Server(c) => c.negotiated_cipher_suite(),
             AaConnection::Client(c) => c.negotiated_cipher_suite(),
         };
-        suite.map(|s| s.suite().as_str().unwrap_or("unknown")).unwrap_or("unknown")
+        suite
+            .map(|s| s.suite().as_str().unwrap_or("unknown"))
+            .unwrap_or("unknown")
     }
 
     /// Encrypt `plaintext` and append the ciphertext to `mem_buf.outgoing`.
@@ -405,10 +402,7 @@ fn load_cert_and_key(
 /// SSL role mapping (identical to original openssl ssl_builder):
 ///   ProxyType::HeadUnit     → set_accept_state() → TLS **server** (phone connects to us)
 ///   ProxyType::MobileDevice → set_connect_state() → TLS **client** (we connect to HU)
-pub fn ssl_builder(
-    proxy_type: ProxyType,
-    keys_path: &str,
-) -> Result<(AaConnection, SslMemBuf)> {
+pub fn ssl_builder(proxy_type: ProxyType, keys_path: &str) -> Result<(AaConnection, SslMemBuf)> {
     let prefix = match proxy_type {
         ProxyType::HeadUnit => "md",
         ProxyType::MobileDevice => "hu",
@@ -453,7 +447,10 @@ pub fn ssl_builder(
             let server_name = "android.auto"
                 .try_into()
                 .map_err(|e| format!("server_name parse: {e}"))?;
-            AaConnection::Client(rustls::ClientConnection::new(Arc::new(config), server_name)?)
+            AaConnection::Client(rustls::ClientConnection::new(
+                Arc::new(config),
+                server_name,
+            )?)
         }
     };
 

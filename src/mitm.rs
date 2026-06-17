@@ -22,6 +22,7 @@ use crate::display::InjectedMediaState;
 use crate::inject_displays::read_inject_displays_file_sync;
 use crate::mitm_prettyprint::{pkt_debug, update_debug_channel_kinds, PacketDebugServiceKind};
 use crate::sdr_ui;
+use crate::ssl_rustls::{AaConnection, SslMemBuf};
 use crate::vendor_ext::{
     add_vendor_extension_service, ensure_vendor_channel_open, ensure_vendor_topic_event_bridge,
     handle_vendor_channel_packet, has_vendor_extension_service, is_vendor_channel,
@@ -30,14 +31,13 @@ use crate::vendor_ext::{
 };
 use crate::web::ServerEvent;
 use anyhow::Context;
-use crate::ssl_rustls::{AaConnection, SslMemBuf};
 use serde::{Deserialize, Serialize};
 use simplelog::*;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::fmt;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -2739,8 +2739,6 @@ impl_endpoint_reader!([A: Endpoint<A>], IoDevice<A>);
 #[cfg(not(feature = "io-uring"))]
 impl_endpoint_reader!([D: IoDeviceTrait], D);
 
-
-
 fn build_control_reply(message_id: ControlMessageType, payload: Vec<u8>) -> Packet {
     let mut payload = payload;
     payload.insert(0, ((message_id as u16) >> 8) as u8);
@@ -2829,14 +2827,13 @@ pub async fn proxy<D: IoDeviceTrait>(
         }
     }
 
-    let (mut ssl_conn, mut mem_buf) =
-        match crate::ssl_rustls::ssl_builder(proxy_type, KEYS_PATH) {
-            Ok(s) => s,
-            Err(e) => {
-                config.write().await.runtime_mitm_failed = true;
-                return Err(e);
-            }
-        };
+    let (mut ssl_conn, mut mem_buf) = match crate::ssl_rustls::ssl_builder(proxy_type, KEYS_PATH) {
+        Ok(s) => s,
+        Err(e) => {
+            config.write().await.runtime_mitm_failed = true;
+            return Err(e);
+        }
+    };
 
     // initial phase: passing version and doing SSL handshake
     // for both HU and MD
@@ -2892,7 +2889,11 @@ pub async fn proxy<D: IoDeviceTrait>(
                     info!(
                         "{} 🔒 SSL handshake: {}",
                         get_name(proxy_type),
-                        if still_handshaking { "in progress" } else { "complete" },
+                        if still_handshaking {
+                            "in progress"
+                        } else {
+                            "complete"
+                        },
                     );
                     if !still_handshaking {
                         info!(
@@ -2964,7 +2965,11 @@ pub async fn proxy<D: IoDeviceTrait>(
                     info!(
                         "{} 🔒 SSL handshake: {}",
                         get_name(proxy_type),
-                        if still_handshaking { "in progress" } else { "complete" },
+                        if still_handshaking {
+                            "in progress"
+                        } else {
+                            "complete"
+                        },
                     );
                     if !still_handshaking {
                         info!(

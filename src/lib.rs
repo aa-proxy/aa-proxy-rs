@@ -17,7 +17,6 @@ pub mod device_info;
 pub mod display;
 pub mod ev;
 pub mod hu_input;
-pub mod ssl_rustls;
 pub mod inject_displays;
 pub mod io_backend;
 #[cfg(not(feature = "io-uring"))]
@@ -36,6 +35,7 @@ pub mod proxy;
 #[cfg(feature = "wasm-scripting")]
 pub mod script_wasm;
 pub mod sdr_ui;
+pub mod ssl_rustls;
 pub mod usb_gadget;
 pub mod usb_stream;
 pub mod vendor_ext;
