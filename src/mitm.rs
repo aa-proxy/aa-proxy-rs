@@ -2895,7 +2895,11 @@ pub async fn proxy<D: IoDeviceTrait>(
                         if still_handshaking { "in progress" } else { "complete" },
                     );
                     if !still_handshaking {
-                        info!("{} 🔒 SSL init complete", get_name(proxy_type));
+                        info!(
+                            "{} 🔒 SSL init complete, negotiated cipher: <b><blue>{}</>",
+                            get_name(proxy_type),
+                            ssl_conn.cipher_suite(),
+                        );
                     }
                 }
             }
@@ -2963,7 +2967,11 @@ pub async fn proxy<D: IoDeviceTrait>(
                         if still_handshaking { "in progress" } else { "complete" },
                     );
                     if !still_handshaking {
-                        info!("{} 🔒 SSL init complete", get_name(proxy_type));
+                        info!(
+                            "{} 🔒 SSL init complete, negotiated cipher: <b><blue>{}</>",
+                            get_name(proxy_type),
+                            ssl_conn.cipher_suite(),
+                        );
                     }
                 }
             }

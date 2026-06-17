@@ -306,6 +306,16 @@ impl AaConnection {
         }
     }
 
+    /// Returns negotiated cipher suite name, e.g. "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256".
+    /// Only available after handshake is complete.
+    pub fn cipher_suite(&self) -> &'static str {
+        let suite = match self {
+            AaConnection::Server(c) => c.negotiated_cipher_suite(),
+            AaConnection::Client(c) => c.negotiated_cipher_suite(),
+        };
+        suite.map(|s| s.suite().as_str().unwrap_or("unknown")).unwrap_or("unknown")
+    }
+
     /// Encrypt `plaintext` and append the ciphertext to `mem_buf.outgoing`.
     pub fn encrypt(
         &mut self,
