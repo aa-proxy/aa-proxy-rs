@@ -301,6 +301,36 @@ impl AaConnection {
         }
     }
 
+    /// Closest available equivalent to openssl's `SSL_state_string_long()`.
+    ///
+    /// rustls deliberately does NOT expose its internal handshake state
+    /// machine (no "write client hello" / "write finished" granularity is
+    /// available — those states are private implementation details). This
+    /// reports the closest public approximation: protocol version, whether
+    /// the handshake is a resumption, and whether it's still in progress.
+    pub fn state_string(&self) -> String {
+        let (version, kind, handshaking) = match self {
+            AaConnection::Server(c) => {
+                (c.protocol_version(), c.handshake_kind(), c.is_handshaking())
+            }
+            AaConnection::Client(c) => {
+                (c.protocol_version(), c.handshake_kind(), c.is_handshaking())
+            }
+        };
+        if handshaking {
+            "TLS handshake in progress".to_string()
+        } else {
+            let version = version
+                .map(|v| format!("{v:?}"))
+                .unwrap_or_else(|| "unknown version".to_string());
+            let resumed = matches!(kind, Some(rustls::HandshakeKind::Resumed));
+            format!(
+                "SSL negotiation finished successfully ({version}{})",
+                if resumed { ", resumed" } else { "" }
+            )
+        }
+    }
+
     /// Returns negotiated cipher suite name, e.g. "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256".
     /// Only available after handshake is complete.
     pub fn cipher_suite(&self) -> &'static str {

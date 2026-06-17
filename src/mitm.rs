@@ -2868,6 +2868,7 @@ pub async fn proxy<D: IoDeviceTrait>(
             .with_context(|| format!("proxy/{}: transmit failed", get_name(proxy_type)))?;
 
         // doing SSL handshake
+        let mut step: u32 = 0;
         loop {
             let pkt = rxr.recv().await.ok_or("reader channel hung up")?;
             let _ = pkt_debug(
@@ -2886,14 +2887,12 @@ pub async fn proxy<D: IoDeviceTrait>(
                     return Err(Box::new(e));
                 }
                 Ok(still_handshaking) => {
+                    step += 1;
                     info!(
-                        "{} 🔒 SSL handshake: {}",
+                        "{} 🔒 stage #{}: SSL handshake: {}",
                         get_name(proxy_type),
-                        if still_handshaking {
-                            "in progress"
-                        } else {
-                            "complete"
-                        },
+                        step,
+                        ssl_conn.state_string(),
                     );
                     if !still_handshaking {
                         info!(
@@ -2955,6 +2954,7 @@ pub async fn proxy<D: IoDeviceTrait>(
         tx.send(pkt).await?;
 
         // doing SSL handshake
+        let mut step: u32 = 0;
         loop {
             match ssl_conn.process(&mut mem_buf) {
                 Err(e) => {
@@ -2962,14 +2962,12 @@ pub async fn proxy<D: IoDeviceTrait>(
                     return Err(Box::new(e));
                 }
                 Ok(still_handshaking) => {
+                    step += 1;
                     info!(
-                        "{} 🔒 SSL handshake: {}",
+                        "{} 🔒 stage #{}: SSL handshake: {}",
                         get_name(proxy_type),
-                        if still_handshaking {
-                            "in progress"
-                        } else {
-                            "complete"
-                        },
+                        step,
+                        ssl_conn.state_string(),
                     );
                     if !still_handshaking {
                         info!(
