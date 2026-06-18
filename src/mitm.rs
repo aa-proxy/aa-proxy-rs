@@ -23,8 +23,8 @@ use crate::display::maybe_emit_pending_injected_focus;
 use crate::display::InjectedMediaState;
 use crate::inject_displays::read_inject_displays_file_sync;
 use crate::mitm_prettyprint::{
-    pkt_debug, pkt_debug_with_full_frame, update_debug_channel_kinds, PktDebugFullFrameBuffers,
-    PacketDebugServiceKind,
+    pkt_debug, pkt_debug_with_full_frame, update_debug_channel_kinds, PacketDebugServiceKind,
+    PktDebugFullFrameBuffers,
 };
 use crate::sdr_ui;
 use crate::ssl_rustls::{AaConnection, SslMemBuf};
@@ -692,7 +692,6 @@ fn should_emit_pending_map_album_art_metadata(
         && is_complete_frame_boundary(pkt.flags)
 }
 
-
 const SSL_PACKET_TRACE_ENABLED: bool = false;
 const SSL_PACKET_TRACE_RING_CAP: usize = 96;
 const SSL_PACKET_TRACE_PREFIX_BYTES: usize = 10;
@@ -732,10 +731,7 @@ fn ssl_trace_first_hex(payload: &[u8]) -> String {
 }
 
 fn ssl_trace_tls_hint(payload: &[u8]) -> Option<String> {
-    if payload.len() >= 5
-        && matches!(payload[0], 0x14 | 0x15 | 0x16 | 0x17)
-        && payload[1] == 0x03
-    {
+    if payload.len() >= 5 && matches!(payload[0], 0x14 | 0x15 | 0x16 | 0x17) && payload[1] == 0x03 {
         let record_len = u16::from_be_bytes([payload[3], payload[4]]);
         Some(format!(
             "tls(type=0x{:02X},ver={:02X}{:02X},record_len={})",
@@ -905,12 +901,18 @@ fn ssl_trace_should_live_log(
     if pkt.payload.len() <= 160 {
         return true;
     }
-    if line.contains("0x8008") || line.contains("0x8014") || line.contains("0x8015") || line.contains("0x8004") {
+    if line.contains("0x8008")
+        || line.contains("0x8014")
+        || line.contains("0x8015")
+        || line.contains("0x8004")
+    {
         return true;
     }
 
     let frame_type = pkt.flags & FRAME_TYPE_MASK;
-    let is_boundary = frame_type == FRAME_TYPE_FIRST || frame_type == FRAME_TYPE_LAST || frame_type == FRAME_TYPE_MASK;
+    let is_boundary = frame_type == FRAME_TYPE_FIRST
+        || frame_type == FRAME_TYPE_LAST
+        || frame_type == FRAME_TYPE_MASK;
     if is_boundary && pkt.payload.len() >= 1024 {
         let now = ssl_trace_now_ms();
         let key = format!("{}:{}:{}", stage, pkt.channel, frame_type);

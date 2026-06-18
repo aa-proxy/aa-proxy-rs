@@ -161,10 +161,14 @@ impl UsbGadgetState {
                 tokio::time::sleep(Duration::from_millis(500)).await;
             } else {
                 warn!(
-                "{} 🔌 USB Manager: Accessory start NOT received after retries{}",
-                NAME,
-                if require_accessory_start { "; retrying instead of switching to accessory gadget" } else { "; proceeding may fail" }
-            );
+                    "{} 🔌 USB Manager: Accessory start NOT received after retries{}",
+                    NAME,
+                    if require_accessory_start {
+                        "; retrying instead of switching to accessory gadget"
+                    } else {
+                        "; proceeding may fail"
+                    }
+                );
                 if require_accessory_start {
                     let _ = self.disable(DEFAULT_GADGET_NAME);
                     let _ = self.disable(ACCESSORY_GADGET_NAME);
@@ -174,7 +178,10 @@ impl UsbGadgetState {
         }
 
         if let Err(e) = self.enable(ACCESSORY_GADGET_NAME) {
-            error!("{} 🔌 USB Manager: failed to enable accessory gadget: {e}", NAME);
+            error!(
+                "{} 🔌 USB Manager: failed to enable accessory gadget: {e}",
+                NAME
+            );
             return false;
         }
         info!("{} 🔌 USB Manager: Switched to accessory gadget", NAME);
@@ -189,10 +196,16 @@ impl UsbGadgetState {
         );
 
         if let Err(e) = self.disable(DEFAULT_GADGET_NAME) {
-            warn!("{} 🔌 USB Manager: failed to disable default gadget during re-arm: {e}", NAME);
+            warn!(
+                "{} 🔌 USB Manager: failed to disable default gadget during re-arm: {e}",
+                NAME
+            );
         }
         if let Err(e) = self.disable(ACCESSORY_GADGET_NAME) {
-            warn!("{} 🔌 USB Manager: failed to disable accessory gadget during re-arm: {e}", NAME);
+            warn!(
+                "{} 🔌 USB Manager: failed to disable accessory gadget during re-arm: {e}",
+                NAME
+            );
         }
 
         if !cooldown.is_zero() {

@@ -250,16 +250,22 @@ fn pkt_debug_maybe_full_frame(
     if full_pkt.payload.len() >= 2 {
         let control = ControlMessageType::from_i32(buffer.message_id.into());
         let data = &full_pkt.payload[2..];
-        if let Some(pretty) =
-            pretty_packet_message(buffer.service_kind, control, buffer.message_id, data, &full_pkt)
-        {
-            pkt_debug_emit_line(standalone_pkt_debug, wrap_pretty_block("full_frame_proto", &pretty));
+        if let Some(pretty) = pretty_packet_message(
+            buffer.service_kind,
+            control,
+            buffer.message_id,
+            data,
+            &full_pkt,
+        ) {
+            pkt_debug_emit_line(
+                standalone_pkt_debug,
+                wrap_pretty_block("full_frame_proto", &pretty),
+            );
         }
     }
 
     Ok(())
 }
-
 
 fn split_filter_tokens(value: &str) -> impl Iterator<Item = String> + '_ {
     value
@@ -1339,4 +1345,3 @@ pub async fn pkt_debug_with_full_frame(
     )
     .await
 }
-

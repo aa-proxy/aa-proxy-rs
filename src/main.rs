@@ -554,16 +554,13 @@ async fn enable_usb_if_present(
     true
 }
 
-async fn rearm_usb_if_present(
-    usb: &mut Option<UsbGadgetState>,
-    enabled: bool,
-    cooldown_ms: u64,
-) {
+async fn rearm_usb_if_present(usb: &mut Option<UsbGadgetState>, enabled: bool, cooldown_ms: u64) {
     if !enabled {
         return;
     }
     if let Some(ref mut usb) = usb {
-        usb.rearm_for_next_session(Duration::from_millis(cooldown_ms)).await;
+        usb.rearm_for_next_session(Duration::from_millis(cooldown_ms))
+            .await;
     }
 }
 

@@ -71,7 +71,11 @@ pub(crate) fn set_global_metadata_text_prefix(prefix: Option<String>) -> u64 {
         return GLOBAL_METADATA_TEXT_PREFIX_GENERATION.load(Ordering::SeqCst);
     }
 
-    let updated_ms = if normalized.is_some() { now_millis() } else { 0 };
+    let updated_ms = if normalized.is_some() {
+        now_millis()
+    } else {
+        0
+    };
     *guard = normalized;
     GLOBAL_METADATA_TEXT_PREFIX_UPDATED_MS.store(updated_ms, Ordering::SeqCst);
     GLOBAL_METADATA_TEXT_PREFIX_GENERATION.fetch_add(1, Ordering::SeqCst) + 1
