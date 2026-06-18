@@ -312,6 +312,22 @@
           "typ": "boolean",
           "description": "Enable legacy USB mode (some head units / cars need this enabled for compatibility)"
         },
+        "usb_gadget_require_accessory_start": {
+          "typ": "boolean",
+          "description": "Require the HU to send USB ACCESSORY=START before switching to the accessory gadget. Useful when the car/HU sleeps while aa-proxy-rs keeps running; prevents stale accessory attachment. Default: false.",
+          "advanced": true
+        },
+        "usb_gadget_rearm_on_disconnect": {
+          "typ": "boolean",
+          "description": "Detach USB gadgets after each AA session ends before the next connection attempt. Helps HUs that do not fully power-cycle USB during short sleep/wake cycles. Default: false.",
+          "advanced": true
+        },
+        "usb_gadget_rearm_cooldown_ms": {
+          "typ": "integer",
+          "description": "Cooldown in milliseconds after detaching USB gadgets during usb_gadget_rearm_on_disconnect. Default: 1500.",
+          "requires": "usb_gadget_rearm_on_disconnect",
+          "advanced": true
+        },
         "protocol_version_override_enabled": {
           "typ": "boolean",
           "description": "Override early AA/WPP protocol/PDK version advertised to the phone. Useful for phone-side features gated by newer HU PDK versions. Default: false."

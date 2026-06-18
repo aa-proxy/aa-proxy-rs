@@ -503,6 +503,14 @@ pub struct AppConfig {
     /// Normal forwarding is not delayed or modified. Uses the existing pkt_debug filters and max payload limit.
     pub pkt_debug_full_frame_enabled: bool,
     pub legacy: bool,
+    /// When true, do not switch to the accessory gadget unless the HU actually sends ACCESSORY=START.
+    /// Useful when the HU/car sleeps while aa-proxy-rs keeps running; prevents stale accessory attachment.
+    pub usb_gadget_require_accessory_start: bool,
+    /// Detach USB gadgets after a session ends before the next connection attempt.
+    /// This helps head units that do not fully power-cycle USB during short car sleep/wake cycles.
+    pub usb_gadget_rearm_on_disconnect: bool,
+    /// Cooldown after detaching USB gadgets during re-arm.
+    pub usb_gadget_rearm_cooldown_ms: u64,
     pub quick_reconnect: bool,
     pub bt_poweroff: bool,
     pub connect: BluetoothAddressList,
@@ -921,6 +929,9 @@ impl Default for AppConfig {
             pkt_debug_filter_max_payload_bytes: 2048,
             pkt_debug_full_frame_enabled: false,
             legacy: true,
+            usb_gadget_require_accessory_start: false,
+            usb_gadget_rearm_on_disconnect: false,
+            usb_gadget_rearm_cooldown_ms: 1500,
             quick_reconnect: false,
             bt_poweroff: false,
             connect: BluetoothAddressList::default(),
@@ -1259,6 +1270,9 @@ impl AppConfig {
             value(self.pkt_debug_filter_max_payload_bytes as i64);
         doc["pkt_debug_full_frame_enabled"] = value(self.pkt_debug_full_frame_enabled);
         doc["legacy"] = value(self.legacy);
+        doc["usb_gadget_require_accessory_start"] = value(self.usb_gadget_require_accessory_start);
+        doc["usb_gadget_rearm_on_disconnect"] = value(self.usb_gadget_rearm_on_disconnect);
+        doc["usb_gadget_rearm_cooldown_ms"] = value(self.usb_gadget_rearm_cooldown_ms as i64);
         doc["quick_reconnect"] = value(self.quick_reconnect);
         doc["bt_poweroff"] = value(self.bt_poweroff);
         doc["connect"] = value(self.connect.to_string());

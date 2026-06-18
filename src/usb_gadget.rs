@@ -116,7 +116,8 @@ impl UsbGadgetState {
     pub async fn enable_default_and_wait_for_accessory(
         &mut self,
         accessory_started: Arc<tokio::sync::Notify>,
-    ) {
+        require_accessory_start: bool,
+    ) -> bool {
         if self.legacy {
             const PER_TRY_TIMEOUT: Duration = Duration::from_secs(6);
             const COOLDOWN_MS: u64 = 100;
@@ -160,14 +161,43 @@ impl UsbGadgetState {
                 tokio::time::sleep(Duration::from_millis(500)).await;
             } else {
                 warn!(
-                "{} 🔌 USB Manager: Accessory start NOT received after retries; proceeding may fail",
-                NAME
+                "{} 🔌 USB Manager: Accessory start NOT received after retries{}",
+                NAME,
+                if require_accessory_start { "; retrying instead of switching to accessory gadget" } else { "; proceeding may fail" }
             );
+                if require_accessory_start {
+                    let _ = self.disable(DEFAULT_GADGET_NAME);
+                    let _ = self.disable(ACCESSORY_GADGET_NAME);
+                    return false;
+                }
             }
         }
 
-        let _ = self.enable(ACCESSORY_GADGET_NAME);
+        if let Err(e) = self.enable(ACCESSORY_GADGET_NAME) {
+            error!("{} 🔌 USB Manager: failed to enable accessory gadget: {e}", NAME);
+            return false;
+        }
         info!("{} 🔌 USB Manager: Switched to accessory gadget", NAME);
+        true
+    }
+
+    pub async fn rearm_for_next_session(&mut self, cooldown: Duration) {
+        info!(
+            "{} 🔌 USB Manager: Re-arming USB gadget for next session (cooldown={}ms)",
+            NAME,
+            cooldown.as_millis()
+        );
+
+        if let Err(e) = self.disable(DEFAULT_GADGET_NAME) {
+            warn!("{} 🔌 USB Manager: failed to disable default gadget during re-arm: {e}", NAME);
+        }
+        if let Err(e) = self.disable(ACCESSORY_GADGET_NAME) {
+            warn!("{} 🔌 USB Manager: failed to disable accessory gadget during re-arm: {e}", NAME);
+        }
+
+        if !cooldown.is_zero() {
+            tokio::time::sleep(cooldown).await;
+        }
     }
 
     fn attached(gadget_path: &PathBuf) -> io::Result<Option<String>> {

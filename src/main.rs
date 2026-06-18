@@ -541,10 +541,29 @@ fn logging_init(debug: bool, disable_console_debug: bool, log_path: &PathBuf) {
     }
 }
 
-async fn enable_usb_if_present(usb: &mut Option<UsbGadgetState>, accessory_started: Arc<Notify>) {
+async fn enable_usb_if_present(
+    usb: &mut Option<UsbGadgetState>,
+    accessory_started: Arc<Notify>,
+    require_accessory_start: bool,
+) -> bool {
     if let Some(ref mut usb) = usb {
-        usb.enable_default_and_wait_for_accessory(accessory_started)
+        return usb
+            .enable_default_and_wait_for_accessory(accessory_started, require_accessory_start)
             .await;
+    }
+    true
+}
+
+async fn rearm_usb_if_present(
+    usb: &mut Option<UsbGadgetState>,
+    enabled: bool,
+    cooldown_ms: u64,
+) {
+    if !enabled {
+        return;
+    }
+    if let Some(ref mut usb) = usb {
+        usb.rearm_for_next_session(Duration::from_millis(cooldown_ms)).await;
     }
 }
 
@@ -889,7 +908,6 @@ async fn tokio_main(
     }
 
     // main connection loop
-    let change_usb_order = cfg.change_usb_order;
     let mut need_restart = restart_tx.subscribe();
     loop {
         if let Some(ref mut leds) = led_manager {
@@ -901,8 +919,17 @@ async fn tokio_main(
             }
         }
 
-        if change_usb_order {
-            enable_usb_if_present(&mut usb, accessory_started.clone()).await;
+        if cfg.change_usb_order {
+            if !enable_usb_if_present(
+                &mut usb,
+                accessory_started.clone(),
+                cfg.usb_gadget_require_accessory_start,
+            )
+            .await
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                continue;
+            }
         }
 
         // run only if not handling this in handshake task
@@ -1058,8 +1085,17 @@ async fn tokio_main(
             }
         }
 
-        if !change_usb_order {
-            enable_usb_if_present(&mut usb, accessory_started.clone()).await;
+        if !cfg.change_usb_order {
+            if !enable_usb_if_present(
+                &mut usb,
+                accessory_started.clone(),
+                cfg.usb_gadget_require_accessory_start,
+            )
+            .await
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                continue;
+            }
         }
 
         // inform via LED about successful connection
@@ -1068,12 +1104,24 @@ async fn tokio_main(
         }
         // wait for restart notification
         let _ = need_restart.recv().await;
-        if !(cfg.quick_reconnect && profile_connected.load(Ordering::Relaxed)) {
+
+        // Re-read config before reconnect handling so runtime config changes apply immediately.
+        let restart_cfg = config.read().await.clone();
+        rearm_usb_if_present(
+            &mut usb,
+            restart_cfg.usb_gadget_rearm_on_disconnect,
+            restart_cfg.usb_gadget_rearm_cooldown_ms,
+        )
+        .await;
+
+        if !(restart_cfg.quick_reconnect && profile_connected.load(Ordering::Relaxed)) {
             info!(
                 "{} 📵 TCP/USB connection closed or not started, trying again...",
                 NAME
             );
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            if !restart_cfg.usb_gadget_rearm_on_disconnect {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
         } else {
             info!(
                 "{} 📵 TCP/USB connection closed or not started, quick restart...",
@@ -1082,8 +1130,7 @@ async fn tokio_main(
         }
 
         // TODO: make proper main loop with cancelation
-        // re-read config
-        cfg = config.read().await.clone();
+        cfg = restart_cfg;
     }
 }
 
