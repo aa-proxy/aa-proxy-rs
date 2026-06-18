@@ -1640,7 +1640,6 @@ fn rounded_km_from_distance_meters(distance_meters: i32) -> Option<u32> {
     Some(((distance_meters as f64) / 1000.0).round().max(1.0) as u32)
 }
 
-
 fn is_phone_to_hu_flow(proxy_type: ProxyType, flow: PacketFlow) -> bool {
     matches!(
         (proxy_type, flow),
@@ -1861,14 +1860,9 @@ pub async fn pkt_modify_hook(
     let message_id: i32 = u16::from_be_bytes(pkt.payload[0..=1].try_into()?).into();
     let data = &pkt.payload[2..]; // start of message data
 
-    if let Some(action) = maybe_handle_override_induced_media_options(
-        proxy_type,
-        flow,
-        pkt,
-        ctx,
-        message_id,
-        cfg,
-    ) {
+    if let Some(action) =
+        maybe_handle_override_induced_media_options(proxy_type, flow, pkt, ctx, message_id, cfg)
+    {
         return Ok(action);
     }
 
