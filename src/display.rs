@@ -283,12 +283,13 @@ pub fn add_display_services(
     injected
 }
 
-fn injected_max_unacked(display_type: DisplayType) -> u32 {
-    match display_type {
-        DisplayType::DISPLAY_TYPE_CLUSTER => 1,
-        DisplayType::DISPLAY_TYPE_AUXILIARY => 2,
-        _ => 1,
-    }
+fn injected_max_unacked(_display_type: DisplayType) -> u32 {
+    // This is a virtual/injected sink: we do not actually render/buffer frames
+    // like a native HU display. Keep the phone-side unacked window to one
+    // complete media frame for every injected display. ACK values themselves
+    // remain cumulative counters, matching open-android-auto's AVMediaAck
+    // handling.
+    1
 }
 
 fn first_fragment_message_id(pkt: &Packet) -> Option<u16> {
@@ -772,10 +773,11 @@ pub fn emulate_injected_media_packet(
             state.ack_counter = 0;
             state.last_flags = pkt.flags;
             info!(
-                "{} <blue>injected media:</> SETUP on channel <b>{:#04x}</> display={:?}",
+                "{} <blue>injected media:</> SETUP on channel <b>{:#04x}</> display={:?} max_unacked={}",
                 get_name(proxy_type),
                 pkt.channel,
-                display_type
+                display_type,
+                max_unacked
             );
             // Virtual sink: immediately advertise readiness and keep unacked window tiny.
             rewrite_media_config_ready(pkt, max_unacked)?;
@@ -824,6 +826,9 @@ pub fn emulate_injected_media_packet(
 
             if state.phase.can_stream() {
                 state.phase = InjectedMediaPhase::Streaming;
+                // ACK is emitted only after a complete media message has been
+                // reassembled/received. The ACK value is a cumulative counter
+                // for this media session, not a constant credit token.
                 state.ack_counter = state.ack_counter.saturating_add(1);
                 rewrite_media_ack(pkt, state.session_id, state.ack_counter)?;
                 if state.ack_counter == 1 || state.ack_counter % 256 == 0 {

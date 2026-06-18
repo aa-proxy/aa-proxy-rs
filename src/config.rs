@@ -499,6 +499,9 @@ pub struct AppConfig {
     pub pkt_debug_filter_pretty_proto: bool,
     /// When packet debug filtering is enabled, truncate packet payload dumps to this many bytes. 0 disables truncation.
     pub pkt_debug_filter_max_payload_bytes: usize,
+    /// Passive pkt_debug helper: reassemble fragmented decrypted frames for logging only.
+    /// Normal forwarding is not delayed or modified. Uses the existing pkt_debug filters and max payload limit.
+    pub pkt_debug_full_frame_enabled: bool,
     pub legacy: bool,
     pub quick_reconnect: bool,
     pub bt_poweroff: bool,
@@ -916,6 +919,7 @@ impl Default for AppConfig {
             pkt_debug_filter_exclude_message_ids: String::new(),
             pkt_debug_filter_pretty_proto: true,
             pkt_debug_filter_max_payload_bytes: 2048,
+            pkt_debug_full_frame_enabled: false,
             legacy: true,
             quick_reconnect: false,
             bt_poweroff: false,
@@ -1020,7 +1024,7 @@ impl Default for AppConfig {
             map_album_art_crop_h: 40,
             map_album_art_duration_tick_enabled: false,
             map_album_art_ev_text_mode: "album_art".to_string(),
-            map_album_art_ev_prefix_max_age_ms: 15_000,
+            map_album_art_ev_prefix_max_age_ms: 0,
             vehicle_energy_forecast_keep_last_on_null: true,
             collect_speed: false,
             disable_driving_status: false,
@@ -1253,6 +1257,7 @@ impl AppConfig {
         doc["pkt_debug_filter_pretty_proto"] = value(self.pkt_debug_filter_pretty_proto);
         doc["pkt_debug_filter_max_payload_bytes"] =
             value(self.pkt_debug_filter_max_payload_bytes as i64);
+        doc["pkt_debug_full_frame_enabled"] = value(self.pkt_debug_full_frame_enabled);
         doc["legacy"] = value(self.legacy);
         doc["quick_reconnect"] = value(self.quick_reconnect);
         doc["bt_poweroff"] = value(self.bt_poweroff);
