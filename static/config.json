@@ -18,23 +18,12 @@
         "wifi_version": {
           "typ": "integer",
           "description": "Wi-Fi operation mode:\n`1` = Wi-Fi 1 (IEEE 802.11b) - 2.4 GHz only,\n`2` = Wi-Fi 2 (IEEE 802.11a) - 5 GHz only,\n`3` = Wi-Fi 3 (IEEE 802.11g) - 2.4 GHz only,\n`4` = Wi-Fi 4 (IEEE 802.11n) - 2.4/5 GHz,\n`5` = Wi-Fi 5 (IEEE 802.11ac) - 5 GHz only,\n`6` = Wi-Fi 6/6E (IEEE 802.11ax) - 2.4/5 GHz (Wi-Fi 6), 2.4/5/6 GHz (Wi-Fi 6E),\n`7` = Wi-Fi 7 (IEEE 802.11be) - 2.4/5/6 GHz",
-          "values": [
-            "1",
-            "2",
-            "3",
-            "4",
-            "5",
-            "6",
-            "7"
-          ]
+          "values": ["1", "2", "3", "4", "5", "6", "7"]
         },
         "band": {
           "typ": "string",
           "description": "Wi-Fi operating frequency: `2.4` OR `5`. The default should be fine. 6 GHz is NOT supported.",
-          "values": [
-            "2.4",
-            "5"
-          ]
+          "values": ["2.4", "5"]
         },
         "channel": {
           "typ": "integer",
@@ -130,11 +119,7 @@
             "bt_wireless_proxy_mode": {
               "typ": "string",
               "description": "EXPERIMENTAL Proxy mode: bridge = relay phone<->HU RFCOMM using one adapter; probe = connect to HU and emulate only the Wi-Fi bootstrap frames; car-wifi-mitm = delay/modify BT Wi-Fi bootstrap, join car Wi-Fi, and raw-relay TCP.",
-              "values": [
-                "bridge",
-                "probe",
-                "car-wifi-mitm"
-              ],
+              "values": ["bridge", "probe", "car-wifi-mitm"],
               "advanced": true
             },
             "bt_wireless_proxy_hu_mac": {
@@ -146,11 +131,7 @@
             "bt_wireless_proxy_phone_wifi_mode": {
               "typ": "radio",
               "description": "EXPERIMENTAL Proxy car-wifi-mitm: phone-facing Wi-Fi mode. car_ap forwards HU/car Wi-Fi credentials to the phone. proxy_ap uses a single radio and creates a virtual phone AP. external_ap keeps the phone on the base aa-proxy AP while an external/USB STA joins the HU/car Wi-Fi.",
-              "values": [
-                "car_ap",
-                "proxy_ap",
-                "external_ap"
-              ],
+              "values": ["car_ap", "proxy_ap", "external_ap"],
               "advanced": true,
               "requires": "bt_wireless_proxy"
             },
@@ -187,21 +168,14 @@
             "bt_wireless_proxy_phone_like_sdp_profile_set": {
               "typ": "select",
               "description": "AA Wireless proxy: dummy phone-like SDP profile set. minimal advertises HFP AG, PBAP Server, MAP Server, OPP, Audio Source, and AVRCP Target. full additionally advertises HSP AG, AVRCP Remote/Controller, PANU, NAP, and PnP Information. Use minimal first.",
-              "values": [
-                "minimal",
-                "full"
-              ],
+              "values": ["minimal", "full"],
               "advanced": true,
               "requires": "bt_wireless_proxy_phone_like_sdp_profiles"
             },
             "bt_wireless_proxy_rendezvous_mode": {
               "typ": "select",
               "description": "EXPERIMENTAL Proxy car-wifi-mitm Bluetooth rendezvous strategy. auto tries the HU-first buffered path first and falls back to phone-first if the phone AA RFCOMM never arrives. hu_first and phone_first force the strict old order. Default: auto.",
-              "values": [
-                "auto",
-                "hu_first",
-                "phone_first"
-              ],
+              "values": ["auto", "hu_first", "phone_first"],
               "advanced": true,
               "requires": "bt_wireless_proxy"
             },
@@ -540,12 +514,7 @@
             "map_album_art_source": {
               "typ": "select",
               "description": "Artwork provider for MediaPlaybackMetadata album art. file reads map_album_art_file. rest and companion use the last PNG uploaded via POST /map-album-art. rust_h264 decodes the selected injected display video stream. If the selected source has no art yet, metadata is left untouched.",
-              "values": [
-                "file",
-                "rest",
-                "companion",
-                "rust_h264"
-              ]
+              "values": ["file", "rest", "companion", "rust_h264"]
             },
             "map_album_art_file": {
               "typ": "string",
@@ -603,10 +572,7 @@
             "map_album_art_crop_mode": {
               "typ": "select",
               "description": "Runtime video crop mode. percent interprets map_album_art_crop_x/y/w/h as percentages; pixel interprets them as exact decoded-frame pixels. Default: percent.",
-              "values": [
-                "percent",
-                "pixel"
-              ]
+              "values": ["percent", "pixel"]
             },
             "map_album_art_crop_x": {
               "typ": "integer",
@@ -681,11 +647,7 @@
                 "bt_sco_media_bridge_audio_type": {
                   "typ": "select",
                   "description": "Preferred AA PCM sink for SCO downlink.",
-                  "values": [
-                    "guidance",
-                    "media",
-                    "auto"
-                  ],
+                  "values": ["guidance", "media", "auto"],
                   "requires": "bt_sco_media_bridge"
                 },
                 "bt_sco_media_bridge_gain_percent": {
@@ -696,21 +658,14 @@
                 "bt_sco_media_bridge_limiter": {
                   "typ": "select",
                   "description": "Limiter applied after gain. `off` preserves the proven path; `hard` clips peaks earlier; `soft` compresses peaks more gently.",
-                  "values": [
-                    "off",
-                    "hard",
-                    "soft"
-                  ],
+                  "values": ["off", "hard", "soft"],
                   "requires": "bt_sco_media_bridge",
                   "advanced": true
                 },
                 "bt_sco_media_bridge_resampler": {
                   "typ": "select",
                   "description": "SCO 8 kHz → AA 48 kHz resampler. `repeat` preserves the proven path; `linear` smooths the 6× upsampling and may reduce crackle.",
-                  "values": [
-                    "repeat",
-                    "linear"
-                  ],
+                  "values": ["repeat", "linear"],
                   "requires": "bt_sco_media_bridge",
                   "advanced": true
                 },
@@ -801,10 +756,7 @@
                 "bt_sco_mic_echo_control": {
                   "typ": "select",
                   "description": "Microphone echo handling. `off` preserves current behavior; `ducking` lowers mic while downlink audio is active.",
-                  "values": [
-                    "off",
-                    "ducking"
-                  ],
+                  "values": ["off", "ducking"],
                   "requires": "bt_sco_mic_bridge"
                 },
                 "bt_sco_mic_duck_threshold": {
@@ -944,11 +896,7 @@
             "pkt_debug_filter_proxy": {
               "typ": "select",
               "description": "Packet debug proxy filter.",
-              "values": [
-                "both",
-                "hu",
-                "md"
-              ]
+              "values": ["both", "hu", "md"]
             },
             "pkt_debug_filter_stages": {
               "typ": "multi-select",
