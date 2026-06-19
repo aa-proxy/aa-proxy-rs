@@ -1,0 +1,12 @@
+#!/bin/sh
+set -e
+
+echo "Running cargo fmt..."
+
+if ! cargo fmt --all -- --check; then
+  echo ""
+  echo "❌ Code is not formatted. Running cargo fmt..."
+  cargo fmt --all
+  echo "✅ Formatted. Please stage changes and commit again."
+  exit 1
+fi

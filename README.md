@@ -376,6 +376,22 @@ To achieve full functionality similar to the official Buildroot-based images, ma
 - CONFIG_BT_RFCOMM
 - CONFIG_BT_RFCOMM_TTY
 
+## Developer Setup
+To ensure a consistent development environment, this project includes a setup script that configures Git hooks and other local tooling.  
+Run the following script after cloning the repository:
+`./setup-dev.sh`
+
+This will configure Git to use repository-managed hooks.
+
+### Why this is needed
+Git hooks are not shared automatically between developers. Without this setup, local hooks (such as formatting checks) will not run.
+
+This script ensures that everyone working on the project uses the same development rules (e.g. `cargo fmt` checks before commits).  
+If you prefer to configure hooks manually, you can run:  
+`git config core.hooksPath .githooks`
+
+However, using `setup-dev.sh` is the recommended approach.
+
 ## Similar/other open source AndroidAuto-related projects
 - https://github.com/nisargjhaveri/WirelessAndroidAutoDongle
 - https://github.com/nisargjhaveri/AAWirelessGateway
