@@ -697,6 +697,46 @@ fn pretty_media_message(message_id: u16, data: &[u8]) -> Option<String> {
         MediaMessageId::MEDIA_MESSAGE_AUDIO_UNDERFLOW_NOTIFICATION => {
             parse_pretty_message!(AudioUnderflowNotification, data)
         }
+        MediaMessageId::MEDIA_MESSAGE_ACTION_TAKEN_NOTIFICATION => Some(format!(
+            "MEDIA_MESSAGE_ACTION_TAKEN_NOTIFICATION {}",
+            bytes_preview(data, 64)
+        )),
+        MediaMessageId::MEDIA_MESSAGE_INTEGRATED_OVERLAY_PARAMETERS_NOTIFICATION => Some(format!(
+            "MEDIA_MESSAGE_INTEGRATED_OVERLAY_PARAMETERS_NOTIFICATION {}",
+            bytes_preview(data, 64)
+        )),
+        MediaMessageId::MEDIA_MESSAGE_INTEGRATED_OVERLAY_START_NOTIFICATION => Some(format!(
+            "MEDIA_MESSAGE_INTEGRATED_OVERLAY_START_NOTIFICATION {}",
+            bytes_preview(data, 64)
+        )),
+        MediaMessageId::MEDIA_MESSAGE_INTEGRATED_OVERLAY_STOP_NOTIFICATION => Some(format!(
+            "MEDIA_MESSAGE_INTEGRATED_OVERLAY_STOP_NOTIFICATION {}",
+            bytes_preview(data, 64)
+        )),
+        MediaMessageId::MEDIA_MESSAGE_INTEGRATED_OVERLAY_SESSION_DATA_UPDATE => Some(format!(
+            "MEDIA_MESSAGE_INTEGRATED_OVERLAY_SESSION_DATA_UPDATE {}",
+            bytes_preview(data, 64)
+        )),
+        MediaMessageId::MEDIA_MESSAGE_UPDATE_HU_UI_CONFIG_REQUEST => Some(format!(
+            "MEDIA_MESSAGE_UPDATE_HU_UI_CONFIG_REQUEST {}",
+            bytes_preview(data, 64)
+        )),
+        MediaMessageId::MEDIA_MESSAGE_UPDATE_HU_UI_CONFIG_RESPONSE => Some(format!(
+            "MEDIA_MESSAGE_UPDATE_HU_UI_CONFIG_RESPONSE {}",
+            bytes_preview(data, 64)
+        )),
+        MediaMessageId::MEDIA_MESSAGE_MEDIA_STATS => Some(format!(
+            "MEDIA_MESSAGE_MEDIA_STATS {}",
+            bytes_preview(data, 64)
+        )),
+        MediaMessageId::MEDIA_MESSAGE_MEDIA_OPTIONS => Some(format!(
+            "MEDIA_MESSAGE_MEDIA_OPTIONS {}",
+            bytes_preview(data, 64)
+        )),
+        MediaMessageId::MEDIA_MESSAGE_CRITICAL_UI_NOTIFICATION => Some(format!(
+            "MEDIA_MESSAGE_CRITICAL_UI_NOTIFICATION {}",
+            bytes_preview(data, 64)
+        )),
     }
 }
 
@@ -844,6 +884,10 @@ fn pretty_navigation_status_message(message_id: u16, data: &[u8]) -> Option<Stri
         NavigationStatusMessageId::INSTRUMENT_CLUSTER_NAVIGATION_CURRENT_POSITION => {
             parse_pretty_message!(NavigationCurrentPosition, data)
         }
+        NavigationStatusMessageId::INSTRUMENT_CLUSTER_VEHICLE_ENERGY_FORECAST => Some(format!(
+            "INSTRUMENT_CLUSTER_VEHICLE_ENERGY_FORECAST {}",
+            bytes_preview(data, 64)
+        )),
     }
 }
 
