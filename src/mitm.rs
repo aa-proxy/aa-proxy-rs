@@ -3913,6 +3913,16 @@ pub async fn proxy<D: IoDeviceTrait>(
     let mut focus_poll = tokio::time::interval(Duration::from_millis(100));
     focus_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     focus_poll.tick().await;
+
+    // map_album_art_source=rust_h264 stores artwork from an async decoder worker.
+    // The PNG can appear after the media packet that triggered decode has already
+    // crossed the normal MD -> HU safe-boundary emit point. Poll lightly so the
+    // first captured frame can be advertised even before a real song metadata
+    // packet arrives.
+    let mut map_album_art_h264_poll = tokio::time::interval(Duration::from_millis(250));
+    map_album_art_h264_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    map_album_art_h264_poll.tick().await;
+
     loop {
         tokio::select! {
         // handling data from opposite device's thread, which needs to be transmitted
@@ -4192,6 +4202,19 @@ pub async fn proxy<D: IoDeviceTrait>(
 
         _ = focus_poll.tick(), if proxy_type == ProxyType::HeadUnit => {
             maybe_emit_pending_injected_focus(proxy_type, &mut ctx, &cfg, &tx)?;
+        }
+
+        _ = map_album_art_h264_poll.tick(), if proxy_type == ProxyType::MobileDevice && crate::map_album_art_h264::is_active(&cfg) => {
+            if let Some(packets) = ctx.map_album_art_injector.take_pending_metadata_emit(&cfg) {
+                debug!(
+                    "{} map album art h264: sending pending MEDIA_PLAYBACK_METADATA from poll ({} packet(s))",
+                    get_name(proxy_type),
+                    packets.len()
+                );
+                for out_pkt in packets {
+                    tx.send(out_pkt).await?;
+                }
+            }
         }
         }
     }

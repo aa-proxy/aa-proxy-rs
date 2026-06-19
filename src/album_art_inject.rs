@@ -629,6 +629,7 @@ fn build_synthetic_metadata_payload(
     payload.push(((MEDIA_PLAYBACK_METADATA_ID as u16) >> 8) as u8);
     payload.push(((MEDIA_PLAYBACK_METADATA_ID as u16) & 0xff) as u8);
 
+    let mut wrote_song_field = false;
     if let Some(ev_text) = global_metadata_text_prefix(cfg) {
         let field_no = match album_art_ev_text_mode(cfg) {
             AlbumArtEvTextMode::SongPrefix => 1,
@@ -639,7 +640,18 @@ fn build_synthetic_metadata_payload(
             write_varint((field_no << 3) | 2, &mut payload);
             write_varint(ev_text.len() as u64, &mut payload);
             payload.extend_from_slice(ev_text.as_bytes());
+            wrote_song_field = field_no == 1;
         }
+    }
+
+    if !wrote_song_field {
+        // Some HUs ignore artwork-only synthetic metadata until real playback
+        // metadata arrives. A zero-width title makes the protobuf look like a
+        // normal metadata update while remaining visually blank.
+        const SYNTHETIC_PLACEHOLDER_TITLE: &str = "\u{200B}";
+        write_varint((1 << 3) | 2, &mut payload);
+        write_varint(SYNTHETIC_PLACEHOLDER_TITLE.len() as u64, &mut payload);
+        payload.extend_from_slice(SYNTHETIC_PLACEHOLDER_TITLE.as_bytes());
     }
 
     if duration_tick_enabled {
