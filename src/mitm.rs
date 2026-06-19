@@ -692,6 +692,295 @@ fn should_emit_pending_map_album_art_metadata(
         && is_complete_frame_boundary(pkt.flags)
 }
 
+const SSL_PACKET_TRACE_ENABLED: bool = false;
+const SSL_PACKET_TRACE_RING_CAP: usize = 96;
+const SSL_PACKET_TRACE_PREFIX_BYTES: usize = 10;
+const SSL_PACKET_TRACE_MEDIA_THROTTLE_MS: u128 = 750;
+
+fn ssl_trace_now_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+fn ssl_trace_frame_name(flags: u8) -> &'static str {
+    match flags & FRAME_TYPE_MASK {
+        0 => "middle",
+        FRAME_TYPE_FIRST => "first",
+        FRAME_TYPE_LAST => "last",
+        FRAME_TYPE_MASK => "single",
+        _ => "unknown",
+    }
+}
+
+fn ssl_trace_first_hex(payload: &[u8]) -> String {
+    let mut out = payload
+        .iter()
+        .take(SSL_PACKET_TRACE_PREFIX_BYTES)
+        .map(|b| format!("{:02X}", b))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if payload.len() > SSL_PACKET_TRACE_PREFIX_BYTES {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str("..");
+    }
+    out
+}
+
+fn ssl_trace_tls_hint(payload: &[u8]) -> Option<String> {
+    if payload.len() >= 5 && matches!(payload[0], 0x14 | 0x15 | 0x16 | 0x17) && payload[1] == 0x03 {
+        let record_len = u16::from_be_bytes([payload[3], payload[4]]);
+        Some(format!(
+            "tls(type=0x{:02X},ver={:02X}{:02X},record_len={})",
+            payload[0], payload[1], payload[2], record_len
+        ))
+    } else {
+        None
+    }
+}
+
+fn ssl_trace_service_kind(
+    pkt: &Packet,
+    debug_channel_kinds: Option<&HashMap<u8, PacketDebugServiceKind>>,
+) -> PacketDebugServiceKind {
+    if pkt.channel == 0 {
+        return PacketDebugServiceKind::Control;
+    }
+
+    debug_channel_kinds
+        .and_then(|kinds| kinds.get(&pkt.channel).copied())
+        .unwrap_or(PacketDebugServiceKind::Unknown)
+}
+
+fn ssl_trace_control_msg_name(id: u16) -> &'static str {
+    match id {
+        0x0001 => "VERSION_REQUEST",
+        0x0002 => "VERSION_RESPONSE",
+        0x0003 => "ENCAPSULATED_SSL",
+        0x0004 => "AUTH_COMPLETE",
+        0x0005 => "SERVICE_DISCOVERY_REQUEST",
+        0x0006 => "SERVICE_DISCOVERY_RESPONSE",
+        0x0007 => "CHANNEL_OPEN_REQUEST",
+        0x0008 => "CHANNEL_OPEN_RESPONSE",
+        0x0009 => "CHANNEL_CLOSE_NOTIFICATION",
+        0x000B => "PING_REQUEST",
+        0x000C => "PING_RESPONSE",
+        0x000D => "NAV_FOCUS_REQUEST",
+        0x000E => "NAV_FOCUS_NOTIFICATION",
+        0x000F => "BYEBYE_REQUEST",
+        0x0010 => "BYEBYE_RESPONSE",
+        0x0011 => "VOICE_SESSION_NOTIFICATION",
+        0x0012 => "AUDIO_FOCUS_REQUEST",
+        0x0013 => "AUDIO_FOCUS_NOTIFICATION",
+        0x0014 => "CAR_CONNECTED_DEVICES_REQUEST",
+        0x0015 => "CAR_CONNECTED_DEVICES_RESPONSE",
+        0x0016 => "USER_SWITCH_REQUEST",
+        0x0017 => "BATTERY_STATUS_NOTIFICATION",
+        0x0018 => "CALL_AVAILABILITY_STATUS",
+        0x0019 => "USER_SWITCH_RESPONSE",
+        0x001A => "SERVICE_DISCOVERY_UPDATE",
+        0x00FF => "UNEXPECTED_MESSAGE",
+        0xFFFF => "FRAMING_ERROR",
+        _ => "unknown_control",
+    }
+}
+
+fn ssl_trace_sensor_msg_name(id: u16) -> &'static str {
+    match id {
+        0x8001 => "SENSOR_REQUEST",
+        0x8002 => "SENSOR_RESPONSE",
+        0x8003 => "SENSOR_BATCH",
+        0x8004 => "SENSOR_ERROR",
+        _ => "unknown_sensor",
+    }
+}
+
+fn ssl_trace_media_msg_name(id: u16) -> &'static str {
+    match id {
+        0x0000 => "MEDIA_DATA",
+        0x0001 => "MEDIA_CODEC_CONFIG",
+        0x8000 => "MEDIA_SETUP",
+        0x8001 => "MEDIA_START",
+        0x8002 => "MEDIA_STOP",
+        0x8003 => "MEDIA_CONFIG",
+        0x8004 => "MEDIA_ACK",
+        0x8005 => "MEDIA_MICROPHONE_REQUEST",
+        0x8006 => "MEDIA_MICROPHONE_RESPONSE",
+        0x8007 => "VIDEO_FOCUS_REQUEST",
+        0x8008 => "VIDEO_FOCUS_NOTIFICATION",
+        0x8009 => "UPDATE_UI_CONFIG_REQUEST",
+        0x800A => "UPDATE_UI_CONFIG_REPLY",
+        0x800B => "AUDIO_UNDERFLOW_NOTIFICATION",
+        0x800C => "ACTION_TAKEN_NOTIFICATION",
+        0x800D => "INTEGRATED_OVERLAY_PARAMETERS_NOTIFICATION",
+        0x800E => "INTEGRATED_OVERLAY_START_NOTIFICATION",
+        0x800F => "INTEGRATED_OVERLAY_STOP_NOTIFICATION",
+        0x8010 => "INTEGRATED_OVERLAY_SESSION_DATA_UPDATE",
+        0x8011 => "UPDATE_HU_UI_CONFIG_REQUEST",
+        0x8012 => "UPDATE_HU_UI_CONFIG_RESPONSE",
+        0x8013 => "MEDIA_STATS",
+        0x8014 => "MEDIA_OPTIONS",
+        0x8015 => "CRITICAL_UI_NOTIFICATION",
+        _ => "unknown_media",
+    }
+}
+
+fn ssl_trace_navigation_msg_name(id: u16) -> &'static str {
+    match id {
+        0x8001 => "INSTRUMENT_CLUSTER_START",
+        0x8002 => "INSTRUMENT_CLUSTER_STOP",
+        0x8003 => "INSTRUMENT_CLUSTER_NAVIGATION_STATUS",
+        0x8004 => "INSTRUMENT_CLUSTER_NAVIGATION_TURN_EVENT",
+        0x8005 => "INSTRUMENT_CLUSTER_NAVIGATION_DISTANCE_EVENT",
+        0x8006 => "INSTRUMENT_CLUSTER_NAVIGATION_STATE",
+        0x8007 => "INSTRUMENT_CLUSTER_NAVIGATION_CURRENT_POSITION",
+        0x8008 => "VEHICLE_ENERGY_FORECAST",
+        _ => "unknown_navigation",
+    }
+}
+
+fn ssl_trace_playback_msg_name(id: u16) -> &'static str {
+    match id {
+        0x8001 => "MEDIA_PLAYBACK_STATUS",
+        0x8002 => "MEDIA_PLAYBACK_INPUT",
+        0x8003 => "MEDIA_PLAYBACK_METADATA",
+        _ => "unknown_media_playback",
+    }
+}
+
+fn ssl_trace_msg_name_for_kind(kind: PacketDebugServiceKind, id: u16) -> &'static str {
+    match kind {
+        PacketDebugServiceKind::Control => ssl_trace_control_msg_name(id),
+        PacketDebugServiceKind::SensorSource => ssl_trace_sensor_msg_name(id),
+        PacketDebugServiceKind::MediaSink | PacketDebugServiceKind::MediaSource => {
+            ssl_trace_media_msg_name(id)
+        }
+        PacketDebugServiceKind::NavigationStatus => ssl_trace_navigation_msg_name(id),
+        PacketDebugServiceKind::MediaPlaybackStatus => ssl_trace_playback_msg_name(id),
+        _ => "unknown",
+    }
+}
+
+fn ssl_trace_msg_hint(
+    pkt: &Packet,
+    debug_channel_kinds: Option<&HashMap<u8, PacketDebugServiceKind>>,
+) -> String {
+    if let Some(tls) = ssl_trace_tls_hint(&pkt.payload) {
+        return tls;
+    }
+
+    let frame_type = pkt.flags & FRAME_TYPE_MASK;
+    let can_have_msg_id = frame_type == FRAME_TYPE_FIRST
+        || frame_type == FRAME_TYPE_MASK
+        || pkt.channel == 0
+        || (pkt.flags & _CONTROL) == _CONTROL;
+
+    if can_have_msg_id && pkt.payload.len() >= 2 {
+        let id = u16::from_be_bytes([pkt.payload[0], pkt.payload[1]]);
+        let kind = ssl_trace_service_kind(pkt, debug_channel_kinds);
+        let name = ssl_trace_msg_name_for_kind(kind, id);
+        format!("msg=0x{:04X}/{} kind={}", id, name, kind.as_str())
+    } else if frame_type == 0 || frame_type == FRAME_TYPE_LAST {
+        "fragment_payload".to_string()
+    } else {
+        "msg=n/a".to_string()
+    }
+}
+fn ssl_trace_should_live_log(
+    stage: &str,
+    pkt: &Packet,
+    line: &str,
+    media_throttle: &mut HashMap<String, u128>,
+) -> bool {
+    if stage.contains("error") || pkt.channel == 0 || (pkt.flags & _CONTROL) == _CONTROL {
+        return true;
+    }
+    if pkt.payload.len() <= 160 {
+        return true;
+    }
+    if line.contains("0x8008")
+        || line.contains("0x8014")
+        || line.contains("0x8015")
+        || line.contains("0x8004")
+    {
+        return true;
+    }
+
+    let frame_type = pkt.flags & FRAME_TYPE_MASK;
+    let is_boundary = frame_type == FRAME_TYPE_FIRST
+        || frame_type == FRAME_TYPE_LAST
+        || frame_type == FRAME_TYPE_MASK;
+    if is_boundary && pkt.payload.len() >= 1024 {
+        let now = ssl_trace_now_ms();
+        let key = format!("{}:{}:{}", stage, pkt.channel, frame_type);
+        let last = media_throttle.get(&key).copied().unwrap_or(0);
+        if now.saturating_sub(last) >= SSL_PACKET_TRACE_MEDIA_THROTTLE_MS {
+            media_throttle.insert(key, now);
+            return true;
+        }
+    }
+
+    false
+}
+
+fn ssl_trace_record_packet(
+    proxy_type: ProxyType,
+    stage: &str,
+    pkt: &Packet,
+    debug_channel_kinds: Option<&HashMap<u8, PacketDebugServiceKind>>,
+    seq: &mut u64,
+    ring: &mut VecDeque<String>,
+    media_throttle: &mut HashMap<String, u128>,
+    force_live: bool,
+) {
+    if !SSL_PACKET_TRACE_ENABLED {
+        return;
+    }
+
+    *seq = seq.saturating_add(1);
+    let line = format!(
+        "ssl_pkt #{} {} stage={} ch={:#04x} flags={:#04x} frame={} enc={} len={} final_len={:?} {} first=[{}]",
+        *seq,
+        get_name(proxy_type),
+        stage,
+        pkt.channel,
+        pkt.flags,
+        ssl_trace_frame_name(pkt.flags),
+        (pkt.flags & ENCRYPTED) == ENCRYPTED,
+        pkt.payload.len(),
+        pkt.final_length,
+        ssl_trace_msg_hint(pkt, debug_channel_kinds),
+        ssl_trace_first_hex(&pkt.payload)
+    );
+
+    ring.push_back(line.clone());
+    while ring.len() > SSL_PACKET_TRACE_RING_CAP {
+        ring.pop_front();
+    }
+
+    if force_live || ssl_trace_should_live_log(stage, pkt, &line, media_throttle) {
+        info!("{}", line);
+    }
+}
+
+fn ssl_trace_dump_ring(proxy_type: ProxyType, reason: &str, ring: &VecDeque<String>) {
+    if !SSL_PACKET_TRACE_ENABLED {
+        return;
+    }
+    error!(
+        "{} ssl_pkt ring dump reason={} count={}",
+        get_name(proxy_type),
+        reason,
+        ring.len()
+    );
+    for line in ring.iter() {
+        error!("{}", line);
+    }
+}
+
 fn find_media_playback_channel_from_sdr(msg: &ServiceDiscoveryResponse) -> Option<u8> {
     msg.services.iter().find_map(|svc| {
         if svc.media_playback_service.is_some() {
@@ -3929,6 +4218,10 @@ pub async fn proxy<D: IoDeviceTrait>(
     map_album_art_h264_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     map_album_art_h264_poll.tick().await;
 
+    let mut ssl_trace_seq: u64 = 0;
+    let mut ssl_trace_ring: VecDeque<String> = VecDeque::with_capacity(SSL_PACKET_TRACE_RING_CAP);
+    let mut ssl_trace_media_throttle: HashMap<String, u128> = HashMap::new();
+
     loop {
         tokio::select! {
         // handling data from opposite device's thread, which needs to be transmitted
@@ -4066,10 +4359,30 @@ pub async fn proxy<D: IoDeviceTrait>(
                 &mut ctx,
             )
             .await;
+            ssl_trace_record_packet(
+                proxy_type,
+                "dec->endpoint",
+                &pkt,
+                Some(&ctx.debug_channel_kinds),
+                &mut ssl_trace_seq,
+                &mut ssl_trace_ring,
+                &mut ssl_trace_media_throttle,
+                false,
+            );
 
             match action {
                 PacketAction::Drop => {
                     debug!("{} pkt_modify_hook: packet dropped", get_name(proxy_type));
+                    ssl_trace_record_packet(
+                        proxy_type,
+                        "drop->endpoint",
+                        &pkt,
+                        Some(&ctx.debug_channel_kinds),
+                        &mut ssl_trace_seq,
+                        &mut ssl_trace_ring,
+                        &mut ssl_trace_media_throttle,
+                        true,
+                    );
                 }
                 PacketAction::SendBack => {
                     debug!(
@@ -4082,6 +4395,16 @@ pub async fn proxy<D: IoDeviceTrait>(
                     pkt.encrypt_payload(&mut mem_buf, &mut ssl_conn).await?;
                     let _ =
                         pkt_debug(proxy_type, HexdumpLevel::RawOutput, hex_requested, &pkt, &cfg, Some(&ctx.debug_channel_kinds)).await;
+                    ssl_trace_record_packet(
+                        proxy_type,
+                        "raw->endpoint",
+                        &pkt,
+                        Some(&ctx.debug_channel_kinds),
+                        &mut ssl_trace_seq,
+                        &mut ssl_trace_ring,
+                        &mut ssl_trace_media_throttle,
+                        false,
+                    );
                     pkt.transmit(&mut device).await.with_context(|| {
                         format!("proxy/{}: transmit failed", get_name(proxy_type))
                     })?;
@@ -4106,6 +4429,16 @@ pub async fn proxy<D: IoDeviceTrait>(
                             &mut ctx,
                         )
                         .await;
+                        ssl_trace_record_packet(
+                            proxy_type,
+                            "dec->endpoint/replace",
+                            &out_pkt,
+                            Some(&ctx.debug_channel_kinds),
+                            &mut ssl_trace_seq,
+                            &mut ssl_trace_ring,
+                            &mut ssl_trace_media_throttle,
+                            false,
+                        );
                         out_pkt.encrypt_payload(&mut mem_buf, &mut ssl_conn).await?;
                         let _ = pkt_debug(
                             proxy_type,
@@ -4116,6 +4449,16 @@ pub async fn proxy<D: IoDeviceTrait>(
                             Some(&ctx.debug_channel_kinds),
                         )
                         .await;
+                        ssl_trace_record_packet(
+                            proxy_type,
+                            "raw->endpoint/replace",
+                            &out_pkt,
+                            Some(&ctx.debug_channel_kinds),
+                            &mut ssl_trace_seq,
+                            &mut ssl_trace_ring,
+                            &mut ssl_trace_media_throttle,
+                            false,
+                        );
                         out_pkt.transmit(&mut device).await.with_context(|| {
                             format!("proxy/{}: transmit failed", get_name(proxy_type))
                         })?;
@@ -4131,8 +4474,28 @@ pub async fn proxy<D: IoDeviceTrait>(
         // handling input data from the reader thread
         Some(mut pkt) = rxr.recv() => {
             let _ = pkt_debug(proxy_type, HexdumpLevel::RawInput, hex_requested, &pkt, &cfg, Some(&ctx.debug_channel_kinds)).await;
+            ssl_trace_record_packet(
+                proxy_type,
+                "raw<-endpoint",
+                &pkt,
+                Some(&ctx.debug_channel_kinds),
+                &mut ssl_trace_seq,
+                &mut ssl_trace_ring,
+                &mut ssl_trace_media_throttle,
+                false,
+            );
             match pkt.decrypt_payload(&mut mem_buf, &mut ssl_conn).await {
                 Ok(_) => {
+                    ssl_trace_record_packet(
+                        proxy_type,
+                        "dec<-endpoint",
+                        &pkt,
+                        Some(&ctx.debug_channel_kinds),
+                        &mut ssl_trace_seq,
+                        &mut ssl_trace_ring,
+                        &mut ssl_trace_media_throttle,
+                        false,
+                    );
                     let action = pkt_modify_hook(
                         proxy_type,
                         PacketFlow::FromEndpoint,
@@ -4202,7 +4565,20 @@ pub async fn proxy<D: IoDeviceTrait>(
                         }
                     }
                 }
-                Err(e) => error!("decrypt_payload: {:?}", e),
+                Err(e) => {
+                    ssl_trace_record_packet(
+                        proxy_type,
+                        "decrypt_error raw<-endpoint",
+                        &pkt,
+                        Some(&ctx.debug_channel_kinds),
+                        &mut ssl_trace_seq,
+                        &mut ssl_trace_ring,
+                        &mut ssl_trace_media_throttle,
+                        true,
+                    );
+                    ssl_trace_dump_ring(proxy_type, "decrypt_payload", &ssl_trace_ring);
+                    error!("decrypt_payload: {:?}", e);
+                }
             }
         }
 
