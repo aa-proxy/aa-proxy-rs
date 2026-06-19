@@ -957,6 +957,11 @@
               "typ": "integer",
               "description": "When packet debug filtering is enabled, truncate payload dumps to this many bytes. 0 disables truncation.",
               "advanced": true
+            },
+            "pkt_debug_full_frame_enabled": {
+              "typ": "boolean",
+              "description": "Passive debug helper: reassemble fragmented decrypted frames and log the full frame at LAST without changing forwarding. Uses existing pkt_debug filters and max payload limit.",
+              "advanced": true
             }
           }
         }

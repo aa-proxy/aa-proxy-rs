@@ -22,7 +22,10 @@ use crate::display::emulate_injected_media_packet;
 use crate::display::maybe_emit_pending_injected_focus;
 use crate::display::InjectedMediaState;
 use crate::inject_displays::read_inject_displays_file_sync;
-use crate::mitm_prettyprint::{pkt_debug, update_debug_channel_kinds, PacketDebugServiceKind};
+use crate::mitm_prettyprint::{
+    pkt_debug, pkt_debug_with_full_frame, update_debug_channel_kinds, PacketDebugServiceKind,
+    PktDebugFullFrameBuffers,
+};
 use crate::sdr_ui;
 use crate::ssl_rustls::{AaConnection, SslMemBuf};
 use crate::vendor_ext::{
@@ -211,6 +214,8 @@ pub struct ModifyContext {
     pub(crate) vendor_topic_event_bridges: HashMap<u8, VecTopicEventBridge>,
     /// Channel id -> semantic service kind map used only by pkt_debug filtering.
     pub(crate) debug_channel_kinds: HashMap<u8, PacketDebugServiceKind>,
+    /// Passive fragmented-frame reassembly buffers used only by pkt_debug full-frame logging.
+    pub(crate) pkt_debug_full_frames: PktDebugFullFrameBuffers,
 }
 
 fn service_audio_config(svc: &Service) -> Option<AudioStreamConfig> {
@@ -3909,6 +3914,7 @@ pub async fn proxy<D: IoDeviceTrait>(
         vendor_channel_states: HashMap::new(),
         vendor_topic_event_bridges: HashMap::new(),
         debug_channel_kinds: HashMap::from([(0, PacketDebugServiceKind::Control)]),
+        pkt_debug_full_frames: HashMap::new(),
     };
     let mut focus_poll = tokio::time::interval(Duration::from_millis(100));
     focus_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -4051,13 +4057,13 @@ pub async fn proxy<D: IoDeviceTrait>(
                 ws_event_tx.clone()
             )
             .await?;
-            let _ = pkt_debug(
+            let _ = pkt_debug_with_full_frame(
                 proxy_type,
                 HexdumpLevel::DecryptedOutput,
                 hex_requested,
                 &pkt,
                 &cfg,
-                Some(&ctx.debug_channel_kinds),
+                &mut ctx,
             )
             .await;
 
@@ -4091,13 +4097,13 @@ pub async fn proxy<D: IoDeviceTrait>(
                         packets.len()
                     );
                     for mut out_pkt in packets {
-                        let _ = pkt_debug(
+                        let _ = pkt_debug_with_full_frame(
                             proxy_type,
                             HexdumpLevel::DecryptedOutput,
                             hex_requested,
                             &out_pkt,
                             &cfg,
-                            Some(&ctx.debug_channel_kinds),
+                            &mut ctx,
                         )
                         .await;
                         out_pkt.encrypt_payload(&mut mem_buf, &mut ssl_conn).await?;
@@ -4144,13 +4150,13 @@ pub async fn proxy<D: IoDeviceTrait>(
                         ws_event_tx.clone(),
                     )
                     .await?;
-                    let _ = pkt_debug(
+                    let _ = pkt_debug_with_full_frame(
                         proxy_type,
                         HexdumpLevel::DecryptedInput,
                         hex_requested,
                         &pkt,
                         &cfg,
-                        Some(&ctx.debug_channel_kinds),
+                        &mut ctx,
                     )
                     .await;
                     match action {
@@ -4259,6 +4265,7 @@ mod tests {
             vendor_channel_states: HashMap::new(),
             vendor_topic_event_bridges: HashMap::new(),
             debug_channel_kinds: HashMap::from([(0, PacketDebugServiceKind::Control)]),
+            pkt_debug_full_frames: HashMap::new(),
         }
     }
 

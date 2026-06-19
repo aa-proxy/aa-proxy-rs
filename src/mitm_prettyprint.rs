@@ -10,7 +10,10 @@ use crate::config_types::HexdumpLevel;
 use crate::mitm::protos::ControlMessageType;
 use crate::mitm::protos::ControlMessageType::*;
 use crate::mitm::protos::*;
-use crate::mitm::{get_name, ModifyContext, Packet, ProxyType, Result};
+use crate::mitm::{
+    get_name, ModifyContext, Packet, ProxyType, Result, FRAME_TYPE_FIRST, FRAME_TYPE_LAST,
+    FRAME_TYPE_MASK,
+};
 use log::{debug, info, log_enabled, Level};
 use protobuf::text_format::print_to_string_pretty;
 use protobuf::{Enum, Message};
@@ -37,7 +40,7 @@ pub enum PacketDebugServiceKind {
 }
 
 impl PacketDebugServiceKind {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Unknown => "unknown",
             Self::Control => "control",
@@ -57,6 +60,211 @@ impl PacketDebugServiceKind {
             Self::CarProperty => "car_property",
         }
     }
+}
+
+const CONTROL_FLAG: u8 = 1 << 2;
+
+fn is_media_data_service(kind: PacketDebugServiceKind) -> bool {
+    matches!(
+        kind,
+        PacketDebugServiceKind::MediaSink | PacketDebugServiceKind::MediaSource
+    )
+}
+
+fn is_middle_or_last_media_fragment(pkt: &Packet, kind: PacketDebugServiceKind) -> bool {
+    if !is_media_data_service(kind) || (pkt.flags & CONTROL_FLAG) == CONTROL_FLAG {
+        return false;
+    }
+
+    let frame_type = pkt.flags & FRAME_TYPE_MASK;
+    frame_type == 0 || frame_type == FRAME_TYPE_LAST
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct PktDebugFullFrameKey {
+    proxy_is_hu: bool,
+    stage: u8,
+    channel: u8,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PktDebugFullFrameBuffer {
+    channel: u8,
+    base_flags: u8,
+    expected_len: Option<u32>,
+    message_id: u16,
+    service_kind: PacketDebugServiceKind,
+    payload: Vec<u8>,
+    fragment_count: usize,
+}
+
+pub(crate) type PktDebugFullFrameBuffers = HashMap<PktDebugFullFrameKey, PktDebugFullFrameBuffer>;
+
+fn pkt_debug_full_frame_key(
+    proxy_type: ProxyType,
+    hexdump: HexdumpLevel,
+    pkt: &Packet,
+) -> PktDebugFullFrameKey {
+    let stage = match hexdump {
+        HexdumpLevel::DecryptedInput => 1,
+        HexdumpLevel::DecryptedOutput => 2,
+        HexdumpLevel::RawInput => 3,
+        HexdumpLevel::RawOutput => 4,
+        HexdumpLevel::Disabled => 0,
+        HexdumpLevel::All => 5,
+    };
+
+    PktDebugFullFrameKey {
+        proxy_is_hu: proxy_type == ProxyType::HeadUnit,
+        stage,
+        channel: pkt.channel,
+    }
+}
+
+fn pkt_debug_full_frame_supported_stage(hexdump: HexdumpLevel) -> bool {
+    matches!(
+        hexdump,
+        HexdumpLevel::DecryptedInput | HexdumpLevel::DecryptedOutput
+    )
+}
+
+fn pkt_debug_emit_line(standalone_pkt_debug: bool, line: String) {
+    if standalone_pkt_debug {
+        info!("{}", line);
+    } else {
+        debug!("{}", line);
+    }
+}
+
+fn pkt_debug_maybe_full_frame(
+    proxy_type: ProxyType,
+    hexdump: HexdumpLevel,
+    hex_requested: HexdumpLevel,
+    pkt: &Packet,
+    cfg: &AppConfig,
+    debug_channel_kinds: Option<&HashMap<u8, PacketDebugServiceKind>>,
+    buffers: &mut PktDebugFullFrameBuffers,
+) -> Result<()> {
+    if !cfg.pkt_debug_full_frame_enabled || !pkt_debug_full_frame_supported_stage(hexdump) {
+        return Ok(());
+    }
+
+    let standalone_pkt_debug = cfg.pkt_debug;
+    if !standalone_pkt_debug && !log_enabled!(Level::Debug) {
+        return Ok(());
+    }
+
+    if hex_requested < hexdump {
+        return Ok(());
+    }
+
+    let frame_type = pkt.flags & FRAME_TYPE_MASK;
+    let key = pkt_debug_full_frame_key(proxy_type, hexdump, pkt);
+
+    if frame_type == (FRAME_TYPE_FIRST | FRAME_TYPE_LAST) {
+        buffers.remove(&key);
+        return Ok(());
+    }
+
+    if frame_type == FRAME_TYPE_FIRST {
+        buffers.remove(&key);
+
+        if pkt.payload.len() < 2 {
+            return Ok(());
+        }
+
+        let message_id = u16::from_be_bytes(pkt.payload[0..=1].try_into()?);
+        let service_kind = pkt_debug_service_kind(pkt, debug_channel_kinds);
+
+        if !pkt_debug_filter_matches(proxy_type, hexdump, pkt, message_id, service_kind, cfg) {
+            return Ok(());
+        }
+
+        buffers.insert(
+            key,
+            PktDebugFullFrameBuffer {
+                channel: pkt.channel,
+                base_flags: pkt.flags & !FRAME_TYPE_MASK,
+                expected_len: pkt.final_length,
+                message_id,
+                service_kind,
+                payload: pkt.payload.clone(),
+                fragment_count: 1,
+            },
+        );
+        return Ok(());
+    }
+
+    let Some(buffer) = buffers.get_mut(&key) else {
+        return Ok(());
+    };
+
+    // MIDDLE and LAST fragments are raw continuation bytes. Append them to the
+    // FIRST fragment captured above; forwarding has already happened elsewhere
+    // and is never delayed by this passive logger.
+    buffer.payload.extend_from_slice(&pkt.payload);
+    buffer.fragment_count = buffer.fragment_count.saturating_add(1);
+
+    if frame_type != FRAME_TYPE_LAST {
+        return Ok(());
+    }
+
+    let buffer = buffers.remove(&key).expect("buffer existed above");
+    let full_pkt = Packet {
+        channel: buffer.channel,
+        flags: buffer.base_flags | FRAME_TYPE_FIRST | FRAME_TYPE_LAST,
+        final_length: None,
+        payload: buffer.payload,
+    };
+
+    let message_name = message_name_for_kind(buffer.service_kind, buffer.message_id, &full_pkt);
+    pkt_debug_emit_line(
+        standalone_pkt_debug,
+        format!(
+            "message_id = {:04X}, {}, channel={:#04x}, service_kind={}, full_frame fragments={} expected_len={:?} actual_len={}",
+            buffer.message_id,
+            message_name,
+            full_pkt.channel,
+            buffer.service_kind.as_str(),
+            buffer.fragment_count,
+            buffer.expected_len,
+            full_pkt.payload.len()
+        ),
+    );
+
+    let max_payload_bytes = Some(cfg.pkt_debug_filter_max_payload_bytes);
+    pkt_debug_emit_line(
+        standalone_pkt_debug,
+        format!(
+            "{} {:?} full-frame {}",
+            get_name(proxy_type),
+            hexdump,
+            format_packet_for_debug(&full_pkt, max_payload_bytes)
+        ),
+    );
+
+    if cfg.pkt_debug_filter_enabled && !cfg.pkt_debug_filter_pretty_proto {
+        return Ok(());
+    }
+
+    if full_pkt.payload.len() >= 2 {
+        let control = ControlMessageType::from_i32(buffer.message_id.into());
+        let data = &full_pkt.payload[2..];
+        if let Some(pretty) = pretty_packet_message(
+            buffer.service_kind,
+            control,
+            buffer.message_id,
+            data,
+            &full_pkt,
+        ) {
+            pkt_debug_emit_line(
+                standalone_pkt_debug,
+                wrap_pretty_block("full_frame_proto", &pretty),
+            );
+        }
+    }
+
+    Ok(())
 }
 
 fn split_filter_tokens(value: &str) -> impl Iterator<Item = String> + '_ {
@@ -664,9 +872,7 @@ fn pretty_sensor_message(message_id: u16, data: &[u8]) -> Option<String> {
 fn pretty_media_message(message_id: u16, data: &[u8]) -> Option<String> {
     match MediaMessageId::from_i32(message_id.into()).unwrap_or(MediaMessageId::MEDIA_MESSAGE_DATA)
     {
-        MediaMessageId::MEDIA_MESSAGE_DATA => {
-            Some(format!("MEDIA_MESSAGE_DATA {}", bytes_preview(data, 64)))
-        }
+        MediaMessageId::MEDIA_MESSAGE_DATA => None,
         MediaMessageId::MEDIA_MESSAGE_CODEC_CONFIG => Some(format!(
             "MEDIA_MESSAGE_CODEC_CONFIG {}",
             bytes_preview(data, 64)
@@ -1051,13 +1257,17 @@ pub async fn pkt_debug(
         return Ok(());
     }
 
-    let emit_pkt_debug = |line: String| {
-        if standalone_pkt_debug {
-            info!("{}", line);
-        } else {
-            debug!("{}", line);
-        }
-    };
+    let emit_pkt_debug = |line: String| pkt_debug_emit_line(standalone_pkt_debug, line);
+
+    let service_kind = pkt_debug_service_kind(pkt, debug_channel_kinds);
+
+    // Media MIDDLE/LAST frames are raw codec payload, not AA protobuf messages.
+    // Do not hexdump or pretty-print them here; the lightweight ssl_pkt trace already
+    // summarizes these as `fragment_payload`. This keeps high-volume video streams from
+    // flooding logs or adding timing pressure while debugging unrelated control messages.
+    if is_middle_or_last_media_fragment(pkt, service_kind) {
+        return Ok(());
+    }
 
     // if for some reason we have too small packet, bail out
     if pkt.payload.len() < 2 {
@@ -1066,7 +1276,6 @@ pub async fn pkt_debug(
     // message_id is the first 2 bytes of payload
     let message_id: u16 = u16::from_be_bytes(pkt.payload[0..=1].try_into()?);
 
-    let service_kind = pkt_debug_service_kind(pkt, debug_channel_kinds);
     if !pkt_debug_filter_matches(proxy_type, hexdump, pkt, message_id, service_kind, cfg) {
         return Ok(());
     }
@@ -1106,4 +1315,33 @@ pub async fn pkt_debug(
     }
 
     Ok(())
+}
+
+pub async fn pkt_debug_with_full_frame(
+    proxy_type: ProxyType,
+    hexdump: HexdumpLevel,
+    hex_requested: HexdumpLevel,
+    pkt: &Packet,
+    cfg: &AppConfig,
+    ctx: &mut ModifyContext,
+) -> Result<()> {
+    pkt_debug_maybe_full_frame(
+        proxy_type,
+        hexdump,
+        hex_requested,
+        pkt,
+        cfg,
+        Some(&ctx.debug_channel_kinds),
+        &mut ctx.pkt_debug_full_frames,
+    )?;
+
+    pkt_debug(
+        proxy_type,
+        hexdump,
+        hex_requested,
+        pkt,
+        cfg,
+        Some(&ctx.debug_channel_kinds),
+    )
+    .await
 }

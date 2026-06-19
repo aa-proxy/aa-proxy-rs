@@ -499,6 +499,9 @@ pub struct AppConfig {
     pub pkt_debug_filter_pretty_proto: bool,
     /// When packet debug filtering is enabled, truncate packet payload dumps to this many bytes. 0 disables truncation.
     pub pkt_debug_filter_max_payload_bytes: usize,
+    /// Passive pkt_debug helper: reassemble fragmented decrypted frames for logging only.
+    /// Normal forwarding is not delayed or modified. Uses the existing pkt_debug filters and max payload limit.
+    pub pkt_debug_full_frame_enabled: bool,
     pub legacy: bool,
     pub quick_reconnect: bool,
     pub bt_poweroff: bool,
@@ -916,6 +919,7 @@ impl Default for AppConfig {
             pkt_debug_filter_exclude_message_ids: String::new(),
             pkt_debug_filter_pretty_proto: true,
             pkt_debug_filter_max_payload_bytes: 2048,
+            pkt_debug_full_frame_enabled: false,
             legacy: true,
             quick_reconnect: false,
             bt_poweroff: false,
@@ -1253,6 +1257,7 @@ impl AppConfig {
         doc["pkt_debug_filter_pretty_proto"] = value(self.pkt_debug_filter_pretty_proto);
         doc["pkt_debug_filter_max_payload_bytes"] =
             value(self.pkt_debug_filter_max_payload_bytes as i64);
+        doc["pkt_debug_full_frame_enabled"] = value(self.pkt_debug_full_frame_enabled);
         doc["legacy"] = value(self.legacy);
         doc["quick_reconnect"] = value(self.quick_reconnect);
         doc["bt_poweroff"] = value(self.bt_poweroff);
