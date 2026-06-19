@@ -2,6 +2,13 @@
 
 FROM rust:bookworm AS builder
 
+ARG BUILD_PROFILE=release
+# Fast local/test release override. Buildroot still uses Cargo.toml release profile.
+# Set FAST_RELEASE=false to use the full release profile from Cargo.toml.
+ARG FAST_RELEASE=true
+ARG FAST_RELEASE_LTO=false
+ARG FAST_RELEASE_CODEGEN_UNITS=16
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     pkg-config \
@@ -21,15 +28,38 @@ RUN mkdir -p src && printf 'fn main() {}\n' > src/main.rs
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    cargo build --release --target aarch64-unknown-linux-gnu || true
+    if [ "${BUILD_PROFILE}" = "release" ]; then \
+        if [ "${FAST_RELEASE}" = "true" ]; then \
+            CARGO_PROFILE_RELEASE_LTO="${FAST_RELEASE_LTO}" \
+            CARGO_PROFILE_RELEASE_CODEGEN_UNITS="${FAST_RELEASE_CODEGEN_UNITS}" \
+            cargo build --release --target aarch64-unknown-linux-gnu || true; \
+        else \
+            cargo build --release --target aarch64-unknown-linux-gnu || true; \
+        fi; \
+    else \
+        cargo build --target aarch64-unknown-linux-gnu || true; \
+    fi
 
 COPY . .
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    cargo build --release --target aarch64-unknown-linux-gnu
+    mkdir -p /out && \
+    if [ "${BUILD_PROFILE}" = "release" ]; then \
+        if [ "${FAST_RELEASE}" = "true" ]; then \
+            CARGO_PROFILE_RELEASE_LTO="${FAST_RELEASE_LTO}" \
+            CARGO_PROFILE_RELEASE_CODEGEN_UNITS="${FAST_RELEASE_CODEGEN_UNITS}" \
+            cargo build --release --target aarch64-unknown-linux-gnu; \
+        else \
+            cargo build --release --target aarch64-unknown-linux-gnu; \
+        fi && \
+        cp target/aarch64-unknown-linux-gnu/release/aa-proxy-rs /out/aa-proxy-rs; \
+    else \
+        cargo build --target aarch64-unknown-linux-gnu && \
+        cp target/aarch64-unknown-linux-gnu/debug/aa-proxy-rs /out/aa-proxy-rs; \
+    fi
 
 FROM scratch AS export
-COPY --from=builder /usr/src/app/target/aarch64-unknown-linux-gnu/release/aa-proxy-rs /aa-proxy-rs
+COPY --from=builder /out/aa-proxy-rs /aa-proxy-rs
 
-# DOCKER_BUILDKIT=1 docker build -f Dockerfile.armv7.binary --target export --output type=local,dest=./output .
+# DOCKER_BUILDKIT=1 docker build -f Dockerfile.armv7.binary --target export --output type=local,dest=./output --build-arg BUILD_PROFILE=release .
