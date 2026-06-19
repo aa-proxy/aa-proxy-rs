@@ -533,7 +533,7 @@
               "description": "Optional compatibility workaround for HUs that ignore artwork-only MediaPlaybackMetadata updates. When enabled, outbound rewritten metadata alternates duration_seconds between the cached value and cached value + 1. The cached phone metadata template is not modified. Default: false."
             },
             "map_album_art_ev_text_mode": {
-              "typ": "string",
+              "typ": "select",
               "description": "How EV forecast text is written into MediaPlaybackMetadata while album-art rewrite is active. album_art = only album art/no text change; song_prefix = prefix song/title with EV text; artist_field = move original artist before song and put EV text in artist field; artist_prefix = prefix artist field with EV text, song/title unchanged. Default: album_art.",
               "requires": "map_album_art_enabled",
               "values": [
@@ -545,7 +545,7 @@
             },
             "map_album_art_ev_prefix_max_age_ms": {
               "typ": "integer",
-              "description": "Maximum age for EV forecast prefix in milliseconds. 0 disables expiry. Default: 15000.",
+              "description": "Maximum age for EV forecast prefix in milliseconds. 0 disables expiry. Default: 0.",
               "requires": "map_album_art_enabled"
             },
             "vehicle_energy_forecast_keep_last_on_null": {

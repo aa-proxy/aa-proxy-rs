@@ -1266,8 +1266,8 @@ fn maybe_override_raw_control_protocol_version(
 
 const VEHICLE_ENERGY_FORECAST_MESSAGE_ID: i32 = 0x8008;
 // Latest Gearhead/AA builds can send this when PDK >= 5.1.
-// Our generated protos do not know it yet, so keep the raw id here.
-const MEDIA_MESSAGE_MEDIA_OPTIONS_MESSAGE_ID: i32 = 0x8015;
+// Keep a raw id here because this gate intentionally works before pretty parsing.
+const MEDIA_MESSAGE_MEDIA_OPTIONS_MESSAGE_ID: i32 = 0x8014;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
 struct ParsedEnergyAtDistance {
@@ -1659,7 +1659,8 @@ fn is_known_media_service_channel(ctx: &ModifyContext, channel: u8) -> bool {
 }
 
 fn is_first_or_single_frame(pkt: &Packet) -> bool {
-    (pkt.flags & FRAME_TYPE_FIRST) == FRAME_TYPE_FIRST
+    let frame_type = pkt.flags & FRAME_TYPE_MASK;
+    frame_type == FRAME_TYPE_FIRST || frame_type == FRAME_TYPE_MASK
 }
 
 fn maybe_handle_override_induced_media_options(
@@ -1683,7 +1684,7 @@ fn maybe_handle_override_induced_media_options(
     if let Some(state) = state {
         if media_channel {
             info!(
-                "{} protocol version override: consumed MediaOptions 0x8015 locally and dropped before HU because request was raised {}.{} -> {}.{} ch={:#04x} flow={:?} flags={:#04x} len={}",
+                "{} protocol version override: consumed MediaOptions 0x8014 locally and dropped before HU because request was raised {}.{} -> {}.{} ch={:#04x} flow={:?} flags={:#04x} len={}",
                 get_name(proxy_type),
                 state.original.0,
                 state.original.1,
@@ -1698,7 +1699,7 @@ fn maybe_handle_override_induced_media_options(
         }
 
         warn!(
-            "{} protocol version override: observed MediaOptions 0x8015 on non-media/unknown channel; forwarding ch={:#04x} flow={:?} flags={:#04x} len={} kind={:?}",
+            "{} protocol version override: observed MediaOptions 0x8014 on non-media/unknown channel; forwarding ch={:#04x} flow={:?} flags={:#04x} len={} kind={:?}",
             get_name(proxy_type),
             pkt.channel,
             flow,
@@ -1708,7 +1709,7 @@ fn maybe_handle_override_induced_media_options(
         );
     } else {
         info!(
-            "{} observed MediaOptions 0x8015 without override-induced state; forwarding ch={:#04x} flow={:?} flags={:#04x} len={} media_channel={} kind={:?}",
+            "{} observed MediaOptions 0x8014 without override-induced state; forwarding ch={:#04x} flow={:?} flags={:#04x} len={} media_channel={} kind={:?}",
             get_name(proxy_type),
             pkt.channel,
             flow,

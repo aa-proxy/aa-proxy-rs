@@ -1020,7 +1020,7 @@ impl Default for AppConfig {
             map_album_art_crop_h: 40,
             map_album_art_duration_tick_enabled: false,
             map_album_art_ev_text_mode: "album_art".to_string(),
-            map_album_art_ev_prefix_max_age_ms: 15_000,
+            map_album_art_ev_prefix_max_age_ms: 0,
             vehicle_energy_forecast_keep_last_on_null: true,
             collect_speed: false,
             disable_driving_status: false,
