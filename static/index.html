@@ -348,10 +348,10 @@
         <p class="margins-hint" id="margins-hint" hidden>
           Saves margins, content insets, and stable content insets for this
           display. Android Auto only reads these from the initial connection
-          handshake on most phones we've tested -- changes reliably take
-          effect on the <em>next</em> phone connection, not immediately.
-          (For margins only, a best-effort live update is also attempted,
-          but isn't guaranteed to have a visible effect.)
+          handshake -- changes take effect on the <em>next</em> phone
+          connection, not immediately. (For margins only, a live update is
+          also attempted in the background; on every phone tested so far it
+          had no visible effect, so treat it as a no-op, not a shortcut.)
         </p>
       </div>
     </aside>
@@ -1258,12 +1258,11 @@
       // (see /sdr-ui/current, /sdr-ui/profiles). Saves margins, content
       // insets, and stable content insets for a display/resolution.
       //
-      // Note: on real phones we've tested, Android Auto only reads these
-      // from the initial connection handshake -- a best-effort live push
-      // (UpdateUiConfigRequest / wire 0x800A) is attempted for margins
-      // only, since that's the only one of the three with a runtime wire
-      // equivalent, but it is NOT guaranteed to have a visible effect.
-      // Changes reliably apply on the next phone connection.
+      // Note: Android Auto only reads these from the initial connection
+      // handshake -- a live push (UpdateUiConfigRequest / wire 0x800A) is
+      // attempted for margins only, since that's the only one of the three
+      // with a runtime wire equivalent, but on every phone tested so far it
+      // had no visible effect. Changes apply on the next phone connection.
       // ============================================================
 
       const MARGINS_INSET_TYPES = ["margins", "content_insets", "stable_content_insets"];
@@ -1711,7 +1710,7 @@
           const pushed = body.live_push_channels || 0;
           showSnackbar(
             pushed > 0
-              ? `Saved -- applies on next phone connection. (Margin update also sent live to ${pushed} channel(s); not guaranteed visible without a reconnect.)`
+              ? `Saved -- applies on next phone connection. (Margin update also sent live to ${pushed} channel(s), but this has had no visible effect on any phone tested so far.)`
               : "Saved -- applies on next phone connection.",
             "success",
           );

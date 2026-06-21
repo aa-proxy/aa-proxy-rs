@@ -2639,6 +2639,36 @@ pub async fn pkt_modify_hook(
 
                 if tap_media {
                     if let Some(sink) = media_sink_for_channel(ctx, pkt.channel).await {
+                        // If video focus on this channel just came back to PROJECTED
+                        // (HU-initiated via VideoFocusRequest, or the phone's own
+                        // unsolicited indication), the phone is about to restart its
+                        // encoder for this channel -- the same "fresh start" as a
+                        // reconnect, just without one. Without this, a focus toggle
+                        // produces the exact bug a reconnect used to: the next IDR
+                        // gets treated as steady-state (seen_first_idr already true
+                        // from earlier in this same session) and the preview is left
+                        // with a single bare IDR -- often a black/loading frame.
+                        let focus_msg_id = frame_data
+                            .get(0..2)
+                            .map(|b| u16::from_be_bytes([b[0], b[1]]));
+                        if focus_msg_id == Some(MEDIA_MESSAGE_VIDEO_FOCUS_NOTIFICATION as u16) {
+                            if let Ok(notif) =
+                                VideoFocusNotification::parse_from_bytes(&frame_data[2..])
+                            {
+                                if matches!(
+                                    notif.focus(),
+                                    VideoFocusMode::VIDEO_FOCUS_PROJECTED
+                                        | VideoFocusMode::VIDEO_FOCUS_PROJECTED_NO_INPUT_FOCUS
+                                ) {
+                                    sink.reset_for_new_session();
+                                    info!(
+                                        "{} media tap: ch {:#04x} video focus -> PROJECTED; next IDR treated as fresh session start",
+                                        get_name(proxy_type),
+                                        pkt.channel
+                                    );
+                                }
+                            }
+                        }
                         tap_media_message(proxy_type, pkt, &sink, &frame_data).await;
                     } else {
                         debug!(
