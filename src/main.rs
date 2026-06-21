@@ -14,6 +14,7 @@ use aa_proxy_rs::mitm::send_byebye;
 use aa_proxy_rs::mitm::OdometerData;
 use aa_proxy_rs::mitm::Packet;
 use aa_proxy_rs::mitm::SharedCompanionIp;
+use aa_proxy_rs::mitm::SharedMediaChannels;
 use aa_proxy_rs::mitm::SharedMediaTapEndpoints;
 use aa_proxy_rs::mitm::SharedServiceDiscoveryResponse;
 use aa_proxy_rs::mitm::TirePressureData;
@@ -37,6 +38,7 @@ use simplelog::*;
 use std::os::unix::fs::PermissionsExt;
 use time::macros::format_description;
 
+use std::collections::HashMap;
 use std::fs;
 use std::fs::OpenOptions;
 use std::path::PathBuf;
@@ -634,6 +636,7 @@ async fn tokio_main(
     last_speed: Arc<RwLock<Option<i32>>>,
     last_service_discovery_response: SharedServiceDiscoveryResponse,
     media_tap_endpoints: SharedMediaTapEndpoints,
+    shared_media_channels: SharedMediaChannels,
     companion_ip: SharedCompanionIp,
     last_tire_pressure_data: Arc<RwLock<Option<TirePressureData>>>,
     led_support: bool,
@@ -657,6 +660,7 @@ async fn tokio_main(
         last_speed,
         last_service_discovery_response,
         media_tap_endpoints,
+        shared_media_channels,
         companion_ip: companion_ip.clone(),
         last_tire_pressure_data,
         ws_event_tx,
@@ -1409,6 +1413,8 @@ fn main() -> Result<()> {
     let last_service_discovery_response_cloned = last_service_discovery_response.clone();
     let media_tap_endpoints: SharedMediaTapEndpoints = Arc::new(RwLock::new(Vec::new()));
     let media_tap_endpoints_cloned = media_tap_endpoints.clone();
+    let shared_media_channels: SharedMediaChannels = Arc::new(Mutex::new(HashMap::new()));
+    let shared_media_channels_cloned = shared_media_channels.clone();
     let companion_ip: SharedCompanionIp = Arc::new(RwLock::new(None));
     let companion_ip_cloned = companion_ip.clone();
     let last_tire_pressure_data = Arc::new(RwLock::new(None));
@@ -1425,7 +1431,9 @@ fn main() -> Result<()> {
     // that worker thread for a while (e.g. a synchronous syscall or
     // long-running computation on the async runtime). Used to root-cause
     // the periodic video write-queue-full/resync stalls.
-    let probe_workers = thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    let probe_workers = thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
     for probe_id in 0..probe_workers {
         runtime.spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_millis(200));
@@ -1486,6 +1494,7 @@ fn main() -> Result<()> {
             last_speed_cloned,
             last_service_discovery_response_cloned,
             media_tap_endpoints_cloned,
+            shared_media_channels_cloned,
             companion_ip_cloned,
             last_tire_pressure_data,
             led_support,
@@ -1518,6 +1527,7 @@ fn main() -> Result<()> {
             usb_connected,
             script_registry.clone(),
             ws_event_tx.clone(),
+            shared_media_channels,
         )
     );
 

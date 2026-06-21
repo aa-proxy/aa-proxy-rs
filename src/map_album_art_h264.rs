@@ -562,7 +562,7 @@ fn throttle_warn(last_warn_at: &mut Option<Instant>, message: &str) {
     }
 }
 
-fn feed_codec_config_to_decoder(
+pub(crate) fn feed_codec_config_to_decoder(
     decoder: &mut Decoder,
     codec_config: &[u8],
 ) -> Result<usize, String> {
@@ -577,7 +577,7 @@ fn feed_codec_config_to_decoder(
     Ok(nal_count)
 }
 
-fn feed_access_unit_to_decoder(
+pub(crate) fn feed_access_unit_to_decoder(
     decoder: &mut Decoder,
     data: &[u8],
 ) -> Result<(Option<Frame>, usize), String> {
@@ -741,7 +741,7 @@ fn percent_size(total: usize, percent: u32) -> Option<usize> {
     }
 }
 
-fn yuv420_pixel_to_rgb(
+pub(crate) fn yuv420_pixel_to_rgb(
     frame: &Frame,
     width: usize,
     height: usize,
@@ -777,7 +777,7 @@ fn clamp_u8(value: i32) -> u8 {
     value.clamp(0, 255) as u8
 }
 
-fn encode_rgb_png(width: u32, height: u32, rgb: &[u8]) -> Result<Vec<u8>, String> {
+pub(crate) fn encode_rgb_png(width: u32, height: u32, rgb: &[u8]) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
     {
         let mut encoder = png::Encoder::new(&mut out, width, height);

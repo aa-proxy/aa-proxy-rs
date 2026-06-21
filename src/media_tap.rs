@@ -1,7 +1,7 @@
 use protobuf::Enum;
 use simplelog::*;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
@@ -44,6 +44,43 @@ pub struct MediaStreamInfo {
     pub audio_config: Option<AudioStreamConfig>,
 }
 
+/// Window of access units captured starting at an IDR, used to decode a
+/// representative still frame for the margins-panel preview. A lone IDR only
+/// shows whatever was on screen at that exact keyframe moment; capturing a
+/// short *contiguous* run of frames after it (cheap -- just buffering raw
+/// bytes, no decode) lets the preview decode a temporally coherent sequence
+/// up to a couple of seconds past the keyframe instead. We deliberately don't
+/// try to splice in arbitrary *later* live frames: P-frames only decode
+/// correctly as an unbroken chain from their reference frame, so skipping
+/// ahead to "now" without decoding everything in between would produce
+/// corrupted output, not a fresher one.
+struct IdrBurst {
+    /// When the IDR that started this burst was cached (wall clock), so the
+    /// preview can report how old the resulting frame actually is.
+    cached_at: Instant,
+    /// `(pts_us, raw Annex-B access unit)`, oldest (the IDR) first.
+    units: Vec<(u64, Vec<u8>)>,
+    /// This burst's own target capture duration -- wider for the first IDR of
+    /// a session (to outlast AA's loading screen after projection starts),
+    /// negligible for subsequent ones (steady-state IDRs already show real
+    /// content, so there's no loading screen to skip past).
+    window: Duration,
+}
+
+/// Capture window for the first IDR a sink ever sees -- wide enough to
+/// outlast AA's post-launch loading screen. Main display gets a bit more
+/// than other displays (tuned empirically).
+const IDR_BURST_FIRST_WINDOW_MAIN: Duration = Duration::from_secs(4);
+const IDR_BURST_FIRST_WINDOW_OTHER: Duration = Duration::from_secs(3);
+/// Capture window for every subsequent IDR on the same sink. Steady-state
+/// IDRs (periodic refresh, resync) already show real content, so just the
+/// bare IDR is enough -- effectively zero extra frames.
+const IDR_BURST_STEADY_WINDOW: Duration = Duration::ZERO;
+/// Hard cap on unit count as a defensive bound (e.g. against an unexpectedly
+/// high frame rate), sized with margin above the largest first-IDR window
+/// (60fps * window) so it doesn't silently truncate the window first.
+const IDR_BURST_MAX_UNITS: usize = 260;
+
 /// Broadcast-based sink for tapping a single media channel over TCP.
 #[derive(Clone)]
 pub struct MediaSink {
@@ -56,6 +93,12 @@ pub struct MediaSink {
     /// bootstrap a client straight back into sync after a resync instead of
     /// waiting for the next naturally-occurring IDR.
     last_idr: Arc<tokio::sync::Mutex<Option<Arc<(u64, Vec<u8>)>>>>,
+    /// Short contiguous run of access units starting at the last IDR, for the
+    /// margins-panel preview. See [`IdrBurst`].
+    idr_burst: Arc<tokio::sync::Mutex<Option<IdrBurst>>>,
+    /// Whether this sink has cached an IDR before, so [`set_last_idr`](Self::set_last_idr)
+    /// knows whether to use the wide first-IDR window or the steady-state one.
+    seen_first_idr: Arc<AtomicBool>,
     /// Stream metadata learned from ServiceDiscovery.
     stream_info: Arc<tokio::sync::Mutex<Option<MediaStreamInfo>>>,
     /// Monotonic counter bumped each time a TCP client connects to this sink.
@@ -69,6 +112,8 @@ impl MediaSink {
             tx,
             codec_cfg: Arc::new(tokio::sync::Mutex::new(None)),
             last_idr: Arc::new(tokio::sync::Mutex::new(None)),
+            idr_burst: Arc::new(tokio::sync::Mutex::new(None)),
+            seen_first_idr: Arc::new(AtomicBool::new(false)),
             stream_info: Arc::new(tokio::sync::Mutex::new(None)),
             client_connect_gen: Arc::new(AtomicU64::new(0)),
         }
@@ -130,12 +175,101 @@ impl MediaSink {
         self.codec_cfg.lock().await.clone()
     }
 
-    pub async fn set_last_idr(&self, pts_us: u64, access_unit: Vec<u8>) {
-        *self.last_idr.lock().await = Some(Arc::new((pts_us, access_unit)));
+    /// Caches the IDR for resync bootstrapping and starts a fresh
+    /// [`IdrBurst`] for the margins-panel preview. Returns whether this was
+    /// treated as the sink's first IDR (wide window) or a steady-state one
+    /// (bare IDR only) -- callers should log this with their own channel
+    /// context, since MediaSink itself doesn't know its channel/offset.
+    pub async fn set_last_idr(&self, pts_us: u64, access_unit: Vec<u8>) -> bool {
+        *self.last_idr.lock().await = Some(Arc::new((pts_us, access_unit.clone())));
+        let is_first = !self.seen_first_idr.swap(true, Ordering::Relaxed);
+        let window = if is_first {
+            let is_main = matches!(
+                self.get_stream_info().await,
+                Some(MediaStreamInfo {
+                    kind: MediaStreamKind::Video {
+                        display_type: DisplayType::DISPLAY_TYPE_MAIN,
+                        ..
+                    },
+                    ..
+                })
+            );
+            if is_main {
+                IDR_BURST_FIRST_WINDOW_MAIN
+            } else {
+                IDR_BURST_FIRST_WINDOW_OTHER
+            }
+        } else {
+            IDR_BURST_STEADY_WINDOW
+        };
+        *self.idr_burst.lock().await = Some(IdrBurst {
+            cached_at: Instant::now(),
+            units: vec![(pts_us, access_unit)],
+            window,
+        });
+        is_first
     }
 
     pub async fn get_last_idr(&self) -> Option<Arc<(u64, Vec<u8>)>> {
         self.last_idr.lock().await.clone()
+    }
+
+    /// Appends a non-IDR access unit to the current burst (if any, and if
+    /// still within that burst's window/count cap). No-op once the cap is
+    /// hit, or if no IDR has started a burst yet. Returns the resulting
+    /// burst length only when an append actually happened (i.e. only when
+    /// the length just changed), so callers can log on change without
+    /// tracking previous-length state themselves; returns `None` for a
+    /// no-op (window/cap already exceeded, or no burst at all).
+    pub async fn append_to_idr_burst(&self, pts_us: u64, access_unit: Vec<u8>) -> Option<usize> {
+        let mut guard = self.idr_burst.lock().await;
+        let burst = guard.as_mut()?;
+        if burst.cached_at.elapsed() < burst.window && burst.units.len() < IDR_BURST_MAX_UNITS {
+            burst.units.push((pts_us, access_unit));
+            Some(burst.units.len())
+        } else {
+            None
+        }
+    }
+
+    /// Returns the current burst's access units (IDR first) and how long ago
+    /// that IDR was cached, for the margins-panel preview to decode and
+    /// report an honest age alongside.
+    pub async fn get_idr_burst(&self) -> Option<(Instant, Vec<(u64, Vec<u8>)>)> {
+        self.idr_burst
+            .lock()
+            .await
+            .as_ref()
+            .map(|b| (b.cached_at, b.units.clone()))
+    }
+
+    /// Cheap identity for the current burst's content -- the IDR's pts plus
+    /// the current unit count, which changes whenever the burst grows --
+    /// without cloning the (potentially large) access unit bytes. Lets a
+    /// caller build an ETag and skip a full decode entirely via a
+    /// conditional (If-None-Match) request when the burst hasn't changed.
+    pub async fn get_idr_burst_version(&self) -> Option<(u64, usize)> {
+        let guard = self.idr_burst.lock().await;
+        let burst = guard.as_ref()?;
+        let first_pts = burst.units.first().map(|(pts, _)| *pts).unwrap_or(0);
+        Some((first_pts, burst.units.len()))
+    }
+
+    /// Marks this sink as not having seen an IDR yet, so the *next* one is
+    /// treated as a fresh session's first IDR (wide burst window) rather than
+    /// a steady-state one (bare IDR only).
+    ///
+    /// Needed because the offset-keyed sink registry this is created through
+    /// (`media_sinks` in mitm.rs) deliberately persists across reconnects --
+    /// it's the same MediaSink object, `seen_first_idr` included, every time.
+    /// Without resetting it here, a channel's *actual* first IDR after a
+    /// reconnect gets treated as a steady-state one (since the flag was
+    /// already flipped true by an earlier session), and the preview goes
+    /// back to showing AA's loading screen/black with no extra frames to
+    /// outlast it. Call this whenever a sink is reused for a new connection,
+    /// not on every lookup within the same session.
+    pub fn reset_for_new_session(&self) {
+        self.seen_first_idr.store(false, Ordering::Relaxed);
     }
 }
 
@@ -337,7 +471,8 @@ pub async fn media_tcp_server(port: u16, label: String, sink: MediaSink, _wait_f
                     // Dedicated writer task: all TCP writes to this client go
                     // through this queue, so a slow/blocking socket write
                     // never delays draining the broadcast channel.
-                    let (tx_out, mut rx_out) = mpsc::channel::<Vec<u8>>(CLIENT_WRITE_QUEUE_CAPACITY);
+                    let (tx_out, mut rx_out) =
+                        mpsc::channel::<Vec<u8>>(CLIENT_WRITE_QUEUE_CAPACITY);
                     let writer_addr = addr;
                     let writer_label = label.clone();
                     tokio::spawn(async move {
@@ -545,7 +680,16 @@ pub async fn media_tcp_server(port: u16, label: String, sink: MediaSink, _wait_f
                                                 let is_idr = is_idr_frame(&access_unit);
 
                                                 if is_idr {
-                                                    sink.set_last_idr(flush_pts_us, access_unit.clone()).await;
+                                                    // Do not call sink.set_last_idr() here: the producer side
+                                                    // (tap_media_message) already caches every IDR
+                                                    // unconditionally as it taps the raw packet stream. Calling
+                                                    // it again here for the same IDR (just observed a few ms
+                                                    // later, via this client's own broadcast subscription)
+                                                    // would see seen_first_idr already true and wrongly
+                                                    // downgrade an in-progress wide-window burst to the
+                                                    // zero-window steady-state, freezing it at just the bare
+                                                    // IDR -- exactly the bug seen on channels with a tap
+                                                    // client connected (this loop only runs for one).
                                                     if first_idr_seen_at.is_none() {
                                                         first_idr_seen_at = Some(Instant::now());
                                                         info!(
@@ -920,6 +1064,22 @@ pub(crate) async fn tap_media_message(
                             media_data.len(),
                             &media_data[..media_data.len().min(16)]
                         );
+                        // Cache unconditionally at the producer side (the existing
+                        // cache in media_tcp_server's per-client resync loop only
+                        // updates once a tap client has connected and subscribed) so
+                        // a still-frame preview is available for any channel that is
+                        // actively streaming, even with no tap client ever attached.
+                        let is_first_idr = sink.set_last_idr(pts_us, media_data.to_vec()).await;
+                        info!(
+                            "{} <blue>media tap:</> IDR cached on ch {:#04x}, burst={}",
+                            tap_name(proxy_type),
+                            pkt.channel,
+                            if is_first_idr {
+                                "FIRST (wide window)"
+                            } else {
+                                "steady-state (bare IDR)"
+                            }
+                        );
                     } else {
                         debug!(
                             "{} media tap DATA ch {:#04x}: pts={}us, {}b, first: {:02X?}",
@@ -929,6 +1089,19 @@ pub(crate) async fn tap_media_message(
                             media_data.len(),
                             &media_data[..media_data.len().min(8)]
                         );
+                        // Extend the current burst (if any) so the margins-panel
+                        // preview can decode a short coherent run past the
+                        // keyframe instead of just the bare IDR.
+                        if let Some(burst_len) =
+                            sink.append_to_idr_burst(pts_us, media_data.to_vec()).await
+                        {
+                            debug!(
+                                "{} media tap: ch {:#04x} burst now {} unit(s)",
+                                tap_name(proxy_type),
+                                pkt.channel,
+                                burst_len
+                            );
+                        }
                     }
                     sink.send_frame(pts_us, media_data.to_vec()).await;
                 }

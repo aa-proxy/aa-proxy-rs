@@ -30,11 +30,12 @@ use crate::mitm::Result;
 use crate::mitm::SharedServiceDiscoveryResponse;
 use crate::mitm::{send_odometer_data, OdometerData};
 use crate::mitm::{send_tire_pressure_data, TirePressureData};
-use crate::mitm::{SharedCompanionIp, SharedMediaTapEndpoints};
+use crate::mitm::{SharedCompanionIp, SharedMediaChannels, SharedMediaTapEndpoints};
 use crate::proxy::media_tap_reverse_bridge_once;
 #[cfg(feature = "wasm-scripting")]
 use crate::script_wasm::{LoadedScript, ScriptRegistry};
 use crate::sdr_ui;
+use crate::sdr_ui_preview;
 #[cfg(not(feature = "wasm-scripting"))]
 type ScriptRegistry = ();
 use axum::{
@@ -147,6 +148,7 @@ pub struct AppState {
     pub last_speed: Arc<RwLock<Option<i32>>>,
     pub last_service_discovery_response: SharedServiceDiscoveryResponse,
     pub media_tap_endpoints: SharedMediaTapEndpoints,
+    pub shared_media_channels: SharedMediaChannels,
     pub companion_ip: SharedCompanionIp,
     pub last_tire_pressure_data: Arc<RwLock<Option<TirePressureData>>>,
     pub ws_event_tx: broadcast::Sender<ServerEvent>,
@@ -198,6 +200,7 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/set-time", post(set_time_handler))
         .route("/speed", get(speed_handler))
         .route("/sdr-ui/current", get(sdr_ui_current_handler))
+        .route("/sdr-ui/preview/:channel", get(sdr_ui_preview_handler))
         .route("/sdr-ui/profiles", get(sdr_ui_profiles_list_handler))
         .route(
             "/sdr-ui/profiles/:vehicle_id",
@@ -1548,6 +1551,79 @@ async fn speed_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse 
     }
 }
 
+/// Renders a still-frame PNG preview of a video channel's current IDR burst
+/// (the cached IDR plus a short contiguous run of frames after it -- see
+/// MediaSink::get_idr_burst), for the Display Margins web panel. Requires
+/// media_dump_base_port to be configured (media tap), since that's what
+/// populates the per-channel MediaSink registry this reads from. Returns 404
+/// if no sink/IDR is cached yet for the requested channel. The response
+/// carries an `X-Frame-Age-Secs` header (seconds since the burst's IDR was
+/// cached) so the UI can show how current the frame actually is, rather than
+/// presenting a possibly-stale frame as if it were live.
+async fn sdr_ui_preview_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(channel): axum::extract::Path<u8>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let sink = state
+        .shared_media_channels
+        .lock()
+        .await
+        .get(&channel)
+        .cloned();
+    let Some(sink) = sink else {
+        return (
+            StatusCode::NOT_FOUND,
+            "no media sink for this channel yet (is media_dump_base_port configured?)",
+        )
+            .into_response();
+    };
+
+    // Cheap identity check (no decode) so a conditional request for a burst
+    // that hasn't changed since the browser last fetched it can be answered
+    // with 304 instead of paying the multi-second decode again.
+    if let Some((first_pts, unit_count)) = sink.get_idr_burst_version().await {
+        let etag = format!("\"{channel:x}-{first_pts:x}-{unit_count:x}\"");
+        let if_none_match = headers
+            .get(header::IF_NONE_MATCH)
+            .and_then(|v| v.to_str().ok());
+        if if_none_match == Some(etag.as_str()) {
+            return (
+                StatusCode::NOT_MODIFIED,
+                [(header::CACHE_CONTROL, "no-cache"), (header::ETAG, &etag)],
+            )
+                .into_response();
+        }
+    }
+
+    match sdr_ui_preview::render_last_idr_burst_png(&sink, channel, 960).await {
+        Ok(rendered) => {
+            let (first_pts, unit_count) = rendered.burst_version;
+            let etag = format!("\"{channel:x}-{first_pts:x}-{unit_count:x}\"");
+            let response = Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "image/png")
+                .header(header::CACHE_CONTROL, "no-cache")
+                .header(header::ETAG, etag)
+                .header("x-frame-age-secs", rendered.age.as_secs().to_string())
+                .body(Body::from(rendered.png));
+            match response {
+                Ok(response) => response.into_response(),
+                Err(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to build response: {}", e),
+                )
+                    .into_response(),
+            }
+        }
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            format!("no preview frame available yet: {e}"),
+        )
+            .into_response(),
+    }
+}
+
 async fn sdr_ui_current_handler() -> impl IntoResponse {
     if let Some(current) = sdr_ui::current_sdr_ui() {
         Json(current).into_response()
@@ -1615,11 +1691,19 @@ async fn sdr_ui_profile_put_handler(
 ) -> impl IntoResponse {
     let path = state.config.read().await.sdr_ui_override_file.clone();
     match sdr_ui::upsert_vehicle_profile(path, &vehicle_id, profile).await {
-        Ok(saved) => Json(json!({
-            "status": "success",
-            "profile": saved,
-        }))
-        .into_response(),
+        Ok(saved) => {
+            let live_push_channels = if let Some(tx) = state.tx.lock().await.clone() {
+                sdr_ui::push_live_margin_updates(tx, &saved).await
+            } else {
+                0
+            };
+            Json(json!({
+                "status": "success",
+                "profile": saved,
+                "live_push_channels": live_push_channels,
+            }))
+            .into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
@@ -2392,5 +2476,157 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mitm::protos::{
+        DisplayType, MediaSinkService, Service, ServiceDiscoveryResponse, VideoCodecResolutionType,
+        VideoConfiguration,
+    };
+
+    async fn test_state() -> Arc<AppState> {
+        let mut cfg = AppConfig::default();
+        cfg.sdr_ui_override_file = std::env::temp_dir().join(format!(
+            "aa-proxy-rs-test-sdr-ui-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        let (ws_event_tx, _rx) = broadcast::channel(16);
+
+        Arc::new(AppState {
+            config: Arc::new(RwLock::new(cfg)),
+            config_json: Arc::new(RwLock::new(ConfigJson::default())),
+            config_file: Arc::new(PathBuf::from("/tmp/aa-proxy-rs-test-config.toml")),
+            tx: Arc::new(Mutex::new(None)),
+            sensor_channel: Arc::new(Mutex::new(None)),
+            input_channel: Arc::new(Mutex::new(None)),
+            last_battery_data: Arc::new(RwLock::new(None)),
+            last_odometer_data: Arc::new(RwLock::new(None)),
+            last_speed: Arc::new(RwLock::new(None)),
+            last_service_discovery_response: Arc::new(RwLock::new(None)),
+            media_tap_endpoints: Arc::new(RwLock::new(Vec::new())),
+            shared_media_channels: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            companion_ip: Arc::new(RwLock::new(None)),
+            last_tire_pressure_data: Arc::new(RwLock::new(None)),
+            ws_event_tx,
+            script_registry: None,
+        })
+    }
+
+    fn sample_sdr_with_main_display() -> ServiceDiscoveryResponse {
+        let mut video_cfg = VideoConfiguration::new();
+        video_cfg.set_codec_resolution(VideoCodecResolutionType::VIDEO_800x480);
+
+        let mut sink = MediaSinkService::new();
+        sink.video_configs.push(video_cfg);
+        sink.set_display_id(0);
+        sink.set_display_type(DisplayType::DISPLAY_TYPE_MAIN);
+
+        let mut svc = Service::new();
+        svc.set_id(3);
+        svc.media_sink_service = Some(sink).into();
+
+        let mut msg = ServiceDiscoveryResponse::new();
+        msg.services.push(svc);
+        msg
+    }
+
+    /// Exercises the exact HTTP surface the new Display Margins web panel
+    /// drives: GET /sdr-ui/current (to discover displays/baseline margins)
+    /// and PUT /sdr-ui/profiles/:vehicle_id (the "Apply & push live" button),
+    /// confirming the JSON shapes the frontend JS assumes actually hold.
+    #[tokio::test]
+    async fn margins_panel_endpoints_round_trip() {
+        let state = test_state().await;
+
+        // Populate the live SDR-UI snapshot the same way a real connection
+        // would, via the real process_service_discovery_response path.
+        let mut sdr = sample_sdr_with_main_display();
+        let cfg_snapshot = state.config.read().await.clone();
+        sdr_ui::process_service_discovery_response(&mut sdr, &cfg_snapshot)
+            .await
+            .expect("process_service_discovery_response");
+
+        let app = app(state.clone());
+        let server =
+            hyper::Server::bind(&"127.0.0.1:0".parse().unwrap()).serve(app.into_make_service());
+        let addr = server.local_addr();
+        tokio::spawn(server);
+        let base = format!("http://{addr}");
+
+        let current_url = format!("{base}/sdr-ui/current");
+        let current: serde_json::Value = tokio::task::spawn_blocking(move || {
+            let body = ureq::get(&current_url)
+                .call()
+                .expect("GET /sdr-ui/current")
+                .into_string()
+                .expect("read body");
+            serde_json::from_str(&body).expect("parse current json")
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(current["displays"].as_array().unwrap().len(), 1);
+        let display = &current["displays"][0];
+        assert_eq!(display["display_type"], "DISPLAY_TYPE_MAIN");
+        assert_eq!(display["service_id"], 3);
+        let video = &display["video_configs"][0];
+        assert_eq!(video["codec_resolution"], "VIDEO_800x480");
+        assert!(video["margins"].is_object());
+
+        let vehicle_id = current["vehicle_id"].as_str().unwrap().to_string();
+
+        // Simulate the "Apply & push live" button: PUT a profile with new
+        // margins for that display/video config, exactly as the panel's JS
+        // constructs it.
+        let profile = json!({
+            "id": vehicle_id,
+            "name": "Test Vehicle",
+            "enabled": true,
+            "info": {},
+            "displays": [{
+                "service_id": 3,
+                "display_id": 0,
+                "display_type": "DISPLAY_TYPE_MAIN",
+                "video_configs": [{
+                    "codec_resolution": "VIDEO_800x480",
+                    "enabled": true,
+                    "margins": {"top": 12, "bottom": 8, "left": 4, "right": 4},
+                }],
+            }],
+            "phones": [],
+        });
+
+        let put_url = format!("{base}/sdr-ui/profiles/{vehicle_id}");
+        let put_resp: serde_json::Value = tokio::task::spawn_blocking(move || {
+            let body = ureq::put(&put_url)
+                .set("content-type", "application/json")
+                .send_string(&profile.to_string())
+                .expect("PUT /sdr-ui/profiles")
+                .into_string()
+                .expect("read body");
+            serde_json::from_str(&body).expect("parse put response")
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(put_resp["status"], "success");
+        // No phone tx is wired up in this test, so nothing was pushed live --
+        // this also confirms the "no active session" branch the web UI
+        // handles (it shows "Saved -- will apply on next reconnect").
+        assert_eq!(put_resp["live_push_channels"], 0);
+
+        let saved_margins = &put_resp["profile"]["displays"][0]["video_configs"][0]["margins"];
+        assert_eq!(saved_margins["top"], 12);
+        assert_eq!(saved_margins["right"], 4);
+
+        let _ = std::fs::remove_file(&cfg_snapshot.sdr_ui_override_file);
     }
 }

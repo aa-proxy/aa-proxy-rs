@@ -1444,3 +1444,244 @@ body.show-advanced .rail-advanced .rail-advanced-label {
     border-color: rgba(239, 68, 68, 0.65);
     box-shadow: 0 18px 45px rgba(0, 0, 0, 0.45), 0 0 28px rgba(239, 68, 68, 0.16);
 }
+
+/* ============================================================
+   DISPLAY MARGINS DRAWER
+   Live-preview margin/inset editor: a scaled box representing the
+   projected display with four overlay bands sized proportionally
+   to the current slider values, plus per-edge range + number inputs.
+   ============================================================ */
+
+#margins-status {
+    margin: 0 0 1rem;
+    font-size: 0.85rem;
+    font-weight: 400;
+    letter-spacing: normal;
+    text-transform: none;
+    color: rgba(255, 255, 255, 0.7);
+}
+
+.margins-field {
+    margin-bottom: 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+
+.margins-field label {
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--accent);
+}
+
+.margins-type-tabs {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.4rem;
+    margin-bottom: 0.75rem;
+}
+
+.margins-type-tab {
+    font-size: 0.7rem;
+    padding: 0.5rem 0.4rem;
+    text-align: center;
+    line-height: 1.2;
+}
+
+.margins-type-tab.active {
+    border-color: var(--accent) !important;
+    background-color: rgba(20, 184, 166, 0.16) !important;
+    color: #fff;
+}
+
+#margins-type-hint {
+    margin: 0 0 1rem;
+    font-size: 0.75rem;
+    font-weight: 400;
+    letter-spacing: normal;
+    text-transform: none;
+    color: rgba(255, 255, 255, 0.5);
+}
+
+.margins-preview-wrap {
+    margin-bottom: 1.5rem;
+}
+
+.margins-preview {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    background: repeating-linear-gradient(
+        45deg,
+        rgba(255, 255, 255, 0.03),
+        rgba(255, 255, 255, 0.03) 6px,
+        transparent 6px,
+        transparent 12px
+    );
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+}
+
+.margins-preview-frame {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    background: #000;
+    /* Hidden until a frame actually loads; falls back to the diagonal-stripe
+       placeholder background + "Projected UI" label otherwise. */
+    display: none;
+}
+
+.margins-preview-frame.loaded {
+    display: block;
+}
+
+/* Hide the placeholder label once a real frame is showing -- the bands and
+   safe-area outline stay visible either way. */
+.margins-preview-frame.loaded ~ .margins-preview-safe #margins-preview-placeholder-label {
+    display: none;
+}
+
+.margins-preview-band {
+    position: absolute;
+    background: rgba(239, 68, 68, 0.32);
+    transition: width 80ms linear, height 80ms linear;
+}
+
+.margins-preview-top {
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 0%;
+    border-bottom: 1px dashed rgba(239, 68, 68, 0.6);
+}
+
+.margins-preview-bottom {
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 0%;
+    border-top: 1px dashed rgba(239, 68, 68, 0.6);
+}
+
+.margins-preview-left {
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 0%;
+    border-right: 1px dashed rgba(239, 68, 68, 0.6);
+}
+
+.margins-preview-right {
+    top: 0;
+    bottom: 0;
+    right: 0;
+    width: 0%;
+    border-left: 1px dashed rgba(239, 68, 68, 0.6);
+}
+
+.margins-preview-safe {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.margins-preview-safe span {
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: rgba(255, 255, 255, 0.45);
+}
+
+.margins-preview-age {
+    position: absolute;
+    top: 0.5rem;
+    right: 0.5rem;
+    padding: 0.2rem 0.5rem;
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: normal;
+    text-transform: none;
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.55);
+    color: #fff;
+}
+
+.margins-preview-age.stale {
+    background: rgba(239, 68, 68, 0.75);
+}
+
+#margins-preview-caption {
+    margin: 0.6rem 0 0;
+    font-size: 0.75rem;
+    font-weight: 400;
+    letter-spacing: normal;
+    text-transform: none;
+    color: rgba(255, 255, 255, 0.55);
+    text-align: center;
+}
+
+.margins-preview-refresh {
+    display: block;
+    margin: 0.6rem auto 0;
+    font-size: 0.75rem;
+    padding: 0.4rem 0.75rem;
+}
+
+.margins-sliders {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    margin-bottom: 1.25rem;
+}
+
+.margins-slider-row {
+    display: grid;
+    grid-template-columns: 4.2rem 1fr 4.2rem;
+    align-items: center;
+    gap: 0.6rem;
+}
+
+.margins-slider-row label {
+    font-size: 0.8rem;
+    color: rgba(255, 255, 255, 0.7);
+}
+
+.margins-slider-row input[type="range"] {
+    width: 100%;
+    accent-color: var(--accent);
+}
+
+.margins-slider-row input[type="number"] {
+    width: 100%;
+    margin: 0;
+}
+
+.margins-actions {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 0.6rem;
+    margin-bottom: 1rem;
+}
+
+.margins-apply {
+    border-color: var(--accent) !important;
+    background-color: rgba(20, 184, 166, 0.12) !important;
+}
+
+#margins-hint {
+    margin: 0;
+    font-size: 0.75rem;
+    color: rgba(255, 255, 255, 0.45);
+    text-transform: none;
+    letter-spacing: normal;
+    font-weight: 400;
+}

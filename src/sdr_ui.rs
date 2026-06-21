@@ -1,7 +1,9 @@
 use crate::config::AppConfig;
 use crate::mitm::protos::{
-    DisplayType, Insets, ServiceDiscoveryResponse, UiConfig, VideoConfiguration,
+    AdditionalVideoConfig, DisplayType, Insets, ServiceDiscoveryResponse, UiConfig,
+    VideoConfiguration, VideoInsets, VideoMarginConfig,
 };
+use crate::mitm::Packet;
 use anyhow::{anyhow, Context, Result};
 use chrono::Local;
 use serde::{Deserialize, Serialize};
@@ -10,6 +12,7 @@ use simplelog::*;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use tokio::sync::mpsc::Sender;
 
 const NAME: &str = "<i><bright-black> sdr-ui: </>";
 const HASH_LEN: usize = 12;
@@ -805,6 +808,186 @@ fn keep_insets_inside_resolution(
     }
 }
 
+/// Pushes a freshly saved vehicle profile's margin overrides to a currently
+/// connected phone, if any, so margin/inset changes take effect immediately
+/// instead of requiring a reconnect. Returns the number of video channels
+/// updated.
+pub async fn push_live_margin_updates(
+    tx: Sender<Packet>,
+    vehicle_profile: &SdrUiVehicleProfile,
+) -> usize {
+    let phone = current_phone();
+    let updates = resolve_live_margin_updates(vehicle_profile, phone.as_ref());
+    let mut pushed = 0usize;
+    for (channel, config) in updates {
+        match crate::mitm::send_ui_config_update(tx.clone(), channel, config).await {
+            Ok(()) => pushed += 1,
+            Err(e) => warn!(
+                "{} failed to push live UI config update on channel {:#04x}: {:#}",
+                NAME, channel, e
+            ),
+        }
+    }
+    if pushed > 0 {
+        info!(
+            "{} pushed live margin update(s) to {} video channel(s) for vehicle=<b>{}</>",
+            NAME, pushed, vehicle_profile.id
+        );
+    }
+    pushed
+}
+
+/// Computes the runtime margin push payloads needed to apply a freshly saved
+/// profile to a phone already connected, without requiring a reconnect.
+/// Only displays/video configs whose profile sets `margins` are included --
+/// content_insets/stable_content_insets have no equivalent in the verified
+/// runtime wire schema (AdditionalVideoConfig only carries margin_configs).
+fn resolve_live_margin_updates(
+    vehicle_profile: &SdrUiVehicleProfile,
+    phone: Option<&PhoneIdentity>,
+) -> Vec<(u8, AdditionalVideoConfig)> {
+    let Some(current) = current_sdr_ui() else {
+        return Vec::new();
+    };
+    if current.vehicle_id != vehicle_profile.id || !vehicle_profile.enabled {
+        return Vec::new();
+    }
+
+    let phone_profile = phone.and_then(|p| {
+        vehicle_profile
+            .phones
+            .iter()
+            .find(|ph| ph.id == p.id && ph.enabled)
+    });
+
+    let mut updates = Vec::new();
+
+    for live_display in &current.displays {
+        let Some(service_id) = live_display.service_id else {
+            continue;
+        };
+        let Ok(channel) = u8::try_from(service_id) else {
+            continue;
+        };
+
+        let vehicle_display = vehicle_profile.displays.iter().find(|d| {
+            display_matches(
+                d,
+                live_display.service_id,
+                live_display.display_id,
+                &live_display.display_type,
+            )
+        });
+        let phone_display = phone_profile.and_then(|pp| {
+            pp.displays.iter().find(|d| {
+                display_matches(
+                    d,
+                    live_display.service_id,
+                    live_display.display_id,
+                    &live_display.display_type,
+                )
+            })
+        });
+
+        for live_video in &live_display.video_configs {
+            let vehicle_video = vehicle_display.and_then(|d| {
+                d.video_configs
+                    .iter()
+                    .find(|v| v.enabled && v.codec_resolution == live_video.codec_resolution)
+            });
+            let phone_video = phone_display.and_then(|d| {
+                d.video_configs
+                    .iter()
+                    .find(|v| v.enabled && v.codec_resolution == live_video.codec_resolution)
+            });
+
+            let vehicle_margins = vehicle_video.and_then(|v| v.margins.as_ref());
+            let phone_margins = phone_video.and_then(|v| v.margins.as_ref());
+            if vehicle_margins.is_none() && phone_margins.is_none() {
+                continue;
+            }
+
+            let baseline = live_video.margins.clone().unwrap_or_default();
+            let pick = |get: fn(&SdrUiInsets) -> Option<u32>, base: Option<u32>| -> u32 {
+                phone_margins
+                    .and_then(get)
+                    .or_else(|| vehicle_margins.and_then(get))
+                    .or(base)
+                    .unwrap_or(0)
+            };
+
+            let label = format!("{}/{}", vehicle_profile.id, live_display.display_type);
+            let left = clamp_edge(pick(|i| i.left, baseline.left), &label, "left");
+            let top = clamp_edge(pick(|i| i.top, baseline.top), &label, "top");
+            let right = clamp_edge(pick(|i| i.right, baseline.right), &label, "right");
+            let bottom = clamp_edge(pick(|i| i.bottom, baseline.bottom), &label, "bottom");
+            let (left, top, right, bottom) = clamp_margins_to_resolution(
+                left,
+                top,
+                right,
+                bottom,
+                &live_video.codec_resolution,
+                &label,
+            );
+
+            let mut insets = VideoInsets::new();
+            insets.set_left(left);
+            insets.set_top(top);
+            insets.set_right(right);
+            insets.set_bottom(bottom);
+
+            let mut margin_config = VideoMarginConfig::new();
+            margin_config.insets = Some(insets).into();
+
+            let mut config = AdditionalVideoConfig::new();
+            config.margin_configs.push(margin_config);
+
+            updates.push((channel, config));
+        }
+    }
+
+    updates
+}
+
+fn clamp_margins_to_resolution(
+    left: u32,
+    top: u32,
+    right: u32,
+    bottom: u32,
+    codec_resolution: &str,
+    label: &str,
+) -> (u32, u32, u32, u32) {
+    let Some((width, height)) = resolution_size(codec_resolution) else {
+        return (left, top, right, bottom);
+    };
+
+    let mut right = right;
+    if left.saturating_add(right) >= width {
+        let allowed_right = width
+            .saturating_sub(1)
+            .saturating_sub(left.min(width.saturating_sub(1)));
+        warn!(
+            "{} {} left+right exceeds width {}; reducing right to {}",
+            NAME, label, width, allowed_right
+        );
+        right = allowed_right;
+    }
+
+    let mut bottom = bottom;
+    if top.saturating_add(bottom) >= height {
+        let allowed_bottom = height
+            .saturating_sub(1)
+            .saturating_sub(top.min(height.saturating_sub(1)));
+        warn!(
+            "{} {} top+bottom exceeds height {}; reducing bottom to {}",
+            NAME, label, height, allowed_bottom
+        );
+        bottom = allowed_bottom;
+    }
+
+    (left, top, right, bottom)
+}
+
 fn display_matches(
     profile: &SdrUiDisplayProfile,
     service_id: Option<i32>,
@@ -989,5 +1172,107 @@ fn remove_file_if_empty(path: &Path) {
         if metadata.len() == 0 {
             let _ = fs::remove_file(path);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_video(resolution: &str, margins: Option<SdrUiInsets>) -> SdrUiVideoConfigProfile {
+        SdrUiVideoConfigProfile {
+            codec_resolution: resolution.to_string(),
+            enabled: true,
+            margins,
+            ..Default::default()
+        }
+    }
+
+    fn sample_display(margins: Option<SdrUiInsets>) -> SdrUiDisplayProfile {
+        SdrUiDisplayProfile {
+            service_id: Some(3),
+            display_id: 0,
+            display_type: "DISPLAY_TYPE_MAIN".to_string(),
+            video_configs: vec![sample_video("VIDEO_800x480", margins)],
+        }
+    }
+
+    #[test]
+    fn live_margin_update_layers_phone_over_vehicle_and_clamps_to_resolution() {
+        let baseline_display = sample_display(Some(SdrUiInsets {
+            top: Some(0),
+            bottom: Some(0),
+            left: Some(0),
+            right: Some(0),
+        }));
+        let current = SdrUiCurrent {
+            vehicle_id: "veh_test".to_string(),
+            displays: vec![baseline_display],
+            ..Default::default()
+        };
+        *CURRENT_SDR_UI.lock().unwrap() = Some(current);
+
+        let mut vehicle_display = sample_display(Some(SdrUiInsets {
+            top: Some(10),
+            bottom: Some(10),
+            left: Some(10),
+            right: Some(790), // intentionally exceeds width; should get clamped
+        }));
+        vehicle_display.video_configs[0].enabled = true;
+
+        let phone_display = sample_display(Some(SdrUiInsets {
+            top: Some(20),
+            bottom: None,
+            left: None,
+            right: None,
+        }));
+
+        let vehicle_profile = SdrUiVehicleProfile {
+            id: "veh_test".to_string(),
+            enabled: true,
+            displays: vec![vehicle_display],
+            phones: vec![SdrUiPhoneProfile {
+                id: "phone_test".to_string(),
+                enabled: true,
+                displays: vec![phone_display],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let phone = PhoneIdentity {
+            id: "phone_test".to_string(),
+            ..Default::default()
+        };
+
+        let updates = resolve_live_margin_updates(&vehicle_profile, Some(&phone));
+        assert_eq!(updates.len(), 1);
+        let (channel, config) = &updates[0];
+        assert_eq!(*channel, 3);
+
+        let insets = config.margin_configs[0].insets.as_ref().unwrap();
+        assert_eq!(insets.top(), 20); // phone overrides vehicle
+        assert_eq!(insets.bottom(), 10); // falls back to vehicle (phone leaves it unset)
+        assert_eq!(insets.left(), 10); // vehicle value
+        assert_eq!(insets.right(), 789); // clamped: width 800, left 10 -> max right 789
+
+        *CURRENT_SDR_UI.lock().unwrap() = None;
+    }
+
+    #[test]
+    fn no_live_update_when_no_session_matches_vehicle() {
+        *CURRENT_SDR_UI.lock().unwrap() = None;
+        let vehicle_profile = SdrUiVehicleProfile {
+            id: "veh_other".to_string(),
+            enabled: true,
+            displays: vec![sample_display(Some(SdrUiInsets {
+                top: Some(5),
+                bottom: Some(5),
+                left: Some(5),
+                right: Some(5),
+            }))],
+            ..Default::default()
+        };
+        assert!(resolve_live_margin_updates(&vehicle_profile, None).is_empty());
     }
 }

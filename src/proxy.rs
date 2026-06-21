@@ -664,6 +664,7 @@ pub async fn io_loop(
     usb_connected: Arc<AtomicBool>,
     script_registry: Option<Arc<ScriptRegistry>>,
     ws_event_tx: BroadcastSender<ServerEvent>,
+    shared_media_channels: SharedMediaChannels,
 ) -> Result<()> {
     let shared_config = config.clone();
     #[allow(unused_variables)]
@@ -704,7 +705,9 @@ pub async fn io_loop(
         startup_aux_tap_slots,
     )
     .await;
-    let persistent_media_channels: SharedMediaChannels = Arc::new(Mutex::new(HashMap::new()));
+    // Shared with AppState (see web::AppState::shared_media_channels) so the web UI
+    // can pull a still frame from a channel's cached IDR for the margins preview.
+    let persistent_media_channels: SharedMediaChannels = shared_media_channels;
 
     loop {
         // reload new config

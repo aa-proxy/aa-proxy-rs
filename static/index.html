@@ -25,6 +25,14 @@
       </button>
       <button
         type="button"
+        class="rail-btn drawer-toggle"
+        id="margins-drawer-toggle"
+        data-label="Display Margins"
+      >
+        📐
+      </button>
+      <button
+        type="button"
         class="rail-btn download-btn"
         data-label="Download Log Package (.tar.gz)"
       >
@@ -243,6 +251,108 @@
             </button>
           </div>
         </div>
+      </div>
+    </aside>
+
+    <aside class="controller-drawer" id="margins-drawer" aria-hidden="true">
+      <div class="controller-drawer-header">
+        <div class="controller-drawer-title">
+          <span>📐</span><span>Display Margins</span>
+        </div>
+        <button
+          type="button"
+          class="controller-drawer-close"
+          id="margins-drawer-close"
+          aria-label="Close display margins panel"
+        >
+          ×
+        </button>
+      </div>
+      <div class="controller-drawer-body">
+        <p class="margins-status" id="margins-status">Loading current display…</p>
+
+        <div class="margins-field" id="margins-display-field" hidden>
+          <label for="margins-display-select">Display</label>
+          <select id="margins-display-select"></select>
+        </div>
+
+        <div class="margins-type-tabs" id="margins-type-tabs" hidden>
+          <button type="button" class="margins-type-tab" data-inset-type="margins">
+            Margins
+          </button>
+          <button type="button" class="margins-type-tab" data-inset-type="content_insets">
+            Content insets
+          </button>
+          <button type="button" class="margins-type-tab" data-inset-type="stable_content_insets">
+            Stable content insets
+          </button>
+        </div>
+        <p class="margins-type-hint" id="margins-type-hint" hidden></p>
+
+        <div class="margins-preview-wrap" id="margins-preview-wrap" hidden>
+          <div class="margins-preview" id="margins-preview">
+            <img
+              class="margins-preview-frame"
+              id="margins-preview-frame"
+              alt="Last captured frame on this channel"
+            />
+            <div class="margins-preview-band margins-preview-top" id="margins-preview-top"></div>
+            <div class="margins-preview-band margins-preview-bottom" id="margins-preview-bottom"></div>
+            <div class="margins-preview-band margins-preview-left" id="margins-preview-left"></div>
+            <div class="margins-preview-band margins-preview-right" id="margins-preview-right"></div>
+            <div class="margins-preview-safe" id="margins-preview-safe">
+              <span id="margins-preview-placeholder-label">Projected UI</span>
+            </div>
+            <span
+              class="margins-preview-age"
+              id="margins-preview-age"
+              hidden
+            ></span>
+          </div>
+          <p class="margins-preview-caption" id="margins-preview-caption"></p>
+          <button type="button" id="margins-preview-refresh-btn" class="margins-preview-refresh">
+            🔄 Refresh frame
+          </button>
+        </div>
+
+        <div class="margins-sliders" id="margins-sliders" hidden>
+          <div class="margins-slider-row">
+            <label for="margin-top">Top</label>
+            <input type="range" id="margin-top" min="0" max="0" value="0" />
+            <input type="number" id="margin-top-num" min="0" max="0" value="0" />
+          </div>
+          <div class="margins-slider-row">
+            <label for="margin-bottom">Bottom</label>
+            <input type="range" id="margin-bottom" min="0" max="0" value="0" />
+            <input type="number" id="margin-bottom-num" min="0" max="0" value="0" />
+          </div>
+          <div class="margins-slider-row">
+            <label for="margin-left">Left</label>
+            <input type="range" id="margin-left" min="0" max="0" value="0" />
+            <input type="number" id="margin-left-num" min="0" max="0" value="0" />
+          </div>
+          <div class="margins-slider-row">
+            <label for="margin-right">Right</label>
+            <input type="range" id="margin-right" min="0" max="0" value="0" />
+            <input type="number" id="margin-right-num" min="0" max="0" value="0" />
+          </div>
+        </div>
+
+        <div class="margins-actions" id="margins-actions" hidden>
+          <button type="button" id="margins-reset-btn">↺ Reset</button>
+          <button type="button" id="margins-apply-btn" class="margins-apply">
+            ✅ Save
+          </button>
+        </div>
+
+        <p class="margins-hint" id="margins-hint" hidden>
+          Saves margins, content insets, and stable content insets for this
+          display. Android Auto only reads these from the initial connection
+          handshake on most phones we've tested -- changes reliably take
+          effect on the <em>next</em> phone connection, not immediately.
+          (For margins only, a best-effort live update is also attempted,
+          but isn't guaranteed to have a visible effect.)
+        </p>
       </div>
     </aside>
 
@@ -473,29 +583,45 @@
 
         setupMobileLongPressLabels();
 
-        // Controller-panel drawer: toggle via rail button, close via X
-        // button, scrim click, or Esc.
-        const drawer = document.getElementById("controller-drawer");
-        const drawerToggle = document.getElementById(
-          "controller-drawer-toggle",
-        );
-        const drawerClose = document.getElementById("controller-drawer-close");
+        // Side drawers (Controller Panel, Display Margins): toggled via rail
+        // buttons, closed via X / scrim click / Esc. Share one scrim and are
+        // mutually exclusive -- opening one closes the other.
         const drawerScrim = document.getElementById("drawer-scrim");
-        const setDrawerOpen = (open) => {
-          drawer.classList.toggle("open", open);
-          drawerScrim.classList.toggle("open", open);
-          drawerToggle.classList.toggle("open", open);
-          drawer.setAttribute("aria-hidden", open ? "false" : "true");
+        const drawers = [
+          {
+            aside: document.getElementById("controller-drawer"),
+            toggle: document.getElementById("controller-drawer-toggle"),
+            close: document.getElementById("controller-drawer-close"),
+          },
+          {
+            aside: document.getElementById("margins-drawer"),
+            toggle: document.getElementById("margins-drawer-toggle"),
+            close: document.getElementById("margins-drawer-close"),
+            onOpen: () => initMarginsPanel(),
+          },
+        ];
+        const setActiveDrawer = (target) => {
+          let anyOpen = false;
+          drawers.forEach((d) => {
+            const open = d.aside === target;
+            d.aside.classList.toggle("open", open);
+            d.toggle.classList.toggle("open", open);
+            d.aside.setAttribute("aria-hidden", open ? "false" : "true");
+            anyOpen = anyOpen || open;
+          });
+          drawerScrim.classList.toggle("open", anyOpen);
+          if (target && target._onOpen) target._onOpen();
         };
-        drawerToggle.addEventListener("click", () => {
-          setDrawerOpen(!drawer.classList.contains("open"));
+        drawers.forEach((d) => {
+          d.aside._onOpen = d.onOpen;
+          d.toggle.addEventListener("click", () => {
+            setActiveDrawer(d.aside.classList.contains("open") ? null : d.aside);
+          });
+          d.close.addEventListener("click", () => setActiveDrawer(null));
         });
-        drawerClose.addEventListener("click", () => setDrawerOpen(false));
-        drawerScrim.addEventListener("click", () => setDrawerOpen(false));
+        drawerScrim.addEventListener("click", () => setActiveDrawer(null));
         document.addEventListener("keydown", (e) => {
-          if (e.key === "Escape" && drawer.classList.contains("open")) {
-            setDrawerOpen(false);
-          }
+          if (e.key === "Escape") setActiveDrawer(null);
         });
 
         loadConfig();
@@ -1124,6 +1250,477 @@
             snackbar.hidden = true;
           }, 220);
         }, 2600);
+      }
+
+      // ============================================================
+      // DISPLAY MARGINS PANEL
+      // Live-preview editor for the SDR UI margin/inset overrides
+      // (see /sdr-ui/current, /sdr-ui/profiles). Saves margins, content
+      // insets, and stable content insets for a display/resolution.
+      //
+      // Note: on real phones we've tested, Android Auto only reads these
+      // from the initial connection handshake -- a best-effort live push
+      // (UpdateUiConfigRequest / wire 0x800A) is attempted for margins
+      // only, since that's the only one of the three with a runtime wire
+      // equivalent, but it is NOT guaranteed to have a visible effect.
+      // Changes reliably apply on the next phone connection.
+      // ============================================================
+
+      const MARGINS_INSET_TYPES = ["margins", "content_insets", "stable_content_insets"];
+
+      const marginsState = {
+        loaded: false,
+        vehicleId: null,
+        vehicleName: null,
+        displays: [],
+        profile: null,
+        selectedDisplayIdx: 0,
+        selectedVideoIdx: 0,
+        currentSize: null,
+        activeType: "margins",
+        values: {
+          margins: { top: 0, bottom: 0, left: 0, right: 0 },
+          content_insets: { top: 0, bottom: 0, left: 0, right: 0 },
+          stable_content_insets: { top: 0, bottom: 0, left: 0, right: 0 },
+        },
+      };
+      let marginsControlsWired = false;
+
+      async function initMarginsPanel() {
+        if (marginsState.loaded) return;
+        await reloadMarginsPanel();
+      }
+
+      async function reloadMarginsPanel() {
+        const statusEl = document.getElementById("margins-status");
+        const fieldEl = document.getElementById("margins-display-field");
+        const tabsEl = document.getElementById("margins-type-tabs");
+        const typeHintEl = document.getElementById("margins-type-hint");
+        const previewWrap = document.getElementById("margins-preview-wrap");
+        const slidersEl = document.getElementById("margins-sliders");
+        const actionsEl = document.getElementById("margins-actions");
+        const hintEl = document.getElementById("margins-hint");
+
+        statusEl.textContent = "Loading current display…";
+        [fieldEl, tabsEl, typeHintEl, previewWrap, slidersEl, actionsEl, hintEl].forEach(
+          (el) => (el.hidden = true),
+        );
+
+        let current;
+        try {
+          const res = await fetch("/sdr-ui/current");
+          if (!res.ok) {
+            statusEl.textContent =
+              "No Android Auto session detected yet. Connect a phone, then reopen this panel.";
+            return;
+          }
+          current = await res.json();
+        } catch (e) {
+          statusEl.textContent =
+            "Failed to load current display info: " + e.message;
+          return;
+        }
+
+        if (!current.displays || current.displays.length === 0) {
+          statusEl.textContent =
+            "Connected, but no video displays were reported yet.";
+          return;
+        }
+
+        marginsState.vehicleId = current.vehicle_id;
+        marginsState.vehicleName = current.vehicle_name;
+        marginsState.displays = current.displays;
+        marginsState.profile = await fetchOrCreateMarginsProfile(current);
+        marginsState.loaded = true;
+
+        const select = document.getElementById("margins-display-select");
+        select.innerHTML = "";
+        current.displays.forEach((display, dIdx) => {
+          display.video_configs.forEach((video, vIdx) => {
+            const opt = document.createElement("option");
+            opt.value = `${dIdx}:${vIdx}`;
+            opt.textContent = `${formatDisplayType(display.display_type)} — ${formatResolution(video.codec_resolution)}`;
+            select.appendChild(opt);
+          });
+        });
+        select.onchange = () => {
+          const [dIdx, vIdx] = select.value.split(":").map(Number);
+          marginsState.selectedDisplayIdx = dIdx;
+          marginsState.selectedVideoIdx = vIdx;
+          populateMarginsSlidersFromState();
+          loadPreviewFrame();
+        };
+        marginsState.selectedDisplayIdx = 0;
+        marginsState.selectedVideoIdx = 0;
+        select.value = "0:0";
+
+        statusEl.textContent = `Connected: ${current.vehicle_name || current.vehicle_id}`;
+        fieldEl.hidden = false;
+        tabsEl.hidden = false;
+        typeHintEl.hidden = false;
+        previewWrap.hidden = false;
+        slidersEl.hidden = false;
+        actionsEl.hidden = false;
+        hintEl.hidden = false;
+
+        marginsState.activeType = "margins";
+        setActiveInsetTypeTab("margins");
+        populateMarginsSlidersFromState();
+        wireMarginsControlsOnce();
+        loadPreviewFrame();
+      }
+
+      // Fetches a still-frame PNG of the selected display's last cached IDR
+      // (see GET /sdr-ui/preview/:channel) and shows it behind the margin
+      // bands. Falls back to the diagonal-stripe placeholder if no frame is
+      // available yet (e.g. media_dump_base_port isn't configured, or no
+      // IDR has been seen on this channel yet).
+      // Uses fetch() rather than a plain <img src=...> so we can read the
+      // X-Frame-Age-Secs response header -- the frame is decoded from a
+      // short burst starting at the channel's last IDR, which can be stale
+      // if the phone hasn't emitted a fresh keyframe recently, so the UI
+      // shows that age rather than presenting it as a live view.
+      //
+      // No cache-busting query param here, deliberately: the server sends
+      // an ETag identifying the current burst's content (Cache-Control:
+      // no-cache), so repeat fetches of the *same* URL let the browser send
+      // a conditional request and get a fast 304 instead of paying the
+      // multi-second decode again when the burst hasn't changed. A cache
+      // buster would defeat that by making every request a "new" URL.
+      async function loadPreviewFrame() {
+        const img = document.getElementById("margins-preview-frame");
+        const ageEl = document.getElementById("margins-preview-age");
+        const liveDisplay = marginsState.displays[marginsState.selectedDisplayIdx];
+        if (!liveDisplay || liveDisplay.service_id == null) {
+          img.classList.remove("loaded");
+          ageEl.hidden = true;
+          return;
+        }
+
+        try {
+          const res = await fetch(`/sdr-ui/preview/${liveDisplay.service_id}`);
+          if (!res.ok) {
+            img.classList.remove("loaded");
+            ageEl.hidden = true;
+            return;
+          }
+          const ageSecs = Number(res.headers.get("x-frame-age-secs") || "0");
+          const blob = await res.blob();
+          const url = URL.createObjectURL(blob);
+          const previous = img.dataset.objectUrl;
+          img.onload = () => {
+            img.classList.add("loaded");
+            if (previous) URL.revokeObjectURL(previous);
+          };
+          img.dataset.objectUrl = url;
+          img.src = url;
+
+          ageEl.hidden = false;
+          ageEl.textContent = ageSecs < 1 ? "just now" : `${ageSecs}s old`;
+          ageEl.classList.toggle("stale", ageSecs >= 10);
+        } catch (e) {
+          img.classList.remove("loaded");
+          ageEl.hidden = true;
+        }
+      }
+
+      const MARGINS_TYPE_LABELS = {
+        margins: "Margins",
+        content_insets: "Content insets",
+        stable_content_insets: "Stable content insets",
+      };
+      const MARGINS_TYPE_HINTS = {
+        margins:
+          "Outer padding around the projected UI -- also drives video letterboxing.",
+        content_insets:
+          "Safe area for interactive content (buttons, touch targets).",
+        stable_content_insets:
+          "Safe area that stays constant even when transient UI (e.g. the nav bar) is hidden.",
+      };
+
+      function setActiveInsetTypeTab(type) {
+        document.querySelectorAll(".margins-type-tab").forEach((btn) => {
+          btn.classList.toggle("active", btn.dataset.insetType === type);
+        });
+        document.getElementById("margins-type-hint").textContent =
+          MARGINS_TYPE_HINTS[type] || "";
+      }
+
+      async function fetchOrCreateMarginsProfile(current) {
+        try {
+          const res = await fetch(
+            `/sdr-ui/profiles/${encodeURIComponent(current.vehicle_id)}`,
+          );
+          if (res.ok) return await res.json();
+        } catch (_) {}
+        return {
+          id: current.vehicle_id,
+          name: current.vehicle_name || current.vehicle_id,
+          enabled: true,
+          info: current.vehicle_info || {},
+          displays: [],
+          phones: [],
+        };
+      }
+
+      function formatDisplayType(t) {
+        return (t || "").replace("DISPLAY_TYPE_", "");
+      }
+
+      function formatResolution(codecResolution) {
+        return (codecResolution || "").replace("VIDEO_", "");
+      }
+
+      function parseResolutionSize(codecResolution) {
+        const m = /VIDEO_(\d+)x(\d+)/i.exec(codecResolution || "");
+        if (!m) return null;
+        return { width: parseInt(m[1], 10), height: parseInt(m[2], 10) };
+      }
+
+      // Finds the saved vehicle-profile display/video entry matching a live
+      // snapshot entry, if one exists. Per-phone overrides are layered on
+      // top server-side and are not edited from this panel.
+      function findProfileVideo(profile, liveDisplay, liveVideo) {
+        const display = (profile.displays || []).find(
+          (d) =>
+            d.display_id === liveDisplay.display_id &&
+            d.display_type === liveDisplay.display_type,
+        );
+        if (!display) return null;
+        return (
+          (display.video_configs || []).find(
+            (v) => v.codec_resolution === liveVideo.codec_resolution,
+          ) || null
+        );
+      }
+
+      function resolveInsetValue(saved, baseline, edge) {
+        if (saved && saved[edge] != null) return saved[edge];
+        return (baseline && baseline[edge]) || 0;
+      }
+
+      // Loads margins, content_insets, and stable_content_insets for the
+      // currently selected display/resolution into marginsState.values
+      // (saved profile value if set, else the live baseline from
+      // /sdr-ui/current), then shows whichever type tab is active.
+      function populateMarginsSlidersFromState() {
+        const liveDisplay = marginsState.displays[marginsState.selectedDisplayIdx];
+        const liveVideo = liveDisplay.video_configs[marginsState.selectedVideoIdx];
+        const size =
+          parseResolutionSize(liveVideo.codec_resolution) || {
+            width: 1920,
+            height: 1080,
+          };
+
+        const profileVideo = findProfileVideo(
+          marginsState.profile,
+          liveDisplay,
+          liveVideo,
+        );
+
+        MARGINS_INSET_TYPES.forEach((type) => {
+          const saved = profileVideo && profileVideo[type];
+          const baseline = liveVideo[type] || {};
+          marginsState.values[type] = {
+            top: resolveInsetValue(saved, baseline, "top"),
+            bottom: resolveInsetValue(saved, baseline, "bottom"),
+            left: resolveInsetValue(saved, baseline, "left"),
+            right: resolveInsetValue(saved, baseline, "right"),
+          };
+        });
+
+        marginsState.currentSize = size;
+        loadActiveTypeIntoSliders();
+      }
+
+      function sliderMax(edge, size) {
+        return edge === "left" || edge === "right"
+          ? Math.max(0, Math.floor(size.width / 2) - 1)
+          : Math.max(0, Math.floor(size.height / 2) - 1);
+      }
+
+      // Pushes marginsState.values[activeType] into the DOM sliders.
+      function loadActiveTypeIntoSliders() {
+        const size = marginsState.currentSize || { width: 1920, height: 1080 };
+        const values = marginsState.values[marginsState.activeType];
+        ["top", "bottom", "left", "right"].forEach((edge) => {
+          setMarginSlider(edge, values[edge], sliderMax(edge, size));
+        });
+        renderMarginsPreview();
+      }
+
+      function setMarginSlider(edge, value, max) {
+        const range = document.getElementById(`margin-${edge}`);
+        const num = document.getElementById(`margin-${edge}-num`);
+        range.max = max;
+        num.max = max;
+        range.value = value;
+        num.value = value;
+      }
+
+      // Reads the DOM sliders (the active type's live edits) back into
+      // marginsState.values, and returns that type's values.
+      function syncActiveTypeFromSliders() {
+        const values = {
+          top: Number(document.getElementById("margin-top").value) || 0,
+          bottom: Number(document.getElementById("margin-bottom").value) || 0,
+          left: Number(document.getElementById("margin-left").value) || 0,
+          right: Number(document.getElementById("margin-right").value) || 0,
+        };
+        marginsState.values[marginsState.activeType] = values;
+        return values;
+      }
+
+      function renderMarginsPreview() {
+        const size = marginsState.currentSize || { width: 1920, height: 1080 };
+        const values = marginsState.values[marginsState.activeType];
+
+        const topPct = Math.min(100, (values.top / size.height) * 100);
+        const bottomPct = Math.min(100, (values.bottom / size.height) * 100);
+        const leftPct = Math.min(100, (values.left / size.width) * 100);
+        const rightPct = Math.min(100, (values.right / size.width) * 100);
+
+        document.getElementById("margins-preview-top").style.height =
+          `${topPct}%`;
+        document.getElementById("margins-preview-bottom").style.height =
+          `${bottomPct}%`;
+        document.getElementById("margins-preview-left").style.width =
+          `${leftPct}%`;
+        document.getElementById("margins-preview-right").style.width =
+          `${rightPct}%`;
+
+        document.getElementById("margins-preview").style.aspectRatio =
+          `${size.width} / ${size.height}`;
+
+        const typeLabel = MARGINS_TYPE_LABELS[marginsState.activeType] || "";
+        document.getElementById("margins-preview-caption").textContent =
+          `${typeLabel} — ${size.width}×${size.height} — top ${values.top}px, bottom ${values.bottom}px, left ${values.left}px, right ${values.right}px`;
+      }
+
+      function wireMarginsControlsOnce() {
+        if (marginsControlsWired) return;
+        marginsControlsWired = true;
+
+        ["top", "bottom", "left", "right"].forEach((edge) => {
+          const range = document.getElementById(`margin-${edge}`);
+          const num = document.getElementById(`margin-${edge}-num`);
+          range.addEventListener("input", () => {
+            num.value = range.value;
+            syncActiveTypeFromSliders();
+            renderMarginsPreview();
+          });
+          num.addEventListener("input", () => {
+            const max = Number(range.max) || 0;
+            let v = Number(num.value) || 0;
+            if (v > max) v = max;
+            if (v < 0) v = 0;
+            range.value = v;
+            syncActiveTypeFromSliders();
+            renderMarginsPreview();
+          });
+        });
+
+        document.querySelectorAll(".margins-type-tab").forEach((btn) => {
+          btn.addEventListener("click", () => {
+            syncActiveTypeFromSliders();
+            marginsState.activeType = btn.dataset.insetType;
+            setActiveInsetTypeTab(marginsState.activeType);
+            loadActiveTypeIntoSliders();
+          });
+        });
+
+        document
+          .getElementById("margins-reset-btn")
+          .addEventListener("click", () => populateMarginsSlidersFromState());
+
+        document
+          .getElementById("margins-preview-refresh-btn")
+          .addEventListener("click", () => loadPreviewFrame());
+
+        document
+          .getElementById("margins-apply-btn")
+          .addEventListener("click", applyMarginsLive);
+      }
+
+      async function applyMarginsLive() {
+        const applyBtn = document.getElementById("margins-apply-btn");
+        const liveDisplay =
+          marginsState.displays[marginsState.selectedDisplayIdx];
+        const liveVideo = liveDisplay.video_configs[marginsState.selectedVideoIdx];
+        syncActiveTypeFromSliders();
+        const values = marginsState.values;
+
+        applyBtn.disabled = true;
+        applyBtn.textContent = "⏳ Saving…";
+        try {
+          // Refetch right before saving to minimize clobbering edits made
+          // concurrently elsewhere (e.g. another browser tab).
+          const profile = await fetchOrCreateMarginsProfile({
+            vehicle_id: marginsState.vehicleId,
+            vehicle_name: marginsState.vehicleName,
+            vehicle_info: marginsState.profile.info,
+          });
+          profile.id = marginsState.vehicleId;
+          profile.enabled = true;
+          profile.displays = profile.displays || [];
+
+          let display = profile.displays.find(
+            (d) =>
+              d.display_id === liveDisplay.display_id &&
+              d.display_type === liveDisplay.display_type,
+          );
+          if (!display) {
+            display = {
+              service_id: liveDisplay.service_id,
+              display_id: liveDisplay.display_id,
+              display_type: liveDisplay.display_type,
+              video_configs: [],
+            };
+            profile.displays.push(display);
+          } else {
+            display.service_id = liveDisplay.service_id;
+          }
+          display.video_configs = display.video_configs || [];
+
+          let video = display.video_configs.find(
+            (v) => v.codec_resolution === liveVideo.codec_resolution,
+          );
+          if (!video) {
+            video = { codec_resolution: liveVideo.codec_resolution, enabled: true };
+            display.video_configs.push(video);
+          }
+          video.enabled = true;
+          video.margins = values.margins;
+          video.content_insets = values.content_insets;
+          video.stable_content_insets = values.stable_content_insets;
+
+          const res = await fetch(
+            `/sdr-ui/profiles/${encodeURIComponent(marginsState.vehicleId)}`,
+            {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(profile),
+            },
+          );
+          const body = await res.json();
+          if (!res.ok) {
+            throw new Error(body.message || `Status ${res.status}`);
+          }
+
+          marginsState.profile = body.profile;
+          const pushed = body.live_push_channels || 0;
+          showSnackbar(
+            pushed > 0
+              ? `Saved -- applies on next phone connection. (Margin update also sent live to ${pushed} channel(s); not guaranteed visible without a reconnect.)`
+              : "Saved -- applies on next phone connection.",
+            "success",
+          );
+        } catch (e) {
+          showSnackbar("Failed to save: " + e.message, "error");
+        } finally {
+          applyBtn.disabled = false;
+          applyBtn.textContent = "✅ Save";
+        }
       }
 
       async function saveConfig() {

@@ -400,6 +400,17 @@ async fn get_or_create_media_sink_for_offset(
 
     let mut media_sinks = ctx.media_sinks.lock().await;
     if let Some(sink) = media_sinks.get(&offset).cloned() {
+        // This registry persists across reconnects by design (it's created
+        // once in io_loop, before the reconnect loop), so the same sink --
+        // and its seen_first_idr flag -- would otherwise carry over from a
+        // previous session. This function is only called once per offset
+        // per SDR processing event (i.e. once per connection), so resetting
+        // here correctly means "once per new session", not "every lookup".
+        info!(
+            "media tap: reusing sink for offset {} ({}); reset seen_first_idr for new session",
+            offset, label
+        );
+        sink.reset_for_new_session();
         return Some(sink);
     }
 
@@ -412,6 +423,10 @@ async fn get_or_create_media_sink_for_offset(
         return None;
     };
 
+    info!(
+        "media tap: creating new sink for offset {} ({}); seen_first_idr starts false",
+        offset, label
+    );
     let sink = MediaSink::new(128);
     tokio::spawn(media_tcp_server(
         port,
@@ -3678,6 +3693,37 @@ pub async fn send_byebye(tx: Sender<Packet>) -> Result<()> {
     };
     tx.send(pkt).await?;
     info!("mitm: Sending ByeByeRequest (USER_SELECTION) to phone...");
+    Ok(())
+}
+
+/// Pushes a runtime margin/inset update to the phone on an active video channel,
+/// via UpdateUiConfigRequest (wire ID 0x800A, HU->Phone). This is the same message
+/// type used inbound at 0x8009 (Phone->HU) -- only the wire ID differs by direction.
+/// Fire-and-forget: the phone does not reply to this message.
+pub async fn send_ui_config_update(
+    tx: Sender<Packet>,
+    video_ch: u8,
+    config: AdditionalVideoConfig,
+) -> Result<()> {
+    let mut req = UpdateUiConfigRequest::new();
+    req.config = Some(config).into();
+
+    let mut payload = req.write_to_bytes()?;
+    let msg_id = MediaMessageId::MEDIA_MESSAGE_UPDATE_UI_CONFIG_REPLY as u16; // 0x800A outbound
+    payload.insert(0, (msg_id >> 8) as u8);
+    payload.insert(1, (msg_id & 0xff) as u8);
+
+    let pkt = Packet {
+        channel: video_ch,
+        flags: ENCRYPTED | FRAME_TYPE_FIRST | FRAME_TYPE_LAST,
+        final_length: None,
+        payload,
+    };
+    tx.send(pkt).await?;
+    info!(
+        "mitm/web: pushed live UI config update on video channel {:#04x}",
+        video_ch
+    );
     Ok(())
 }
 
