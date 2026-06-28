@@ -85,30 +85,48 @@ pub fn start_wasm_engine(
     let script_registry_for_watch = script_registry.clone();
     let hook_dir_for_watch = hook_dir.clone();
     runtime.spawn(async move {
+        let _wasm_watcher = wasm_watcher;
         while let Some(res) = watch_rx.recv().await {
-            match res {
-                Ok(event) => match event.kind {
-                    EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
-                        let old_scripts = script_registry_for_watch.reload_dir(&hook_dir_for_watch);
-                        destroy_loaded_scripts(old_scripts).await;
-
-                        let errs: Vec<(std::path::PathBuf, String)> =
-                            script_registry_for_watch.list_errors();
-                        for (path, err) in errs {
-                            error!("[wasm] script load error [{}]: {}", path.display(), err);
-                        }
-
-                        info!(
-                            "[wasm] loaded wasm script count={}",
-                            script_registry_for_watch.list_scripts().len()
-                        );
-                    }
-                    _ => {}
-                },
+            let triggered = match res {
+                Ok(event) => matches!(
+                    event.kind,
+                    EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+                ) && (event.paths.is_empty()
+                    || event.paths.iter().any(|p| {
+                        p.extension().map(|e| e == "wasm").unwrap_or(false)
+                    })),
                 Err(err) => {
                     error!("[wasm] watcher error: {}", err);
+                    false
                 }
+            };
+
+            if !triggered {
+                continue;
             }
+
+            // Drain any further events that arrive within the debounce window so
+            // a multi-write transfer (e.g. scp) only causes a single reload.
+            while let Ok(Some(_)) = tokio::time::timeout(
+                Duration::from_millis(WASM_RELOAD_DEBOUNCE_MS),
+                watch_rx.recv(),
+            )
+            .await
+            {}
+
+            let old_scripts = script_registry_for_watch.reload_dir(&hook_dir_for_watch);
+            destroy_loaded_scripts(old_scripts).await;
+
+            let errs: Vec<(std::path::PathBuf, String)> =
+                script_registry_for_watch.list_errors();
+            for (path, err) in errs {
+                error!("[wasm] script load error [{}]: {}", path.display(), err);
+            }
+
+            info!(
+                "[wasm] loaded wasm script count={}",
+                script_registry_for_watch.list_scripts().len()
+            );
         }
     });
 
@@ -143,6 +161,7 @@ impl ScriptEffects {
 }
 
 const WASM_EPOCH_TICK_INTERVAL_MS: u64 = 10;
+const WASM_RELOAD_DEBOUNCE_MS: u64 = 500;
 
 #[derive(Clone, Copy, Debug)]
 struct EffectiveScriptLimits {
