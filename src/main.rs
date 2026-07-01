@@ -103,6 +103,11 @@ struct Args {
     /// Generate hostapd config and exit
     #[clap(short = 'o', long)]
     generate_hostapd: bool,
+
+    /// Serve only the web interface (skip USB/Bluetooth/proxy), optionally
+    /// overriding the configured `webserver` bind address
+    #[clap(long, value_name = "BIND_ADDR")]
+    web_only: Option<Option<String>>,
 }
 
 fn configure_kernel_module_path_for_config(cfg: &AppConfig) {
@@ -645,6 +650,7 @@ async fn tokio_main(
     usb_connected: Arc<AtomicBool>,
     ws_event_tx: broadcast::Sender<ServerEvent>,
     script_registry: Option<Arc<ScriptRegistry>>,
+    web_only: bool,
 ) -> Result<()> {
     let accessory_started = Arc::new(Notify::new());
     let accessory_started_cloned = accessory_started.clone();
@@ -730,7 +736,7 @@ async fn tokio_main(
         );
     }
 
-    if cfg.bt_sco {
+    if cfg.bt_sco && !web_only {
         match bt_sco::spawn(BtScoOptions {
             bridge_aa_media_pcm: cfg.bt_sco_media_bridge,
             bridge_ring_capacity: cfg.bt_sco_media_bridge_ring_capacity,
@@ -778,6 +784,14 @@ async fn tokio_main(
                 error!("{} webserver address/port parse: {}", NAME, e);
             }
         }
+    }
+
+    if web_only {
+        info!(
+            "{} 🌐 web-only mode: webserver started, skipping USB/Bluetooth/proxy startup",
+            NAME
+        );
+        return Ok(());
     }
 
     let wifi_config = init_wifi_config(&cfg)
@@ -1254,7 +1268,7 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     // parse config
-    let config = match AppConfig::load(args.config.clone()) {
+    let mut config = match AppConfig::load(args.config.clone()) {
         Ok(cfg) => cfg,
         Err(e) => {
             eprintln!(
@@ -1266,6 +1280,15 @@ fn main() -> Result<()> {
         }
     };
     let config_json = AppConfig::load_config_json().expect("Invalid embedded config.json");
+
+    let web_only = args.web_only.is_some();
+    if let Some(Some(ref bindaddr)) = args.web_only {
+        config.webserver = Some(bindaddr.clone());
+    }
+    if web_only && config.webserver.is_none() {
+        eprintln!("web-only mode requested but 'webserver' is disabled in config and no bind address was given");
+        std::process::exit(1);
+    }
 
     crash::install_panic_handler(config.crash_dir.clone(), config.crash_handler_enabled);
 
@@ -1378,11 +1401,18 @@ fn main() -> Result<()> {
         );
     }
 
-    if should_prepare_kernel_firmware_path(&config) {
-        configure_kernel_module_path_for_config(&config);
+    if web_only {
+        info!(
+            "{} 🌐 web-only mode: skipping kernel module, network and USB/Bluetooth setup",
+            NAME
+        );
+    } else {
+        if should_prepare_kernel_firmware_path(&config) {
+            configure_kernel_module_path_for_config(&config);
+        }
+        preload_kernel_modules_for_config(&config);
+        bring_external_ap_sta_iface_up_for_config(&config);
     }
-    preload_kernel_modules_for_config(&config);
-    bring_external_ap_sta_iface_up_for_config(&config);
 
     // notify for syncing threads
     let (restart_tx, _) = broadcast::channel(1);
@@ -1503,33 +1533,39 @@ fn main() -> Result<()> {
             usb_connected_cloned,
             ws_event_tx_cloned,
             script_registry_cloned,
+            web_only,
         )
         .await
     });
 
-    // start tokio_uring runtime simultaneously
-    run_io_loop!(
-        runtime,
-        io_loop(
-            restart_tx,
-            tcp_start_cloned,
-            tcp_phone_connected_cloned,
-            tcp_phone_connection_seq_cloned,
-            config,
-            tx,
-            sensor_channel,
-            input_channel,
-            last_battery_data,
-            last_speed,
-            last_service_discovery_response,
-            media_tap_endpoints,
-            companion_ip,
-            usb_connected,
-            script_registry.clone(),
-            ws_event_tx.clone(),
-            shared_media_channels,
-        )
-    );
+    if web_only {
+        // only the webserver task is running; block until a signal exits the process
+        runtime.block_on(std::future::pending::<()>());
+    } else {
+        // start tokio_uring runtime simultaneously
+        run_io_loop!(
+            runtime,
+            io_loop(
+                restart_tx,
+                tcp_start_cloned,
+                tcp_phone_connected_cloned,
+                tcp_phone_connection_seq_cloned,
+                config,
+                tx,
+                sensor_channel,
+                input_channel,
+                last_battery_data,
+                last_speed,
+                last_service_discovery_response,
+                media_tap_endpoints,
+                companion_ip,
+                usb_connected,
+                script_registry.clone(),
+                ws_event_tx.clone(),
+                shared_media_channels,
+            )
+        );
+    }
 
     info!(
         "🚩 aa-proxy-rs terminated, running time: {}",
