@@ -88,13 +88,16 @@ pub fn start_wasm_engine(
         let _wasm_watcher = wasm_watcher;
         while let Some(res) = watch_rx.recv().await {
             let triggered = match res {
-                Ok(event) => matches!(
-                    event.kind,
-                    EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-                ) && (event.paths.is_empty()
-                    || event.paths.iter().any(|p| {
-                        p.extension().map(|e| e == "wasm").unwrap_or(false)
-                    })),
+                Ok(event) => {
+                    matches!(
+                        event.kind,
+                        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+                    ) && (event.paths.is_empty()
+                        || event
+                            .paths
+                            .iter()
+                            .any(|p| p.extension().map(|e| e == "wasm").unwrap_or(false)))
+                }
                 Err(err) => {
                     error!("[wasm] watcher error: {}", err);
                     false
@@ -117,8 +120,7 @@ pub fn start_wasm_engine(
             let old_scripts = script_registry_for_watch.reload_dir(&hook_dir_for_watch);
             destroy_loaded_scripts(old_scripts).await;
 
-            let errs: Vec<(std::path::PathBuf, String)> =
-                script_registry_for_watch.list_errors();
+            let errs: Vec<(std::path::PathBuf, String)> = script_registry_for_watch.list_errors();
             for (path, err) in errs {
                 error!("[wasm] script load error [{}]: {}", path.display(), err);
             }
