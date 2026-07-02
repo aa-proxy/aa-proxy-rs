@@ -269,7 +269,9 @@
         </button>
       </div>
       <div class="controller-drawer-body">
-        <p class="margins-status" id="margins-status">Loading current display…</p>
+        <p class="margins-status" id="margins-status">
+          Loading current display…
+        </p>
 
         <div class="margins-field" id="margins-display-field" hidden>
           <label for="margins-display-select">Display</label>
@@ -277,13 +279,25 @@
         </div>
 
         <div class="margins-type-tabs" id="margins-type-tabs" hidden>
-          <button type="button" class="margins-type-tab" data-inset-type="margins">
+          <button
+            type="button"
+            class="margins-type-tab"
+            data-inset-type="margins"
+          >
             Margins
           </button>
-          <button type="button" class="margins-type-tab" data-inset-type="content_insets">
+          <button
+            type="button"
+            class="margins-type-tab"
+            data-inset-type="content_insets"
+          >
             Content insets
           </button>
-          <button type="button" class="margins-type-tab" data-inset-type="stable_content_insets">
+          <button
+            type="button"
+            class="margins-type-tab"
+            data-inset-type="stable_content_insets"
+          >
             Stable content insets
           </button>
         </div>
@@ -296,10 +310,22 @@
               id="margins-preview-frame"
               alt="Last captured frame on this channel"
             />
-            <div class="margins-preview-band margins-preview-top" id="margins-preview-top"></div>
-            <div class="margins-preview-band margins-preview-bottom" id="margins-preview-bottom"></div>
-            <div class="margins-preview-band margins-preview-left" id="margins-preview-left"></div>
-            <div class="margins-preview-band margins-preview-right" id="margins-preview-right"></div>
+            <div
+              class="margins-preview-band margins-preview-top"
+              id="margins-preview-top"
+            ></div>
+            <div
+              class="margins-preview-band margins-preview-bottom"
+              id="margins-preview-bottom"
+            ></div>
+            <div
+              class="margins-preview-band margins-preview-left"
+              id="margins-preview-left"
+            ></div>
+            <div
+              class="margins-preview-band margins-preview-right"
+              id="margins-preview-right"
+            ></div>
             <div class="margins-preview-safe" id="margins-preview-safe">
               <span id="margins-preview-placeholder-label">Projected UI</span>
             </div>
@@ -310,7 +336,11 @@
             ></span>
           </div>
           <p class="margins-preview-caption" id="margins-preview-caption"></p>
-          <button type="button" id="margins-preview-refresh-btn" class="margins-preview-refresh">
+          <button
+            type="button"
+            id="margins-preview-refresh-btn"
+            class="margins-preview-refresh"
+          >
             🔄 Refresh frame
           </button>
         </div>
@@ -319,22 +349,46 @@
           <div class="margins-slider-row">
             <label for="margin-top">Top</label>
             <input type="range" id="margin-top" min="0" max="0" value="0" />
-            <input type="number" id="margin-top-num" min="0" max="0" value="0" />
+            <input
+              type="number"
+              id="margin-top-num"
+              min="0"
+              max="0"
+              value="0"
+            />
           </div>
           <div class="margins-slider-row">
             <label for="margin-bottom">Bottom</label>
             <input type="range" id="margin-bottom" min="0" max="0" value="0" />
-            <input type="number" id="margin-bottom-num" min="0" max="0" value="0" />
+            <input
+              type="number"
+              id="margin-bottom-num"
+              min="0"
+              max="0"
+              value="0"
+            />
           </div>
           <div class="margins-slider-row">
             <label for="margin-left">Left</label>
             <input type="range" id="margin-left" min="0" max="0" value="0" />
-            <input type="number" id="margin-left-num" min="0" max="0" value="0" />
+            <input
+              type="number"
+              id="margin-left-num"
+              min="0"
+              max="0"
+              value="0"
+            />
           </div>
           <div class="margins-slider-row">
             <label for="margin-right">Right</label>
             <input type="range" id="margin-right" min="0" max="0" value="0" />
-            <input type="number" id="margin-right-num" min="0" max="0" value="0" />
+            <input
+              type="number"
+              id="margin-right-num"
+              min="0"
+              max="0"
+              value="0"
+            />
           </div>
         </div>
 
@@ -349,9 +403,9 @@
           Saves margins, content insets, and stable content insets for this
           display. Android Auto only reads these from the initial connection
           handshake -- changes take effect on the <em>next</em> phone
-          connection, not immediately. (For margins only, a live update is
-          also attempted in the background; on every phone tested so far it
-          had no visible effect, so treat it as a no-op, not a shortcut.)
+          connection, not immediately. (For margins only, a live update is also
+          attempted in the background; on every phone tested so far it had no
+          visible effect, so treat it as a no-op, not a shortcut.)
         </p>
       </div>
     </aside>
@@ -615,7 +669,9 @@
         drawers.forEach((d) => {
           d.aside._onOpen = d.onOpen;
           d.toggle.addEventListener("click", () => {
-            setActiveDrawer(d.aside.classList.contains("open") ? null : d.aside);
+            setActiveDrawer(
+              d.aside.classList.contains("open") ? null : d.aside,
+            );
           });
           d.close.addEventListener("click", () => setActiveDrawer(null));
         });
@@ -1265,7 +1321,11 @@
       // had no visible effect. Changes apply on the next phone connection.
       // ============================================================
 
-      const MARGINS_INSET_TYPES = ["margins", "content_insets", "stable_content_insets"];
+      const MARGINS_INSET_TYPES = [
+        "margins",
+        "content_insets",
+        "stable_content_insets",
+      ];
 
       const marginsState = {
         loaded: false,
@@ -1301,9 +1361,15 @@
         const hintEl = document.getElementById("margins-hint");
 
         statusEl.textContent = "Loading current display…";
-        [fieldEl, tabsEl, typeHintEl, previewWrap, slidersEl, actionsEl, hintEl].forEach(
-          (el) => (el.hidden = true),
-        );
+        [
+          fieldEl,
+          tabsEl,
+          typeHintEl,
+          previewWrap,
+          slidersEl,
+          actionsEl,
+          hintEl,
+        ].forEach((el) => (el.hidden = true));
 
         let current;
         try {
@@ -1389,7 +1455,8 @@
       async function loadPreviewFrame() {
         const img = document.getElementById("margins-preview-frame");
         const ageEl = document.getElementById("margins-preview-age");
-        const liveDisplay = marginsState.displays[marginsState.selectedDisplayIdx];
+        const liveDisplay =
+          marginsState.displays[marginsState.selectedDisplayIdx];
         if (!liveDisplay || liveDisplay.service_id == null) {
           img.classList.remove("loaded");
           ageEl.hidden = true;
@@ -1503,13 +1570,14 @@
       // (saved profile value if set, else the live baseline from
       // /sdr-ui/current), then shows whichever type tab is active.
       function populateMarginsSlidersFromState() {
-        const liveDisplay = marginsState.displays[marginsState.selectedDisplayIdx];
-        const liveVideo = liveDisplay.video_configs[marginsState.selectedVideoIdx];
-        const size =
-          parseResolutionSize(liveVideo.codec_resolution) || {
-            width: 1920,
-            height: 1080,
-          };
+        const liveDisplay =
+          marginsState.displays[marginsState.selectedDisplayIdx];
+        const liveVideo =
+          liveDisplay.video_configs[marginsState.selectedVideoIdx];
+        const size = parseResolutionSize(liveVideo.codec_resolution) || {
+          width: 1920,
+          height: 1080,
+        };
 
         const profileVideo = findProfileVideo(
           marginsState.profile,
@@ -1645,7 +1713,8 @@
         const applyBtn = document.getElementById("margins-apply-btn");
         const liveDisplay =
           marginsState.displays[marginsState.selectedDisplayIdx];
-        const liveVideo = liveDisplay.video_configs[marginsState.selectedVideoIdx];
+        const liveVideo =
+          liveDisplay.video_configs[marginsState.selectedVideoIdx];
         syncActiveTypeFromSliders();
         const values = marginsState.values;
 
@@ -1685,7 +1754,10 @@
             (v) => v.codec_resolution === liveVideo.codec_resolution,
           );
           if (!video) {
-            video = { codec_resolution: liveVideo.codec_resolution, enabled: true };
+            video = {
+              codec_resolution: liveVideo.codec_resolution,
+              enabled: true,
+            };
             display.video_configs.push(video);
           }
           video.enabled = true;
