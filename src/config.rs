@@ -602,6 +602,12 @@ pub struct AppConfig {
     pub change_usb_order: bool,
     pub stop_on_disconnect: bool,
     pub waze_lht_workaround: bool,
+    /// Synthesize a roundabout exit angle and substitute ROUNDABOUT_ENTER_AND_EXIT_CW/CCW
+    /// maneuvers with their _WITH_ANGLE counterparts. The angle is estimated from the exit
+    /// number, not taken from real map data, so it improves rendering only on some head
+    /// units/car configurations. Independent of waze_lht_workaround. Default: false.
+    #[serde(default)]
+    pub roundabout_angle_synthesis_enabled: bool,
     #[serde(default, deserialize_with = "empty_string_as_none")]
     pub ev_battery_logger: Option<String>,
     pub ev_connector_types: EvConnectorTypes,
@@ -999,6 +1005,7 @@ impl Default for AppConfig {
             change_usb_order: false,
             stop_on_disconnect: false,
             waze_lht_workaround: false,
+            roundabout_angle_synthesis_enabled: false,
             ev_battery_logger: None,
             action_requested: None,
             ev_connector_types: EvConnectorTypes::default(),
@@ -1348,6 +1355,7 @@ impl AppConfig {
         doc["change_usb_order"] = value(self.change_usb_order);
         doc["stop_on_disconnect"] = value(self.stop_on_disconnect);
         doc["waze_lht_workaround"] = value(self.waze_lht_workaround);
+        doc["roundabout_angle_synthesis_enabled"] = value(self.roundabout_angle_synthesis_enabled);
         if let Some(path) = &self.ev_battery_logger {
             doc["ev_battery_logger"] = value(path);
         }

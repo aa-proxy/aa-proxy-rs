@@ -2499,8 +2499,10 @@ pub async fn pkt_modify_hook(
             return Ok(PacketAction::Forward);
         }
 
-        // apply waze workaround on navigation data: check for channel and a specific packet header only
-        if cfg.waze_lht_workaround
+        // apply waze workaround / roundabout angle synthesis on navigation data:
+        // check for channel and a specific packet header only. Each fix below is
+        // gated independently so either can be enabled without the other.
+        if (cfg.waze_lht_workaround || cfg.roundabout_angle_synthesis_enabled)
             && ch == pkt.channel
             && proxy_type == ProxyType::HeadUnit
             && pkt.payload[0] == 0x80
@@ -2508,7 +2510,7 @@ pub async fn pkt_modify_hook(
             && pkt.payload[2] == 0x0A
         {
             if let Ok(mut msg) = NavigationState::parse_from_bytes(&data) {
-                if msg.steps[0].maneuver.type_() == U_TURN_LEFT {
+                if cfg.waze_lht_workaround && msg.steps[0].maneuver.type_() == U_TURN_LEFT {
                     msg.steps[0]
                         .maneuver
                         .as_mut()
@@ -2525,6 +2527,46 @@ pub async fn pkt_modify_hook(
                     pkt.payload.insert(0, (message_id >> 8) as u8);
                     pkt.payload.insert(1, (message_id & 0xff) as u8);
                     return Ok(PacketAction::Forward);
+                }
+
+                if cfg.roundabout_angle_synthesis_enabled {
+                    let mtype = msg.steps[0].maneuver.type_();
+                    if mtype == ROUNDABOUT_ENTER_AND_EXIT_CW
+                        || mtype == ROUNDABOUT_ENTER_AND_EXIT_CCW
+                    {
+                        if let Some(maneuver) = msg.steps[0].maneuver.as_mut() {
+                            let exit_no = maneuver.roundabout_exit_number();
+
+                            // Estimate entry-to-exit angle based on common roundabout layout
+                            let angle = match exit_no {
+                                1 => 45,
+                                2 => 180,
+                                3 => 270,
+                                4 => 315,
+                                _ => (exit_no * 60).min(340),
+                            };
+
+                            // Substitute maneuver type & insert target exit angle
+                            if mtype == ROUNDABOUT_ENTER_AND_EXIT_CW {
+                                maneuver.set_type(ROUNDABOUT_ENTER_AND_EXIT_CW_WITH_ANGLE);
+                            } else {
+                                maneuver.set_type(ROUNDABOUT_ENTER_AND_EXIT_CCW_WITH_ANGLE);
+                            }
+                            maneuver.set_roundabout_exit_angle(angle);
+
+                            info!(
+                                "{} substituted roundabout type {:?} with _WITH_ANGLE (exit_no={}, angle={})",
+                                get_name(proxy_type), mtype, exit_no, angle
+                            );
+
+                            // rewrite payload to new message contents
+                            pkt.payload = msg.write_to_bytes()?;
+                            // inserting 2 bytes of message_id at the beginning
+                            pkt.payload.insert(0, (message_id >> 8) as u8);
+                            pkt.payload.insert(1, (message_id & 0xff) as u8);
+                            return Ok(PacketAction::Forward);
+                        }
+                    }
                 }
             }
             // end navigation service processing
@@ -3170,6 +3212,7 @@ pub async fn pkt_modify_hook(
             // when protocol override is enabled, but it only actually drops if the
             // current HU request was raised by the override state.
             let needs_navigation_status_channel = cfg.waze_lht_workaround
+                || cfg.roundabout_angle_synthesis_enabled
                 || map_album_art_ev_metadata_text_enabled(cfg)
                 || cfg.protocol_version_override_enabled;
 
