@@ -654,6 +654,10 @@ async fn tokio_main(
 ) -> Result<()> {
     let accessory_started = Arc::new(Notify::new());
     let accessory_started_cloned = accessory_started.clone();
+    // Set by the signal handler before it starts tearing the process down, so the
+    // main connection loop below knows to stop instead of starting a new session.
+    let shutdown_requested = Arc::new(AtomicBool::new(false));
+    let shutdown_requested_signal = shutdown_requested.clone();
     let state = web::AppState {
         config: config.clone(),
         config_json: config_json.clone(),
@@ -715,6 +719,11 @@ async fn tokio_main(
                 info!("{} received Ctrl+C, attempting clean disconnect...", NAME);
             }
         }
+
+        // Flag the main connection loop before we start the (potentially blocking)
+        // teardown sequence, so it won't race us into starting a fresh USB/Bluetooth
+        // session while we're on our way out.
+        shutdown_requested_signal.store(true, Ordering::Relaxed);
 
         clean_disconnect_and_exit(tx_signal, config_signal, "signal exit").await;
     });
@@ -929,6 +938,13 @@ async fn tokio_main(
     // main connection loop
     let mut need_restart = restart_tx.subscribe();
     loop {
+        if shutdown_requested.load(Ordering::Relaxed) {
+            info!(
+                "{} 🛑 shutdown in progress, exiting main connection loop without reconnecting",
+                NAME
+            );
+            break;
+        }
         if let Some(ref mut leds) = led_manager {
             leds.set_led(LedColor::Green, LedMode::Heartbeat).await;
         }
@@ -1123,6 +1139,14 @@ async fn tokio_main(
         }
         // wait for restart notification
         let _ = need_restart.recv().await;
+
+        if shutdown_requested.load(Ordering::Relaxed) {
+            info!(
+                "{} 🛑 shutdown in progress, exiting main connection loop without reconnecting",
+                NAME
+            );
+            break;
+        }
 
         // Re-read config before reconnect handling so runtime config changes apply immediately.
         let restart_cfg = config.read().await.clone();
