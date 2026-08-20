@@ -56,6 +56,10 @@ const NAME: &str = "<i><bright-black> proxy: </>";
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 const USB_ACCESSORY_PATH: &str = "/dev/usb_accessory";
+// Bounded below the transfer-stall timeout (config.timeout_secs, default 10s) so a
+// missed/late notification can't outlast the stall detector, and above the observed
+// ~2-3s gadget-switch duration so the common case never actually waits this long.
+const USB_ACCESSORY_READY_TIMEOUT: Duration = Duration::from_secs(8);
 pub const BUFFER_LEN: usize = 16 * 1024;
 const TCP_CLIENT_TIMEOUT: Duration = Duration::new(30, 0);
 const COMP_APP_TCP_PORT: u16 = 9999;
@@ -662,6 +666,7 @@ pub async fn io_loop(
     media_tap_endpoints: SharedMediaTapEndpoints,
     companion_ip: SharedCompanionIp,
     usb_connected: Arc<AtomicBool>,
+    usb_accessory_ready: Arc<Notify>,
     script_registry: Option<Arc<ScriptRegistry>>,
     ws_event_tx: BroadcastSender<ServerEvent>,
     shared_media_channels: SharedMediaChannels,
@@ -862,6 +867,26 @@ pub async fn io_loop(
                 continue;
             }
         } else {
+            // The USB gadget switch to accessory mode (done by tokio_main /
+            // usb_gadget.rs) runs concurrently on a separate runtime and can
+            // take a couple of seconds. Opening the accessory node before that
+            // switch completes means no bytes ever reach the real UDC, which
+            // trips the stall-detection timeout above every single session.
+            // Wait for the "switched" signal first, bounded so a failed/skipped
+            // gadget switch elsewhere can't hang this loop forever.
+            if timeout(
+                USB_ACCESSORY_READY_TIMEOUT,
+                usb_accessory_ready.notified(),
+            )
+            .await
+            .is_err()
+            {
+                warn!(
+                    "{} ⏳ Timed out waiting for USB gadget accessory-switch signal; opening anyway",
+                    NAME
+                );
+            }
+
             info!(
                 "{} 📂 Opening USB accessory device: <u>{}</u>",
                 NAME, USB_ACCESSORY_PATH
