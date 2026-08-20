@@ -648,6 +648,7 @@ async fn tokio_main(
     button_support: bool,
     profile_connected: Arc<AtomicBool>,
     usb_connected: Arc<AtomicBool>,
+    usb_accessory_ready: Arc<Notify>,
     ws_event_tx: broadcast::Sender<ServerEvent>,
     script_registry: Option<Arc<ScriptRegistry>>,
     web_only: bool,
@@ -965,6 +966,7 @@ async fn tokio_main(
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 continue;
             }
+            usb_accessory_ready.notify_one();
         }
 
         // run only if not handling this in handshake task
@@ -1131,6 +1133,7 @@ async fn tokio_main(
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 continue;
             }
+            usb_accessory_ready.notify_one();
         }
 
         // inform via LED about successful connection
@@ -1478,6 +1481,8 @@ fn main() -> Result<()> {
     let last_tire_pressure_data = Arc::new(RwLock::new(None));
     let usb_connected = Arc::new(AtomicBool::new(false));
     let usb_connected_cloned = usb_connected.clone();
+    let usb_accessory_ready = Arc::new(Notify::new());
+    let usb_accessory_ready_cloned = usb_accessory_ready.clone();
     let (ws_event_tx, _ws_event_rx) = broadcast::channel(256);
     let ws_event_tx_cloned = ws_event_tx.clone();
 
@@ -1559,6 +1564,7 @@ fn main() -> Result<()> {
             button_support,
             profile_connected_cloned,
             usb_connected_cloned,
+            usb_accessory_ready_cloned,
             ws_event_tx_cloned,
             script_registry_cloned,
             web_only,
@@ -1588,6 +1594,7 @@ fn main() -> Result<()> {
                 media_tap_endpoints,
                 companion_ip,
                 usb_connected,
+                usb_accessory_ready,
                 script_registry.clone(),
                 ws_event_tx.clone(),
                 shared_media_channels,
