@@ -943,7 +943,7 @@ async fn tokio_main(
                 "{} 🛑 shutdown in progress, exiting main connection loop without reconnecting",
                 NAME
             );
-            break;
+            break Ok(());
         }
         if let Some(ref mut leds) = led_manager {
             leds.set_led(LedColor::Green, LedMode::Heartbeat).await;
@@ -1145,7 +1145,7 @@ async fn tokio_main(
                 "{} 🛑 shutdown in progress, exiting main connection loop without reconnecting",
                 NAME
             );
-            break;
+            break Ok(());
         }
 
         // Re-read config before reconnect handling so runtime config changes apply immediately.
