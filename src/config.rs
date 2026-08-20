@@ -13,6 +13,9 @@ use std::{fmt::Display, fs, io, path::PathBuf, str::FromStr, sync::Arc};
 use tokio::sync::RwLock;
 use toml_edit::{value, DocumentMut};
 
+// module name for logging engine
+const NAME: &str = "<i><bright-black> config: </>";
+
 // Device identity (Bluetooth alias + SSID)
 pub const IDENTITY_NAME: &str = "aa-proxy";
 #[macro_export]
@@ -1451,7 +1454,19 @@ impl AppConfig {
         doc["wasm_script_lifecycle_epoch_deadline"] =
             value(self.wasm_script_lifecycle_epoch_deadline as i64);
 
-        let _ = fs::write(config_file, doc.to_string());
+        match fs::write(&config_file, doc.to_string()) {
+            Ok(()) => {
+                info!("{} ⚙️ Configuration saved: {}", NAME, config_file.display());
+            }
+            Err(e) => {
+                error!(
+                    "{} 🔴 Failed to save configuration to {}: {}",
+                    NAME,
+                    config_file.display(),
+                    e
+                );
+            }
+        }
     }
 
     pub fn load_config_json() -> Result<ConfigJson, Box<dyn std::error::Error>> {
