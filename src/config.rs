@@ -567,6 +567,10 @@ pub struct AppConfig {
     pub webserver: Option<String>,
     pub bt_timeout_secs: u16,
     pub mitm: bool,
+    /// TLS backend used for MITM: "rustls" (default) or "openssl".
+    /// rustls suits modern head units. Use "openssl" for legacy head units that
+    /// only offer suites rustls does not implement, e.g. TLS_RSA_WITH_AES_128_CBC_SHA.
+    pub tls_backend: String,
     pub dpi: u16,
     pub audio_max_unacked: u8,
     pub add_vendor_channel: bool,
@@ -993,6 +997,7 @@ impl Default for AppConfig {
             webserver: webserver_default_bind(),
             bt_timeout_secs: 120,
             mitm: false,
+            tls_backend: "rustls".into(),
             dpi: 0,
             audio_max_unacked: 0,
             add_vendor_channel: true,
@@ -1343,6 +1348,7 @@ impl AppConfig {
         }
         doc["bt_timeout_secs"] = value(self.bt_timeout_secs as i64);
         doc["mitm"] = value(self.mitm);
+        doc["tls_backend"] = value(self.tls_backend.to_string());
         doc["dpi"] = value(self.dpi as i64);
         doc["audio_max_unacked"] = value(self.audio_max_unacked as i64);
         doc["add_vendor_channel"] = value(self.add_vendor_channel);

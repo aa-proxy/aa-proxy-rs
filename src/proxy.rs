@@ -874,12 +874,9 @@ pub async fn io_loop(
             // trips the stall-detection timeout above every single session.
             // Wait for the "switched" signal first, bounded so a failed/skipped
             // gadget switch elsewhere can't hang this loop forever.
-            if timeout(
-                USB_ACCESSORY_READY_TIMEOUT,
-                usb_accessory_ready.notified(),
-            )
-            .await
-            .is_err()
+            if timeout(USB_ACCESSORY_READY_TIMEOUT, usb_accessory_ready.notified())
+                .await
+                .is_err()
             {
                 warn!(
                     "{} ⏳ Timed out waiting for USB gadget accessory-switch signal; opening anyway",

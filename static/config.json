@@ -371,6 +371,10 @@
           "typ": "boolean",
           "description": "Enable MITM mode. Required for every option inside this section."
         },
+        "tls_backend": {
+          "typ": "string",
+          "description": "TLS backend used for MITM: \"rustls\" (default) or \"openssl\". rustls suits modern head units. Use \"openssl\" for legacy head units that only offer cipher suites rustls does not implement, such as TLS_RSA_WITH_AES_128_CBC_SHA (0x002F)."
+        },
         "media_dump_base_port": {
           "typ": "integer",
           "description": "Base TCP port for raw decrypted media stream dumping/debugging. Requires `mitm = true`.\n\nOne TCP listener is created per media sink using fixed offsets:\n+0 main video,\n+1 cluster video,\n+2 auxiliary video,\n+3 guidance/TTS audio,\n+4 system audio,\n+5 media audio,\n+6 telephony audio.\n\nExample: `12345` exposes main video on `tcp://127.0.0.1:12345`.\nUseful for ffplay/VLC debugging and stream inspection.\n\nSet to 0 or leave unset to disable.",

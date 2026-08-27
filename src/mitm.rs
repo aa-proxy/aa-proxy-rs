@@ -27,7 +27,7 @@ use crate::mitm_prettyprint::{
     PktDebugFullFrameBuffers,
 };
 use crate::sdr_ui;
-use crate::ssl_rustls::{AaConnection, SslMemBuf};
+use crate::ssl::{AaConnection, SslMemBuf, TlsBackend};
 use crate::vendor_ext::{
     add_vendor_extension_service, ensure_vendor_channel_open, ensure_vendor_topic_event_bridge,
     handle_vendor_channel_packet, has_vendor_extension_service, is_vendor_channel,
@@ -4093,8 +4093,9 @@ pub async fn proxy<D: IoDeviceTrait>(
         }
     } else {
         info!(
-            "{} 🔐 running in <b><blue>MITM</> mode",
-            get_name(proxy_type)
+            "{} 🔐 running in <b><blue>MITM</> mode (TLS backend: <b><blue>{}</>)",
+            get_name(proxy_type),
+            TlsBackend::from_config(&cfg.tls_backend).as_str()
         );
     }
 
@@ -4129,7 +4130,12 @@ pub async fn proxy<D: IoDeviceTrait>(
         }
     }
 
-    let (mut ssl_conn, mut mem_buf) = match crate::ssl_rustls::ssl_builder(proxy_type, KEYS_PATH) {
+    let tls_backend = TlsBackend::from_config(&cfg.tls_backend);
+    let (mut ssl_conn, mut mem_buf) = match crate::ssl::ssl_builder(
+        tls_backend,
+        proxy_type,
+        KEYS_PATH,
+    ) {
         Ok(s) => s,
         Err(e) => {
             error!(

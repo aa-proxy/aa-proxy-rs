@@ -37,6 +37,9 @@ humantime = "2.1.0"
 log = "0.4.22"
 netif = "0.1.6"
 rustls = { version = "0.23" }
+# Legacy TLS backend for head units rustls cannot negotiate (e.g. 0x002F).
+# No "vendored" feature: link the OpenSSL already provided by the target sysroot.
+openssl = { version = "0.10" }
 rustls-pki-types = "1"
 nusb = { version = "0.2.3", features = ["tokio"] }
 thiserror = "2.0.12"
