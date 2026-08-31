@@ -71,7 +71,9 @@ use crate::mitm::SensorType::*;
 use protobuf::{Enum, EnumOrUnknown, Message};
 use protos::ControlMessageType::{self, *};
 
-use crate::config::{Action::Stop, AppConfig, BtScoMediaBridgeAudioType, SharedConfig};
+use crate::config::{
+    Action::Stop, AppConfig, BtScoMediaBridgeAudioType, SharedConfig, VideoInMotionLevel,
+};
 use crate::config_types::HexdumpLevel;
 use crate::ev::EvTaskCommand;
 use crate::hu_input::{handle_hu_input, HuInputState};
@@ -2292,71 +2294,73 @@ pub async fn pkt_modify_hook(
                                 msg.gear_data[0].set_gear(GEAR_PARK);
                             }
 
-                            // === PARKING BRAKE: engaged ===
-                            // Modern AA cross-checks parking brake with gear/speed.
-                            if !msg.parking_brake_data.is_empty() {
-                                msg.parking_brake_data[0].set_parking_brake(true);
-                            }
+                            if cfg.level_video_in_motion == VideoInMotionLevel::Full {
+                                // === PARKING BRAKE: engaged ===
+                                // Modern AA cross-checks parking brake with gear/speed.
+                                if !msg.parking_brake_data.is_empty() {
+                                    msg.parking_brake_data[0].set_parking_brake(true);
+                                }
 
-                            // === VEHICLE SPEED: zero ===
-                            // SpeedData.speed_e3 is speed in m/s * 1000. Zero = stopped.
-                            if !msg.speed_data.is_empty() {
-                                msg.speed_data[0].set_speed_e3(0);
-                                // Also ensure cruise control is disengaged
-                                msg.speed_data[0].set_cruise_engaged(false);
-                            }
+                                // === VEHICLE SPEED: zero ===
+                                // SpeedData.speed_e3 is speed in m/s * 1000. Zero = stopped.
+                                if !msg.speed_data.is_empty() {
+                                    msg.speed_data[0].set_speed_e3(0);
+                                    // Also ensure cruise control is disengaged
+                                    msg.speed_data[0].set_cruise_engaged(false);
+                                }
 
-                            // === GPS/LOCATION: zero speed, keep position ===
-                            // LocationData.speed_e3 is GPS-derived speed.
-                            // Modern AA compares this against SpeedData for consistency.
-                            if !msg.location_data.is_empty() {
-                                msg.location_data[0].set_speed_e3(0);
-                                // Zero bearing = not turning
-                                msg.location_data[0].set_bearing_e6(0);
-                            }
+                                // === GPS/LOCATION: zero speed, keep position ===
+                                // LocationData.speed_e3 is GPS-derived speed.
+                                // Modern AA compares this against SpeedData for consistency.
+                                if !msg.location_data.is_empty() {
+                                    msg.location_data[0].set_speed_e3(0);
+                                    // Zero bearing = not turning
+                                    msg.location_data[0].set_bearing_e6(0);
+                                }
 
-                            // === ACCELEROMETER: gravity only (stationary) ===
-                            // A parked car only feels gravity on Z axis (~9810 mm/s²).
-                            // Any X/Y acceleration implies movement/turning.
-                            if !msg.accelerometer_data.is_empty() {
-                                msg.accelerometer_data[0].set_acceleration_x_e3(0);
-                                msg.accelerometer_data[0].set_acceleration_y_e3(0);
-                                msg.accelerometer_data[0].set_acceleration_z_e3(9810);
-                            }
+                                // === ACCELEROMETER: gravity only (stationary) ===
+                                // A parked car only feels gravity on Z axis (~9810 mm/s²).
+                                // Any X/Y acceleration implies movement/turning.
+                                if !msg.accelerometer_data.is_empty() {
+                                    msg.accelerometer_data[0].set_acceleration_x_e3(0);
+                                    msg.accelerometer_data[0].set_acceleration_y_e3(0);
+                                    msg.accelerometer_data[0].set_acceleration_z_e3(9810);
+                                }
 
-                            // === GYROSCOPE: zero rotation ===
-                            // Any rotation speed implies the vehicle is turning.
-                            if !msg.gyroscope_data.is_empty() {
-                                msg.gyroscope_data[0].set_rotation_speed_x_e3(0);
-                                msg.gyroscope_data[0].set_rotation_speed_y_e3(0);
-                                msg.gyroscope_data[0].set_rotation_speed_z_e3(0);
-                            }
+                                // === GYROSCOPE: zero rotation ===
+                                // Any rotation speed implies the vehicle is turning.
+                                if !msg.gyroscope_data.is_empty() {
+                                    msg.gyroscope_data[0].set_rotation_speed_x_e3(0);
+                                    msg.gyroscope_data[0].set_rotation_speed_y_e3(0);
+                                    msg.gyroscope_data[0].set_rotation_speed_z_e3(0);
+                                }
 
-                            // === DEAD RECKONING: zero wheel speed + steering ===
-                            // Wheel speed ticks and steering angle are used by Toyota
-                            // and other modern HUs as independent motion verification.
-                            if !msg.dead_reckoning_data.is_empty() {
-                                msg.dead_reckoning_data[0].set_steering_angle_e1(0);
-                                msg.dead_reckoning_data[0].wheel_speed_e3.clear();
-                                // Push four zero values for the four wheels
-                                msg.dead_reckoning_data[0].wheel_speed_e3.push(0);
-                                msg.dead_reckoning_data[0].wheel_speed_e3.push(0);
-                                msg.dead_reckoning_data[0].wheel_speed_e3.push(0);
-                                msg.dead_reckoning_data[0].wheel_speed_e3.push(0);
-                            }
+                                // === DEAD RECKONING: zero wheel speed + steering ===
+                                // Wheel speed ticks and steering angle are used by Toyota
+                                // and other modern HUs as independent motion verification.
+                                if !msg.dead_reckoning_data.is_empty() {
+                                    msg.dead_reckoning_data[0].set_steering_angle_e1(0);
+                                    msg.dead_reckoning_data[0].wheel_speed_e3.clear();
+                                    // Push four zero values for the four wheels
+                                    msg.dead_reckoning_data[0].wheel_speed_e3.push(0);
+                                    msg.dead_reckoning_data[0].wheel_speed_e3.push(0);
+                                    msg.dead_reckoning_data[0].wheel_speed_e3.push(0);
+                                    msg.dead_reckoning_data[0].wheel_speed_e3.push(0);
+                                }
 
-                            // === COMPASS: freeze bearing ===
-                            // Changing compass bearing implies turning/moving.
-                            if !msg.compass_data.is_empty() {
-                                msg.compass_data[0].set_pitch_e6(0);
-                                msg.compass_data[0].set_roll_e6(0);
-                            }
+                                // === COMPASS: freeze bearing ===
+                                // Changing compass bearing implies turning/moving.
+                                if !msg.compass_data.is_empty() {
+                                    msg.compass_data[0].set_pitch_e6(0);
+                                    msg.compass_data[0].set_roll_e6(0);
+                                }
 
-                            // === RPM: idle engine ===
-                            // High RPM with zero speed is suspicious on some HUs.
-                            // ~700 RPM idle is realistic for a parked car.
-                            if !msg.rpm_data.is_empty() {
-                                msg.rpm_data[0].set_rpm_e3(700_000);
+                                // === RPM: idle engine ===
+                                // High RPM with zero speed is suspicious on some HUs.
+                                // ~700 RPM idle is realistic for a parked car.
+                                if !msg.rpm_data.is_empty() {
+                                    msg.rpm_data[0].set_rpm_e3(700_000);
+                                }
                             }
 
                             // Regenerate payload with ALL spoofed fields

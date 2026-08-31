@@ -192,6 +192,28 @@ impl Display for BtScoMicEchoControl {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VideoInMotionLevel {
+    Low,
+    Full,
+}
+
+impl Default for VideoInMotionLevel {
+    fn default() -> Self {
+        Self::Full
+    }
+}
+
+impl Display for VideoInMotionLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Low => "low",
+            Self::Full => "full",
+        })
+    }
+}
+
 fn webserver_default_bind() -> Option<String> {
     Some("0.0.0.0:80".into())
 }
@@ -550,6 +572,9 @@ pub struct AppConfig {
     pub add_vendor_channel: bool,
     pub remove_tap_restriction: bool,
     pub video_in_motion: bool,
+    /// Level of video-in-motion spoofing applied when `video_in_motion` is enabled.
+    /// `low` only forces gear to PARK; `full` (default) spoofs all motion-related sensors.
+    pub level_video_in_motion: VideoInMotionLevel,
     pub disable_media_sink: bool,
     pub disable_tts_sink: bool,
     pub developer_mode: bool,
@@ -973,6 +998,7 @@ impl Default for AppConfig {
             add_vendor_channel: true,
             remove_tap_restriction: false,
             video_in_motion: false,
+            level_video_in_motion: VideoInMotionLevel::Full,
             disable_media_sink: false,
             disable_tts_sink: false,
             developer_mode: false,
@@ -1322,6 +1348,7 @@ impl AppConfig {
         doc["add_vendor_channel"] = value(self.add_vendor_channel);
         doc["remove_tap_restriction"] = value(self.remove_tap_restriction);
         doc["video_in_motion"] = value(self.video_in_motion);
+        doc["level_video_in_motion"] = value(self.level_video_in_motion.to_string());
         doc["disable_media_sink"] = value(self.disable_media_sink);
         doc["disable_tts_sink"] = value(self.disable_tts_sink);
         doc["developer_mode"] = value(self.developer_mode);

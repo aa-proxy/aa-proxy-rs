@@ -417,6 +417,12 @@
               "typ": "boolean",
               "description": "Enable video playback while driving. Intended for passengers only — do not watch video while driving. May require `developer_mode` as well, depending on phone and Android version."
             },
+            "level_video_in_motion": {
+              "typ": "select",
+              "description": "Level of sensor spoofing applied by `video_in_motion`. `low` only force park in gear; `full` (default) also spoofs speed, GPS, accelerometer, gyroscope and other motion sensors.",
+              "values": ["low", "full"],
+              "requires": "video_in_motion"
+            },
             "remove_tap_restriction": {
               "typ": "boolean",
               "description": "Remove tap restrictions. Affects the situation where tapping too frequently while driving triggers a temporary lockout warning. May not work, depending on phone and Android version."
