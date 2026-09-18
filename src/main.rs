@@ -1366,11 +1366,9 @@ fn main() -> Result<()> {
         info!("{} 📟 host device: <bold><blue>{}</>", NAME, model);
         if model.starts_with("AAWireless") {
             led_support = true;
-            button_support = true;
-        } else if model.starts_with("Radxa CS317") {
-            // aaw1-cs317 keeps the stock Radxa model string, but wires the same
-            // rgb-red/rgb-green/rgb-blue LEDs the AAWireless boards use.
-            led_support = true;
+            // The aaw1 boards (cs307 and cs317) report "AAWireless 1". They wire
+            // the same RGB LEDs as the later boards, but their buttons stay off.
+            button_support = !model.starts_with("AAWireless 1");
         }
     }
 
