@@ -4079,26 +4079,6 @@ pub async fn proxy<D: IoDeviceTrait>(
     let passthrough = !cfg.mitm || cfg.runtime_mitm_failed;
     let hex_requested = cfg.hexdump_level;
 
-    if passthrough {
-        if cfg.runtime_mitm_failed {
-            warn!(
-                "{} 🔄 running in <yellow>passthrough</> mode: MITM was disabled for the rest of this boot after an earlier SSL/certificate error",
-                get_name(proxy_type)
-            );
-        } else {
-            info!(
-                "{} 🔄 running in <b>passthrough</> mode (MITM disabled in config)",
-                get_name(proxy_type)
-            );
-        }
-    } else {
-        info!(
-            "{} 🔐 running in <b><blue>MITM</> mode (TLS backend: <b><blue>{}</>)",
-            get_name(proxy_type),
-            TlsBackend::from_config(&cfg.tls_backend).as_str()
-        );
-    }
-
     // in full_frames/passthrough mode we only directly pass packets from one endpoint to the other
     if passthrough {
         loop {

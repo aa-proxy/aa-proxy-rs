@@ -77,6 +77,7 @@ use crate::mitm::endpoint_reader;
 use crate::mitm::proxy;
 use crate::mitm::Packet;
 use crate::mitm::ProxyType;
+use crate::ssl::TlsBackend;
 use crate::usb_stream;
 
 async fn transfer_monitor(
@@ -717,6 +718,24 @@ pub async fn io_loop(
     loop {
         // reload new config
         let config = config.read().await.clone();
+
+        if config.runtime_mitm_failed {
+            warn!(
+                "{} 🔄 running in <yellow>passthrough</> mode: MITM was disabled for the rest of this boot after an earlier SSL/certificate error",
+                NAME
+            );
+        } else if !config.mitm {
+            info!(
+                "{} 🔄 running in <b>passthrough</> mode (MITM disabled in config)",
+                NAME
+            );
+        } else {
+            info!(
+                "{} 🔐 running in <b><blue>MITM</> mode (TLS backend: <b><blue>{}</>)",
+                NAME,
+                TlsBackend::from_config(&config.tls_backend).as_str()
+            );
+        }
 
         // generate Durations from configured seconds
         let stats_interval = {
