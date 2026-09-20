@@ -28,8 +28,10 @@ use aa_proxy_rs::script_wasm::{ScriptParameters, ScriptRegistry};
 use aa_proxy_rs::wasm_config::WasmConfigStore;
 #[cfg(not(feature = "wasm-scripting"))]
 type ScriptRegistry = ();
+use aa_proxy_rs::config_types::UsbId;
 use aa_proxy_rs::usb_gadget::uevent_listener;
 use aa_proxy_rs::usb_gadget::UsbGadgetState;
+use aa_proxy_rs::usb_stream;
 use aa_proxy_rs::web;
 use aa_proxy_rs::web::ServerEvent;
 use clap::Parser;
@@ -625,6 +627,20 @@ async fn clean_disconnect_and_exit(
     std::process::exit(0);
 }
 
+async fn wait_for_wired_usb(wired: Option<UsbId>) {
+    let Some(wired) = wired else {
+        std::future::pending::<()>().await;
+        return;
+    };
+
+    loop {
+        if usb_stream::is_present(&Some(wired.clone())) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 async fn tokio_main(
     config: SharedConfig,
     config_json: SharedConfigJson,
@@ -869,7 +885,10 @@ async fn tokio_main(
             )
             .await
             {
-                Ok(result) => {
+                Ok(mut result) => {
+                    if cfg.wired.is_some() && usb_stream::is_present(&cfg.wired) {
+                        result.suppress_aa_wireless_profile();
+                    }
                     bluetooth = Some(result);
                     break;
                 }
@@ -955,6 +974,17 @@ async fn tokio_main(
             }
         }
 
+        let wired_usb_present = cfg.wired.is_some() && usb_stream::is_present(&cfg.wired);
+        if let Some(ref mut bluetooth) = bluetooth {
+            if wired_usb_present {
+                bluetooth.suppress_aa_wireless_profile();
+            } else if let Err(e) = bluetooth.restore_aa_wireless_profile().await {
+                error!("{} failed to restore AA Wireless profile: {}", NAME, e);
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                continue;
+            }
+        }
+
         if cfg.change_usb_order {
             if !enable_usb_if_present(
                 &mut usb,
@@ -975,112 +1005,128 @@ async fn tokio_main(
             // Direct MD TCP mode does not use the Bluetooth/Wi-Fi AA handshake.
             // io_loop will connect to aa_server_tcp_addr after the HU/DHU side is ready.
         } else if cfg.bt_wireless_proxy {
-            if let Some(ref mut bluetooth) = bluetooth {
-                let proxy_mode = cfg.bt_wireless_proxy_mode.trim().to_ascii_lowercase();
-                let result = if proxy_mode == "probe" {
-                    bluetooth
-                        .aa_wireless_probe_proxy(
-                            cfg.bt_wireless_proxy_hu_mac.clone(),
-                            cfg.bt_wireless_proxy_hu_channel,
-                            cfg.bt_wireless_proxy_tcp_probe,
-                        )
-                        .await
-                } else if proxy_mode == "car-wifi-mitm" || proxy_mode == "wifi-mitm" {
-                    let car_wifi_base_iface =
-                        if cfg.bt_wireless_proxy_car_wifi_base_iface.trim().is_empty() {
-                            cfg.iface.clone()
-                        } else {
-                            cfg.bt_wireless_proxy_car_wifi_base_iface.clone()
-                        };
-                    bluetooth
-                        .aa_wireless_car_wifi_mitm_proxy(
-                            cfg.connect.clone(),
-                            bluetooth::CarWifiMitmProxyOptions {
-                                hu_mac: cfg.bt_wireless_proxy_hu_mac.clone(),
-                                hu_channel: cfg.bt_wireless_proxy_hu_channel,
-                                rendezvous_mode: cfg.bt_wireless_proxy_rendezvous_mode.clone(),
-                                iface: car_wifi_base_iface,
-                                join_cmd: cfg.bt_wireless_proxy_car_wifi_join_cmd.clone(),
-                                auto_join: cfg.bt_wireless_proxy_car_wifi_auto_join,
-                                join_control: cfg.bt_wireless_proxy_wifi_join_control.clone(),
-                                keep_ap: cfg.bt_wireless_proxy_car_wifi_keep_ap,
-                                sta_iface: cfg.bt_wireless_proxy_car_wifi_sta_iface.clone(),
-                                sta_phy: cfg.bt_wireless_proxy_car_wifi_sta_phy.clone(),
-                                ap_iface: cfg.bt_wireless_proxy_car_wifi_ap_iface.clone(),
-                                phone_wifi_mode: cfg.bt_wireless_proxy_phone_wifi_mode.clone(),
-                                phone_ap_ssid: cfg.ssid.clone(),
-                                phone_ap_key: cfg.wpa_passphrase.clone(),
-                                phone_ap_ip: format!("{}.1", cfg.wlan_subnet),
-                                phone_ap_channel: cfg.channel,
-                                rewrite_ip: cfg.bt_wireless_proxy_rewrite_ip.clone(),
-                                listen_port: cfg.bt_wireless_proxy_listen_port,
-                                tcp_start: tcp_start.clone(),
-                                tcp_phone_connected: tcp_phone_connected.clone(),
-                                tcp_phone_connection_seq: tcp_phone_connection_seq.clone(),
-                                use_version_projection_fallback: cfg
-                                    .bt_wireless_proxy_use_version_projection_fallback,
-                                protocol_version_override_enabled: cfg
-                                    .protocol_version_override_enabled,
-                                protocol_version_override_major: cfg
-                                    .protocol_version_override_major,
-                                protocol_version_override_minor: cfg
-                                    .protocol_version_override_minor,
-                                wpp_keepalive: cfg.bt_wireless_proxy_wpp_keepalive,
-                                wpp_keepalive_interval: Duration::from_millis(
-                                    cfg.bt_wireless_proxy_wpp_keepalive_interval_ms.max(250),
-                                ),
-                                wpactrl_socket_timeout: Duration::from_secs(
-                                    cfg.bt_wireless_proxy_wpactrl_socket_timeout_secs.max(1),
-                                ),
-                                wifi_association_timeout: Duration::from_secs(
-                                    cfg.bt_wireless_proxy_wifi_association_timeout_secs.max(1),
-                                ),
-                                dhcp_timeout: Duration::from_secs(
-                                    cfg.bt_wireless_proxy_dhcp_timeout_secs.max(1),
-                                ),
-                                hu_first_wait_phone_timeout: Duration::from_secs(
-                                    cfg.bt_wireless_proxy_hu_first_wait_phone_secs.max(1),
-                                ),
-                                bt_timeout: Duration::from_secs(cfg.bt_timeout_secs.into()),
-                                stopped: cfg.action_requested == Some(Action::Stop),
-                            },
-                        )
-                        .await
-                } else {
-                    bluetooth
-                        .aa_wireless_bridge_proxy(
-                            cfg.connect.clone(),
-                            cfg.bt_wireless_proxy_hu_mac.clone(),
-                            cfg.bt_wireless_proxy_hu_channel,
-                            Duration::from_secs(cfg.bt_timeout_secs.into()),
-                            cfg.action_requested == Some(Action::Stop),
-                        )
-                        .await
-                };
-
-                if let Err(e) = result {
-                    let err_msg = e.to_string();
-                    error!("{} bt_wireless_proxy error: {}", NAME, err_msg);
-                    if proxy_mode == "car-wifi-mitm" || proxy_mode == "wifi-mitm" {
+            if !wired_usb_present {
+                if let Some(ref mut bluetooth) = bluetooth {
+                    let proxy_mode = cfg.bt_wireless_proxy_mode.trim().to_ascii_lowercase();
+                    let wired = cfg.wired.clone();
+                    let outcome = tokio::select! {
+                            result = async {
+                                if proxy_mode == "probe" {
                         bluetooth
-                            .recover_after_car_wifi_mitm_error(
-                                &cfg.connect,
-                                &cfg.bt_wireless_proxy_hu_mac,
-                                &err_msg,
+                            .aa_wireless_probe_proxy(
+                                cfg.bt_wireless_proxy_hu_mac.clone(),
+                                cfg.bt_wireless_proxy_hu_channel,
+                                cfg.bt_wireless_proxy_tcp_probe,
                             )
-                            .await;
+                            .await
+                    } else if proxy_mode == "car-wifi-mitm" || proxy_mode == "wifi-mitm" {
+                        let car_wifi_base_iface =
+                            if cfg.bt_wireless_proxy_car_wifi_base_iface.trim().is_empty() {
+                                cfg.iface.clone()
+                            } else {
+                                cfg.bt_wireless_proxy_car_wifi_base_iface.clone()
+                            };
+                        bluetooth
+                            .aa_wireless_car_wifi_mitm_proxy(
+                                cfg.connect.clone(),
+                                bluetooth::CarWifiMitmProxyOptions {
+                                    hu_mac: cfg.bt_wireless_proxy_hu_mac.clone(),
+                                    hu_channel: cfg.bt_wireless_proxy_hu_channel,
+                                    rendezvous_mode: cfg.bt_wireless_proxy_rendezvous_mode.clone(),
+                                    iface: car_wifi_base_iface,
+                                    join_cmd: cfg.bt_wireless_proxy_car_wifi_join_cmd.clone(),
+                                    auto_join: cfg.bt_wireless_proxy_car_wifi_auto_join,
+                                    join_control: cfg.bt_wireless_proxy_wifi_join_control.clone(),
+                                    keep_ap: cfg.bt_wireless_proxy_car_wifi_keep_ap,
+                                    sta_iface: cfg.bt_wireless_proxy_car_wifi_sta_iface.clone(),
+                                    sta_phy: cfg.bt_wireless_proxy_car_wifi_sta_phy.clone(),
+                                    ap_iface: cfg.bt_wireless_proxy_car_wifi_ap_iface.clone(),
+                                    phone_wifi_mode: cfg.bt_wireless_proxy_phone_wifi_mode.clone(),
+                                    phone_ap_ssid: cfg.ssid.clone(),
+                                    phone_ap_key: cfg.wpa_passphrase.clone(),
+                                    phone_ap_ip: format!("{}.1", cfg.wlan_subnet),
+                                    phone_ap_channel: cfg.channel,
+                                    rewrite_ip: cfg.bt_wireless_proxy_rewrite_ip.clone(),
+                                    listen_port: cfg.bt_wireless_proxy_listen_port,
+                                    tcp_start: tcp_start.clone(),
+                                    tcp_phone_connected: tcp_phone_connected.clone(),
+                                    tcp_phone_connection_seq: tcp_phone_connection_seq.clone(),
+                                    use_version_projection_fallback: cfg
+                                        .bt_wireless_proxy_use_version_projection_fallback,
+                                    protocol_version_override_enabled: cfg
+                                        .protocol_version_override_enabled,
+                                    protocol_version_override_major: cfg
+                                        .protocol_version_override_major,
+                                    protocol_version_override_minor: cfg
+                                        .protocol_version_override_minor,
+                                    wpp_keepalive: cfg.bt_wireless_proxy_wpp_keepalive,
+                                    wpp_keepalive_interval: Duration::from_millis(
+                                        cfg.bt_wireless_proxy_wpp_keepalive_interval_ms.max(250),
+                                    ),
+                                    wpactrl_socket_timeout: Duration::from_secs(
+                                        cfg.bt_wireless_proxy_wpactrl_socket_timeout_secs.max(1),
+                                    ),
+                                    wifi_association_timeout: Duration::from_secs(
+                                        cfg.bt_wireless_proxy_wifi_association_timeout_secs.max(1),
+                                    ),
+                                    dhcp_timeout: Duration::from_secs(
+                                        cfg.bt_wireless_proxy_dhcp_timeout_secs.max(1),
+                                    ),
+                                    hu_first_wait_phone_timeout: Duration::from_secs(
+                                        cfg.bt_wireless_proxy_hu_first_wait_phone_secs.max(1),
+                                    ),
+                                    bt_timeout: Duration::from_secs(cfg.bt_timeout_secs.into()),
+                                    stopped: cfg.action_requested == Some(Action::Stop),
+                                },
+                            )
+                            .await
                     } else {
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        bluetooth
+                            .aa_wireless_bridge_proxy(
+                                cfg.connect.clone(),
+                                cfg.bt_wireless_proxy_hu_mac.clone(),
+                                cfg.bt_wireless_proxy_hu_channel,
+                                Duration::from_secs(cfg.bt_timeout_secs.into()),
+                                cfg.action_requested == Some(Action::Stop),
+                            )
+                            .await
+                                }
+                            } => Some(result),
+                            _ = wait_for_wired_usb(wired) => None,
+                        };
+
+                    if let Some(result) = outcome {
+                        if let Err(e) = result {
+                            let err_msg = e.to_string();
+                            error!("{} bt_wireless_proxy error: {}", NAME, err_msg);
+                            if proxy_mode == "car-wifi-mitm" || proxy_mode == "wifi-mitm" {
+                                bluetooth
+                                    .recover_after_car_wifi_mitm_error(
+                                        &cfg.connect,
+                                        &cfg.bt_wireless_proxy_hu_mac,
+                                        &err_msg,
+                                    )
+                                    .await;
+                            } else {
+                                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                            }
+                            continue;
+                        }
+                    } else {
+                        bluetooth.suppress_aa_wireless_profile();
+                        info!(
+                            "{} 🔌 Wired USB detected — stopped AA Wireless Bluetooth advertising",
+                            NAME
+                        );
                     }
+                } else {
+                    warn!(
+                        "{} bt_wireless_proxy requested but Bluetooth was not initialized; restart after clearing aa_server_tcp_addr",
+                        NAME
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     continue;
                 }
-            } else {
-                warn!(
-                    "{} bt_wireless_proxy requested but Bluetooth was not initialized; restart after clearing aa_server_tcp_addr",
-                    NAME
-                );
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                continue;
             }
         } else if let Some(ref wifi_conf) = wifi_config {
             if !usb_connected.load(Ordering::Relaxed)
@@ -1089,8 +1135,9 @@ async fn tokio_main(
             {
                 if let Some(ref mut bluetooth) = bluetooth {
                     // bluetooth handshake
-                    if let Err(e) = bluetooth
-                        .aa_handshake(
+                    let wired = cfg.wired.clone();
+                    let outcome = tokio::select! {
+                        result = bluetooth.aa_handshake(
                             cfg.connect.clone(),
                             wifi_conf.clone(),
                             tcp_start.clone(),
@@ -1104,12 +1151,24 @@ async fn tokio_main(
                             restart_tx.clone(),
                             profile_connected.clone(),
                             config.clone(),
-                        )
-                        .await
-                    {
-                        error!("{} bluetooth AA handshake error: {}", NAME, e);
-                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                        continue;
+                        ) => Some(result),
+                        _ = wait_for_wired_usb(wired) => None,
+                    };
+
+                    match outcome {
+                        Some(Ok(())) => {}
+                        Some(Err(e)) => {
+                            error!("{} bluetooth AA handshake error: {}", NAME, e);
+                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                            continue;
+                        }
+                        None => {
+                            bluetooth.suppress_aa_wireless_profile();
+                            info!(
+                                "{} 🔌 Wired USB detected — stopped AA Wireless Bluetooth advertising",
+                                NAME
+                            );
+                        }
                     }
                 } else {
                     warn!(

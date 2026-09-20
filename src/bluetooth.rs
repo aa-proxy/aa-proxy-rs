@@ -4460,6 +4460,7 @@ pub struct Bluetooth {
     session: Session,
     adapter: Adapter,
     handle_aa: Option<ProfileHandle>,
+    aa_wireless_profile_enabled: bool,
     hu_pairing_agent: Option<AgentHandle>,
     companion_pairing_agent: Option<AgentHandle>,
     current_index: usize,
@@ -4510,16 +4511,7 @@ pub async fn init(
     // so it must not also register the same UUID as a local server profile; BlueZ allows only
     // one local registration for a UUID and would otherwise fail later with "UUID already registered".
     let handle_aa = if register_aa_wireless_profile {
-        let profile = Profile {
-            uuid: AAWG_PROFILE_UUID,
-            name: Some("AA Wireless".to_string()),
-            channel: Some(8),
-            role: Some(Role::Server),
-            require_authentication: Some(false),
-            require_authorization: Some(false),
-            ..Default::default()
-        };
-        let handle_aa = session.register_profile(profile).await?;
+        let handle_aa = session.register_profile(aa_wireless_profile()).await?;
         info!("{} 📱 AA Wireless Profile: registered", NAME);
         Some(handle_aa)
     } else {
@@ -4534,6 +4526,7 @@ pub async fn init(
         session,
         adapter,
         handle_aa,
+        aa_wireless_profile_enabled: register_aa_wireless_profile,
         hu_pairing_agent: None,
         companion_pairing_agent: None,
         current_index: 0,
@@ -4544,6 +4537,18 @@ pub async fn init(
         hu_pairing_class_iface: None,
         phone_like_sdp_profiles_registered: false,
     })
+}
+
+fn aa_wireless_profile() -> Profile {
+    Profile {
+        uuid: AAWG_PROFILE_UUID,
+        name: Some("AA Wireless".to_string()),
+        channel: Some(8),
+        role: Some(Role::Server),
+        require_authentication: Some(false),
+        require_authorization: Some(false),
+        ..Default::default()
+    }
 }
 
 pub async fn get_cpu_serial_number_suffix() -> Result<String> {
@@ -4975,6 +4980,28 @@ pub fn spawn_a2dp_sink_registration(dongle_mode: bool) {
 }
 
 impl Bluetooth {
+    pub fn suppress_aa_wireless_profile(&mut self) {
+        if self.handle_aa.take().is_some() {
+            info!(
+                "{} 📵 AA Wireless Profile: unregistered while wired USB is present",
+                NAME
+            );
+        }
+    }
+
+    pub async fn restore_aa_wireless_profile(&mut self) -> Result<()> {
+        if !self.aa_wireless_profile_enabled || self.handle_aa.is_some() {
+            return Ok(());
+        }
+
+        self.handle_aa = Some(self.session.register_profile(aa_wireless_profile()).await?);
+        info!(
+            "{} 📱 AA Wireless Profile: re-registered after wired USB was removed",
+            NAME
+        );
+        Ok(())
+    }
+
     pub async fn set_adapter_pairable_discoverable(
         &self,
         pairable: bool,
