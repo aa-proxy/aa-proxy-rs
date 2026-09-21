@@ -211,20 +211,11 @@ impl FfsGadget {
         }
     }
 
-    /// Mounts configfs and removes any leftover USB gadgets from a
-    /// previous run. Cheap/no-op if configfs is already mounted and there
-    /// are no leftover gadgets; call once at startup, like the old
+    /// Removes any leftover USB gadgets from a previous run. Cheap/no-op
+    /// if there are none; call once at startup, like the old
     /// `UsbGadgetState::init()`.
-    ///
-    /// Mounting it ourselves matters now: the old `S92usb_gadget.in` init
-    /// script used to be what mounted configfs at boot (as a side effect
-    /// of setting up the f_accessory-based gadgets); now that it's
-    /// disabled, nothing else does, so `usb-gadget` crate calls fail with
-    /// "configfs is not mounted" — same failure for the MTP stage *and*
-    /// the accessory stage, since both need it, regardless of `legacy`.
     pub fn init(&mut self) -> Result<()> {
         info!("{} 🔌 Initializing USB Manager (FunctionFS)", NAME);
-        ensure_configfs_mounted()?;
         usb_gadget::remove_all().context("removing leftover USB gadgets")?;
         Ok(())
     }
@@ -534,45 +525,6 @@ impl FfsGadget {
 
         Ok(AccessorySession { reader, writer })
     }
-}
-
-/// Mounts configfs at the conventional `/sys/kernel/config` path if it
-/// isn't already mounted somewhere. Treats "already mounted" (EBUSY) as
-/// success. This is the one bit of setup that used to happen as a side
-/// effect of the old `S92usb_gadget.in` boot script and that nothing else
-/// does now that it's gone — see `FfsGadget::init`.
-fn ensure_configfs_mounted() -> Result<()> {
-    const MOUNT_POINT: &str = "/sys/kernel/config";
-
-    std::fs::create_dir_all(MOUNT_POINT).context("creating /sys/kernel/config")?;
-
-    let source = std::ffi::CString::new("configfs").unwrap();
-    let target = std::ffi::CString::new(MOUNT_POINT).unwrap();
-    let fstype = std::ffi::CString::new("configfs").unwrap();
-
-    // SAFETY: all three CStrings outlive this call, and passing a null
-    // `data` pointer with `flags = 0` is the standard "no options" mount.
-    let ret = unsafe {
-        libc::mount(
-            source.as_ptr(),
-            target.as_ptr(),
-            fstype.as_ptr(),
-            0,
-            std::ptr::null(),
-        )
-    };
-
-    if ret == 0 {
-        info!("{} 🔌 mounted configfs at {}", NAME, MOUNT_POINT);
-        return Ok(());
-    }
-
-    let err = std::io::Error::last_os_error();
-    if err.raw_os_error() == Some(libc::EBUSY) {
-        // Already mounted (there or elsewhere) — nothing to do.
-        return Ok(());
-    }
-    Err(err).context(format!("mounting configfs at {MOUNT_POINT}"))
 }
 
 /// Same file `main.rs::get_serial_number()` reads; duplicated here (rather
