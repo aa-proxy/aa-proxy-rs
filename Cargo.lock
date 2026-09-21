@@ -12,6 +12,7 @@ dependencies = [
  "base64 0.22.1",
  "bluer",
  "byteorder",
+ "bytes",
  "bytesize",
  "chrono",
  "clap",
@@ -25,14 +26,13 @@ dependencies = [
  "humantime",
  "hyper",
  "indexmap 2.14.0",
- "kobject-uevent",
  "libc",
  "log",
  "mac_address",
  "netif",
- "netlink-sys",
  "nix 0.30.1",
  "notify",
+ "num_enum",
  "nusb",
  "openssl",
  "png",
@@ -59,6 +59,7 @@ dependencies = [
  "tokio-util",
  "toml_edit 0.22.27",
  "ureq",
+ "usb-gadget",
  "uuid",
  "wasmtime",
  "wasmtime-wasi",
@@ -396,7 +397,7 @@ dependencies = [
  "pin-project",
  "serde",
  "serde_json",
- "strum",
+ "strum 0.26.3",
  "tokio",
  "tokio-stream",
  "uuid",
@@ -1963,15 +1964,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kobject-uevent"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0552eb2979d9aadc4b5972f8aa446130594d1afe1e4f7feed848dcd1b1b61cab"
-dependencies = [
- "anyhow",
-]
-
-[[package]]
 name = "kqueue"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2188,17 +2180,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "netlink-sys"
-version = "0.8.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cd6c30ed10fa69cc491d491b85cc971f6bdeb8e7367b7cde2ee6cc878d583fae"
-dependencies = [
- "bytes",
- "libc",
- "log",
-]
-
-[[package]]
 name = "nix"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2284,6 +2265,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "num_enum"
+version = "0.7.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d0bca838442ec211fa11de3a8b0e0e8f3a4522575b5c4c06ed722e005036f26"
+dependencies = [
+ "num_enum_derive",
+ "rustversion",
+]
+
+[[package]]
+name = "num_enum_derive"
+version = "0.7.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
+dependencies = [
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -2428,6 +2431,15 @@ dependencies = [
  "redox_syscall",
  "smallvec",
  "windows-link",
+]
+
+[[package]]
+name = "partition-identity"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b25ada56da40bd4266a924109037ec9a9c59306e002dd2c30b00c0c3d648b93"
+dependencies = [
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -2592,6 +2604,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "proc-mounts"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d652f8435d0ab70bf4f3590a6a851d59604831a458086541b95238cc51ffcf2"
+dependencies = [
+ "partition-identity",
 ]
 
 [[package]]
@@ -3335,7 +3356,16 @@ version = "0.26.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fec0f0aef304996cf250b31b5a10dee7980c85da9d759361292b8bca5a18f06"
 dependencies = [
- "strum_macros",
+ "strum_macros 0.26.4",
+]
+
+[[package]]
+name = "strum"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9628de9b8791db39ceda2b119bbe13134770b56c138ec1d3af810d045c04f9bd"
+dependencies = [
+ "strum_macros 0.28.0",
 ]
 
 [[package]]
@@ -3348,6 +3378,18 @@ dependencies = [
  "proc-macro2",
  "quote",
  "rustversion",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "strum_macros"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab85eea0270ee17587ed4156089e10b9e6880ee688791d45a905f5b1ca36f664"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
  "syn 2.0.117",
 ]
 
@@ -3887,6 +3929,25 @@ dependencies = [
  "idna",
  "percent-encoding",
  "serde",
+]
+
+[[package]]
+name = "usb-gadget"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a57f5767e127a41fefc1de7f55bfe707e1080de797ccf3e3089c7d35635cfd3a"
+dependencies = [
+ "bitflags 2.11.1",
+ "byteorder",
+ "bytes",
+ "libc",
+ "log",
+ "macaddr",
+ "proc-mounts",
+ "rustix 1.1.4",
+ "strum 0.28.0",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

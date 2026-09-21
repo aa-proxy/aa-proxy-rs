@@ -29,15 +29,13 @@ use aa_proxy_rs::wasm_config::WasmConfigStore;
 #[cfg(not(feature = "wasm-scripting"))]
 type ScriptRegistry = ();
 use aa_proxy_rs::config_types::UsbId;
-use aa_proxy_rs::usb_gadget::uevent_listener;
-use aa_proxy_rs::usb_gadget::UsbGadgetState;
+use aa_proxy_rs::usb_functionfs::{FfsGadget, SharedAccessorySession};
 use aa_proxy_rs::usb_stream;
 use aa_proxy_rs::web;
 use aa_proxy_rs::web::ServerEvent;
 use clap::Parser;
 use humantime::format_duration;
 use simplelog::*;
-use std::os::unix::fs::PermissionsExt;
 use time::macros::format_description;
 
 use std::collections::HashMap;
@@ -73,10 +71,6 @@ const DNSMASQ_CONF_IN: &str = "/etc/dnsmasq.conf.in";
 const DNSMASQ_CONF_OUT: &str = "/var/run/dnsmasq.conf";
 const INTERFACES_IN: &str = "/etc/network/interfaces.in";
 const INTERFACES_OUT: &str = "/var/run/interfaces";
-const UMTPRD_CONF_IN: &str = "/etc/umtprd/umtprd.conf.in";
-const UMTPRD_CONF_OUT: &str = "/var/run/umtprd.conf";
-const GADGET_INIT_IN: &str = "/etc/S92usb_gadget.in";
-const GADGET_INIT_OUT: &str = "/var/run/S92usb_gadget";
 const REBOOT_CMD: &str = "/sbin/reboot";
 const DEFAULT_KERNEL_MODULE_PATH: &str = "/data/aa-proxy-rs/firmware";
 const FIRMWARE_CLASS_PATH_PARAM: &str = "/sys/module/firmware_class/parameters/path";
@@ -551,19 +545,26 @@ fn logging_init(debug: bool, disable_console_debug: bool, log_path: &PathBuf) {
 }
 
 async fn enable_usb_if_present(
-    usb: &mut Option<UsbGadgetState>,
-    accessory_started: Arc<Notify>,
+    usb: &mut Option<FfsGadget>,
+    hu_accessory: &SharedAccessorySession,
     require_accessory_start: bool,
 ) -> bool {
     if let Some(ref mut usb) = usb {
-        return usb
-            .enable_default_and_wait_for_accessory(accessory_started, require_accessory_start)
-            .await;
+        match usb
+            .wait_for_accessory_session(require_accessory_start)
+            .await
+        {
+            Some(session) => {
+                *hu_accessory.lock().await = Some(session);
+                return true;
+            }
+            None => return false,
+        }
     }
     true
 }
 
-async fn rearm_usb_if_present(usb: &mut Option<UsbGadgetState>, enabled: bool, cooldown_ms: u64) {
+async fn rearm_usb_if_present(usb: &mut Option<FfsGadget>, enabled: bool, cooldown_ms: u64) {
     if !enabled {
         return;
     }
@@ -665,12 +666,11 @@ async fn tokio_main(
     profile_connected: Arc<AtomicBool>,
     usb_connected: Arc<AtomicBool>,
     usb_accessory_ready: Arc<Notify>,
+    hu_accessory: SharedAccessorySession,
     ws_event_tx: broadcast::Sender<ServerEvent>,
     script_registry: Option<Arc<ScriptRegistry>>,
     web_only: bool,
 ) -> Result<()> {
-    let accessory_started = Arc::new(Notify::new());
-    let accessory_started_cloned = accessory_started.clone();
     // Set by the signal handler before it starts tearing the process down, so the
     // main connection loop below knows to stop instead of starting a new session.
     let shutdown_requested = Arc::new(AtomicBool::new(false));
@@ -832,11 +832,7 @@ async fn tokio_main(
         .ok();
     let mut usb = None;
     if !cfg.dhu {
-        if cfg.legacy {
-            // start uevent listener in own task
-            std::thread::spawn(|| uevent_listener(accessory_started_cloned));
-        }
-        usb = Some(UsbGadgetState::new(cfg.legacy, cfg.udc.clone()));
+        usb = Some(FfsGadget::new(cfg.legacy, cfg.udc.clone()));
     }
 
     if button_support {
@@ -988,7 +984,7 @@ async fn tokio_main(
         if cfg.change_usb_order {
             if !enable_usb_if_present(
                 &mut usb,
-                accessory_started.clone(),
+                &hu_accessory,
                 cfg.usb_gadget_require_accessory_start,
             )
             .await
@@ -1184,7 +1180,7 @@ async fn tokio_main(
         if !cfg.change_usb_order {
             if !enable_usb_if_present(
                 &mut usb,
-                accessory_started.clone(),
+                &hu_accessory,
                 cfg.usb_gadget_require_accessory_start,
             )
             .await
@@ -1312,45 +1308,6 @@ fn generate_network_conf(config: &AppConfig, input: &str, output: &str) -> std::
     fs::write(output, rendered)
 }
 
-fn generate_usb_strings(input: &str, output: &str) -> std::io::Result<()> {
-    info!(
-        "{} 🗃️ Generating config from input template: <bold><green>{}</>",
-        NAME, input
-    );
-
-    let template = fs::read_to_string(input)?;
-
-    let rendered = render_template(
-        &template,
-        &[
-            (
-                "MODEL",
-                &device_info::get_sbc_model()
-                    .map_or(String::new(), |model| format!(" ({})", model)),
-            ),
-            (
-                "SERIAL",
-                &get_serial_number().unwrap_or("0123456".to_string()),
-            ),
-            (
-                "FIRMWARE_VER",
-                &format!(
-                    "{}, git: {}-{}",
-                    env!("BUILD_DATE"),
-                    env!("GIT_DATE"),
-                    env!("GIT_HASH")
-                ),
-            ),
-        ],
-    );
-
-    info!(
-        "{} 💾 Saving generated file as: <bold><green>{}</>",
-        NAME, output
-    );
-    fs::write(output, rendered)
-}
-
 fn main() -> Result<()> {
     let started = Instant::now();
 
@@ -1392,23 +1349,10 @@ fn main() -> Result<()> {
 
     // generate system configs from template and exit
     if args.generate_system_config {
-        generate_usb_strings(UMTPRD_CONF_IN, UMTPRD_CONF_OUT)
-            .expect("error generating config from template");
         generate_network_conf(&config, DNSMASQ_CONF_IN, DNSMASQ_CONF_OUT)
             .expect("error generating config from template");
         generate_network_conf(&config, INTERFACES_IN, INTERFACES_OUT)
             .expect("error generating config from template");
-
-        generate_usb_strings(GADGET_INIT_IN, GADGET_INIT_OUT)
-            .expect("error generating config from template");
-        // make a script executable
-        info!(
-            "{} 🚀 Making script executable: <bold><green>{}</>",
-            NAME, GADGET_INIT_OUT
-        );
-        let mut perms = fs::metadata(GADGET_INIT_OUT)?.permissions();
-        perms.set_mode(0o755); // rwxr-xr-x
-        fs::set_permissions(GADGET_INIT_OUT, perms)?;
 
         return Ok(());
     }
@@ -1436,6 +1380,17 @@ fn main() -> Result<()> {
     info!("⚙️ I/O backend: <b><green>io_uring</> (kernel async I/O)");
     #[cfg(not(feature = "io-uring"))]
     info!("⚙️ I/O backend: <b><yellow>tokio async</> (standard async I/O)");
+
+    if cfg!(feature = "io-uring") && !config.dhu && !web_only {
+        error!(
+            "{} 🔴 the real USB-gadget (FunctionFS) head-unit path isn't supported yet in \
+             builds with the 'io-uring' feature (see src/usb_functionfs.rs for the why). \
+             Rebuild without 'io-uring', or set dhu=true to use the TCP head-unit-emulator \
+             path instead.",
+            NAME
+        );
+        std::process::exit(1);
+    }
 
     // check and display config
     if args.config.exists() {
@@ -1544,6 +1499,8 @@ fn main() -> Result<()> {
     let usb_connected_cloned = usb_connected.clone();
     let usb_accessory_ready = Arc::new(Notify::new());
     let usb_accessory_ready_cloned = usb_accessory_ready.clone();
+    let hu_accessory: SharedAccessorySession = Arc::new(Mutex::new(None));
+    let hu_accessory_cloned = hu_accessory.clone();
     let (ws_event_tx, _ws_event_rx) = broadcast::channel(256);
     let ws_event_tx_cloned = ws_event_tx.clone();
 
@@ -1626,6 +1583,7 @@ fn main() -> Result<()> {
             profile_connected_cloned,
             usb_connected_cloned,
             usb_accessory_ready_cloned,
+            hu_accessory_cloned,
             ws_event_tx_cloned,
             script_registry_cloned,
             web_only,
@@ -1656,6 +1614,7 @@ fn main() -> Result<()> {
                 companion_ip,
                 usb_connected,
                 usb_accessory_ready,
+                hu_accessory,
                 script_registry.clone(),
                 ws_event_tx.clone(),
                 shared_media_channels,

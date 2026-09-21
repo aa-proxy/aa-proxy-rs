@@ -2,7 +2,6 @@
 use crate::script_wasm::ScriptRegistry;
 #[cfg(not(feature = "wasm-scripting"))]
 type ScriptRegistry = ();
-use crate::io_backend::NativeFile;
 use crate::io_backend::NativeTcpStream;
 use crate::listener_ref;
 use crate::mitm::{
@@ -14,6 +13,7 @@ use crate::spawn;
 use crate::tcp_connect;
 use crate::tcp_listener_bind;
 use crate::tcp_shutdown;
+use crate::usb_functionfs::{AccessorySession, SharedAccessorySession};
 use crate::web::ServerEvent;
 use bytesize::ByteSize;
 use core::net::SocketAddr;
@@ -28,8 +28,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::fs::File as TokioFile;
-#[cfg(not(feature = "io-uring"))]
-use tokio::fs::OpenOptions;
 use tokio::io::{self, copy_bidirectional, AsyncBufReadExt, BufReader};
 #[cfg(not(feature = "io-uring"))]
 use tokio::net::tcp::OwnedWriteHalf;
@@ -43,8 +41,6 @@ use tokio::time::{sleep, timeout};
 #[cfg(feature = "io-uring")]
 use tokio_uring;
 #[cfg(feature = "io-uring")]
-use tokio_uring::fs::OpenOptions;
-#[cfg(feature = "io-uring")]
 use tokio_uring::net::TcpStream;
 use tokio_util::sync::CancellationToken;
 
@@ -55,7 +51,6 @@ const NAME: &str = "<i><bright-black> proxy: </>";
 // async contexts needs some extra restrictions
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-const USB_ACCESSORY_PATH: &str = "/dev/usb_accessory";
 // Bounded below the transfer-stall timeout (config.timeout_secs, default 10s) so a
 // missed/late notification can't outlast the stall detector, and above the observed
 // ~2-3s gadget-switch duration so the common case never actually waits this long.
@@ -668,6 +663,7 @@ pub async fn io_loop(
     companion_ip: SharedCompanionIp,
     usb_connected: Arc<AtomicBool>,
     usb_accessory_ready: Arc<Notify>,
+    hu_accessory: SharedAccessorySession,
     script_registry: Option<Arc<ScriptRegistry>>,
     ws_event_tx: BroadcastSender<ServerEvent>,
     shared_media_channels: SharedMediaChannels,
@@ -751,7 +747,7 @@ pub async fn io_loop(
         let mut md_tcp: Option<NativeTcpStream> = None;
         let mut md_usb = None; // type inferred from usb_stream::new()
         let mut hu_tcp: Option<NativeTcpStream> = None;
-        let mut hu_usb: Option<NativeFile> = None;
+        let mut hu_ffs: Option<AccessorySession> = None;
         let mut usb_used = false;
         // CancellationToken for tcp_bridge tasks spawned for this session
         let mut bridge_cancel: Option<CancellationToken> = None;
@@ -887,8 +883,8 @@ pub async fn io_loop(
             }
         } else {
             // The USB gadget switch to accessory mode (done by tokio_main /
-            // usb_gadget.rs) runs concurrently on a separate runtime and can
-            // take a couple of seconds. Opening the accessory node before that
+            // usb_functionfs.rs) runs concurrently on a separate runtime and can
+            // take a couple of seconds. Taking the accessory session before that
             // switch completes means no bytes ever reach the real UDC, which
             // trips the stall-detection timeout above every single session.
             // Wait for the "switched" signal first, bounded so a failed/skipped
@@ -898,31 +894,25 @@ pub async fn io_loop(
                 .is_err()
             {
                 warn!(
-                    "{} ⏳ Timed out waiting for USB gadget accessory-switch signal; opening anyway",
+                    "{} ⏳ Timed out waiting for USB gadget accessory-switch signal; checking anyway",
                     NAME
                 );
             }
 
-            info!(
-                "{} 📂 Opening USB accessory device: <u>{}</u>",
-                NAME, USB_ACCESSORY_PATH
-            );
-            match OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(false)
-                .open(USB_ACCESSORY_PATH)
-                .await
-            {
-                Ok(s) => hu_usb = Some(s),
-                Err(e) => {
-                    error!("{} 🔴 Error opening USB accessory: {}", NAME, e);
-                    // EBUSY (16): previous session's fd not yet released by kernel.
-                    // Without a delay, the main loop immediately fires another BT handshake,
-                    // causing rapid-fire "Connecting to Android Auto" notifications on the phone.
-                    if e.raw_os_error() == Some(libc::EBUSY) {
-                        tokio::time::sleep(Duration::from_secs(5)).await;
-                    }
+            match hu_accessory.lock().await.take() {
+                Some(session) => {
+                    info!("{} 🔌 Using FunctionFS accessory session", NAME);
+                    hu_ffs = Some(session);
+                }
+                None => {
+                    error!(
+                        "{} 🔴 No USB accessory session available (gadget setup failed)",
+                        NAME
+                    );
+                    // Mirrors the delay the old EBUSY handling used: without it, the main
+                    // loop immediately fires another BT handshake, causing rapid-fire
+                    // "Connecting to Android Auto" notifications on the phone.
+                    tokio::time::sleep(Duration::from_secs(5)).await;
                     // notify main loop to restart
                     let _ = need_restart.send(None);
                     continue;
@@ -1017,17 +1007,14 @@ pub async fn io_loop(
                 md_w = IoDevice::EndpointIo(md.clone());
                 md_tcp_stream = Some(md.clone());
             }
-            // HU transfer device
-            if let Some(hu) = hu_usb {
-                // HU connected directly via USB
-                let hu = Rc::new(hu);
-                hu_r = IoDevice::EndpointIo(hu.clone());
-                hu_w = IoDevice::EndpointIo(hu.clone());
-            } else {
+            // HU transfer device: real USB-gadget FunctionFS mode isn't supported in
+            // io-uring builds yet (main.rs refuses to start it — see
+            // src/usb_functionfs.rs), so this arm only ever sees the TCP emulator.
+            {
                 // Head Unit Emulator via TCP
                 let hu = Rc::new(hu_tcp.unwrap());
-                hu_r = IoDevice::TcpStreamIo(hu.clone());
-                hu_w = IoDevice::TcpStreamIo(hu.clone());
+                hu_r = IoDevice::<TcpStream>::TcpStreamIo(hu.clone());
+                hu_w = IoDevice::<TcpStream>::TcpStreamIo(hu.clone());
                 hu_tcp_stream = Some(hu.clone());
             }
         }
@@ -1054,19 +1041,10 @@ pub async fn io_loop(
                 md_tcp_stream = Some(write_half);
             }
             // HU transfer device
-            if let Some(hu) = hu_usb {
-                // HU connected directly via USB
-                use std::os::unix::io::{AsRawFd, FromRawFd};
-                let fd2 = unsafe { libc::dup(hu.as_raw_fd()) };
-                if fd2 < 0 {
-                    error!("{} 🔴 dup() failed for USB accessory", NAME);
-                    let _ = need_restart.send(None);
-                    continue;
-                }
-                let hu_w_file = unsafe { std::fs::File::from_raw_fd(fd2) };
-                let hu_w_file = TokioFile::from_std(hu_w_file);
-                hu_r = IoDevice::FileIo(Arc::new(Mutex::new(hu)));
-                hu_w = IoDevice::FileIo(Arc::new(Mutex::new(hu_w_file)));
+            if let Some(hu) = hu_ffs {
+                // HU connected via the FunctionFS accessory gadget
+                hu_r = IoDevice::FfsReader(Arc::new(Mutex::new(hu.reader)));
+                hu_w = IoDevice::FfsWriter(Arc::new(Mutex::new(hu.writer)));
             } else {
                 // Head Unit Emulator via TCP
                 let stream = hu_tcp.unwrap();
