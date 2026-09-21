@@ -237,6 +237,23 @@ impl FfsGadget {
         }
     }
 
+    /// A failed `Gadget::bind()`/`register()` can leave a partially-built
+    /// gadget directory behind in configfs: registration happens in
+    /// several small steps (mkdir, write descriptors, register the
+    /// function...), and if it fails partway through, the crate hasn't
+    /// constructed a `RegGadget` yet at that point, so there's nothing
+    /// for `teardown_active()` (or that failed attempt's own `Drop`) to
+    /// clean up. Left alone, these stray directories pile up across
+    /// retries and can end up blocking the *next* bind attempt too, even
+    /// a completely unrelated one (e.g. the accessory stage after a
+    /// failed MTP stage) — so sweep them up after every failed attempt,
+    /// not just between sessions.
+    fn sweep_stray_gadgets(&self) {
+        if let Err(e) = usb_gadget::remove_all() {
+            debug!("{} 🔌 USB Manager: stray-gadget sweep: {e:#}", NAME);
+        }
+    }
+
     /// Runs the AOA handshake (optionally preceded by the MTP-class
     /// "legacy" stage) and returns the resulting bulk read/write pipes.
     ///
@@ -271,14 +288,16 @@ impl FfsGadget {
         const MAX_TRIES: u32 = 2;
 
         self.teardown_active().await;
+        self.sweep_stray_gadgets();
 
         let udc = match self.select_udc() {
             Ok(udc) => udc,
             Err(e) => {
-                warn!("{} 🔌 USB Manager: {e}", NAME);
+                warn!("{} 🔌 USB Manager: {e:#}", NAME);
                 return None;
             }
         };
+        info!("{} 🔌 USB Manager: using UDC {:?}", NAME, udc.name());
 
         if self.legacy {
             let mut got_start = false;
@@ -290,10 +309,11 @@ impl FfsGadget {
                     }
                     Err(e) => {
                         warn!(
-                            "{} 🔌 USB Manager: MTP stage failed (try {try_n}/{MAX_TRIES}): {e}",
+                            "{} 🔌 USB Manager: MTP stage failed (try {try_n}/{MAX_TRIES}): {e:#}",
                             NAME
                         );
                         self.teardown_active().await;
+                        self.sweep_stray_gadgets();
                         tokio::time::sleep(Duration::from_millis(100)).await;
                     }
                 }
@@ -324,10 +344,11 @@ impl FfsGadget {
             Ok(session) => Some(session),
             Err(e) => {
                 warn!(
-                    "{} 🔌 USB Manager: failed to enable accessory gadget: {e}",
+                    "{} 🔌 USB Manager: failed to enable accessory gadget: {e:#}",
                     NAME
                 );
                 self.teardown_active().await;
+                self.sweep_stray_gadgets();
                 None
             }
         }
