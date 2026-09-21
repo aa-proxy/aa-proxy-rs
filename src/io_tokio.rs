@@ -7,9 +7,9 @@ use crate::io_backend::GenericTcpStream;
 use crate::io_backend::IoDevice as IoDeviceTrait;
 use crate::mitm::{FRAME_TYPE_FIRST, FRAME_TYPE_MASK, HEADER_LENGTH};
 use crate::proxy::BUFFER_LEN;
+use crate::usb_functionfs::{FfsRead, FfsWrite};
 use crate::usb_stream::{UsbStreamRead, UsbStreamWrite};
 use std::sync::Arc;
-use tokio::fs::File as TokioFile;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::Mutex;
@@ -23,7 +23,8 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>
 pub enum IoDevice {
     UsbReader(Arc<Mutex<UsbStreamRead>>),
     UsbWriter(Arc<Mutex<UsbStreamWrite>>),
-    FileIo(Arc<Mutex<TokioFile>>),
+    FfsReader(Arc<Mutex<FfsRead>>),
+    FfsWriter(Arc<Mutex<FfsWrite>>),
     TcpRead(Arc<Mutex<OwnedReadHalf>>),
     TcpWrite(Arc<Mutex<OwnedWriteHalf>>),
 }
@@ -35,9 +36,9 @@ impl IoDevice {
                 let mut d = dev.lock().await;
                 d.read(buf).await
             }
-            IoDevice::FileIo(file) => {
-                let mut f = file.lock().await;
-                f.read(buf).await
+            IoDevice::FfsReader(dev) => {
+                let mut d = dev.lock().await;
+                d.read(buf).await
             }
             IoDevice::TcpRead(reader) => {
                 let mut r = reader.lock().await;
@@ -46,6 +47,10 @@ impl IoDevice {
             IoDevice::UsbWriter(_) => Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
                 "cannot read from UsbWriter",
+            )),
+            IoDevice::FfsWriter(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "cannot read from FfsWriter",
             )),
             IoDevice::TcpWrite(_) => Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
@@ -60,9 +65,9 @@ impl IoDevice {
                 let mut d = dev.lock().await;
                 d.write(buf).await
             }
-            IoDevice::FileIo(file) => {
-                let mut f = file.lock().await;
-                f.write(buf).await
+            IoDevice::FfsWriter(dev) => {
+                let mut d = dev.lock().await;
+                d.write(buf).await
             }
             IoDevice::TcpWrite(writer) => {
                 let mut w = writer.lock().await;
@@ -71,6 +76,10 @@ impl IoDevice {
             IoDevice::UsbReader(_) => Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
                 "cannot write to UsbReader",
+            )),
+            IoDevice::FfsReader(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "cannot write to FfsReader",
             )),
             IoDevice::TcpRead(_) => Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
