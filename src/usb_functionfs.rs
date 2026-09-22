@@ -36,6 +36,7 @@ use crate::ffs_io::{IntoSinkWriter, IntoStreamReader};
 use crate::mtp::mtp_server::MtpServer;
 use anyhow::{anyhow, Context, Result};
 use simplelog::*;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -49,6 +50,7 @@ use usb_gadget::function::custom::{
     Custom, Endpoint, EndpointDirection, EndpointReceiver, EndpointSender, Event, Interface,
     OsExtCompat, TransferType,
 };
+use usb_gadget::function::msd::Msd;
 use usb_gadget::{udcs, Class, Config, Gadget, Id, RegGadget, Strings, Udc};
 
 // module name for logging engine (matches the style of the other modules)
@@ -172,6 +174,12 @@ pub struct FfsGadget {
     // umtprd.conf.in's FIRMWARE_VER (build date + git rev), not a USB
     // bcdDevice.
     firmware_version: String,
+    // Backing file or block device for an optional mass-storage LUN
+    // presented alongside the accessory interface (e.g. a FAT-formatted
+    // disk image, or a raw partition like /dev/mmcblk0p5). `None` (the
+    // default) keeps the old behavior exactly — no mass-storage function
+    // is added at all.
+    usb_stick: Option<PathBuf>,
     active: Option<ActiveGadget>,
 }
 
@@ -183,13 +191,21 @@ impl FfsGadget {
     /// accessory" dance. When `false`, go straight to the Accessory
     /// interface (matches the old "non-legacy" behavior).
     ///
+    /// `usb_stick`, when set, is the backing file or block device (e.g. a
+    /// FAT-formatted disk image, or a raw partition like
+    /// `/dev/mmcblk0p5`) for a USB mass-storage LUN added to the
+    /// accessory gadget alongside the AOA interface, so the head unit
+    /// sees a "USB stick" for the duration of the session. `None`/unset
+    /// (the config default) reproduces the exact old behavior: no
+    /// mass-storage function at all.
+    ///
     /// Manufacturer/product/serial and the MTP-stage identity below are
     /// deliberately the exact same values the old `S92usb_gadget.in` /
     /// `umtprd.conf.in` templates used to fill in (same "aa-proxy{model}"
     /// naming, same VID/PID, same bcdDevice for the MTP-stage gadget) —
     /// this is proven, hardware-tested identity, not something to
     /// reinvent.
-    pub fn new(legacy: bool, udc_name: Option<String>) -> Self {
+    pub fn new(legacy: bool, udc_name: Option<String>, usb_stick: Option<String>) -> Self {
         let model = device_info::get_sbc_model()
             .map(|m| format!(" ({m})"))
             .unwrap_or_default();
@@ -207,6 +223,7 @@ impl FfsGadget {
             product: format!("aa-proxy{model}"),
             serial,
             firmware_version,
+            usb_stick: usb_stick.map(PathBuf::from),
             active: None,
         }
     }
@@ -480,12 +497,41 @@ impl FfsGadget {
 
         let (mut custom, handle) = builder.build();
 
+        let mut config = Config::new("config").with_function(handle);
+        if let Some(path) = &self.usb_stick {
+            if path.exists() {
+                match Msd::new(path) {
+                    Ok((_msd, msd_handle)) => {
+                        config = config.with_function(msd_handle);
+                        info!(
+                            "{} 🔌 attaching USB mass-storage LUN: {}",
+                            NAME,
+                            path.display()
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            "{} 🔌 USB Manager: failed to set up mass-storage LUN ({}): {e:#}",
+                            NAME,
+                            path.display()
+                        );
+                    }
+                }
+            } else {
+                warn!(
+                    "{} 🔌 USB Manager: configured usb_stick path not found, skipping: {}",
+                    NAME,
+                    path.display()
+                );
+            }
+        }
+
         let gadget = Gadget::new(
             Class::INTERFACE_SPECIFIC,
             Id::new(AOA_ACCESSORY_VID, AOA_ACCESSORY_PID),
             Strings::new(&self.manufacturer, &self.product, &self.serial),
         )
-        .with_config(Config::new("config").with_function(handle));
+        .with_config(config);
 
         let reg = gadget.bind(udc).context("binding accessory gadget")?;
         info!(

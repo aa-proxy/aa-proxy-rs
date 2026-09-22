@@ -555,6 +555,13 @@ pub struct AppConfig {
     pub stats_interval: u16,
     #[serde(default, deserialize_with = "empty_string_as_none")]
     pub udc: Option<String>,
+    /// Optional backing file or block device for a USB mass-storage LUN
+    /// presented alongside the accessory interface (e.g. a FAT-formatted
+    /// disk image, or a raw partition like `/dev/mmcblk0p5`), so the
+    /// head unit sees a "USB stick" at the same time as Android Auto.
+    /// Unset/empty keeps the old behavior (no mass-storage function at all).
+    #[serde(default, deserialize_with = "empty_string_as_none")]
+    pub usb_stick: Option<String>,
     pub iface: String,
     pub wlan_subnet: String,
     #[serde(default, deserialize_with = "empty_string_as_none")]
@@ -990,6 +997,7 @@ impl Default for AppConfig {
             inject_displays_file: DEFAULT_INJECT_DISPLAYS_FILE.into(),
             stats_interval: 0,
             udc: None,
+            usb_stick: None,
             iface: "wlan0".to_string(),
             wlan_subnet: "10.0.0".to_string(),
             btalias: None,
@@ -1337,6 +1345,9 @@ impl AppConfig {
         doc["stats_interval"] = value(self.stats_interval as i64);
         if let Some(udc) = &self.udc {
             doc["udc"] = value(udc);
+        }
+        if let Some(usb_stick) = &self.usb_stick {
+            doc["usb_stick"] = value(usb_stick);
         }
         doc["iface"] = value(&self.iface);
         if let Some(alias) = &self.btalias {
