@@ -352,6 +352,11 @@
           "description": "UDC controller name (used in special configurations)",
           "advanced": true
         },
+        "usb_stick": {
+          "typ": "string",
+          "description": "Path to a disk image file (e.g. FAT-formatted) or a block device (e.g. /dev/mmcblk0p5) presented as a USB mass-storage device to the HU alongside the accessory interface, for the duration of the AA session. Empty/unset: no mass-storage function is added (old behavior).",
+          "advanced": true
+        },
         "change_usb_order": {
           "typ": "boolean",
           "description": "Connect to HU USB before Bluetooth handshake",

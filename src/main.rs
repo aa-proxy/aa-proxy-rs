@@ -832,7 +832,11 @@ async fn tokio_main(
         .ok();
     let mut usb = None;
     if !cfg.dhu {
-        usb = Some(FfsGadget::new(cfg.legacy, cfg.udc.clone()));
+        usb = Some(FfsGadget::new(
+            cfg.legacy,
+            cfg.udc.clone(),
+            cfg.usb_stick.clone(),
+        ));
     }
 
     if button_support {
