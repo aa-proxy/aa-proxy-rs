@@ -185,8 +185,8 @@ async fn tcp_bridge(
     cancel: CancellationToken,
     require_local_before_remote: bool,
 ) {
-    let mut remote_attempts: u64 = 0;
     let mut local_unavailable_attempts: u64 = 0;
+    let mut remote_unavailable: bool = false;
 
     loop {
         if require_local_before_remote {
@@ -245,18 +245,10 @@ async fn tcp_bridge(
             }
         }
 
-        remote_attempts += 1;
-        if remote_attempts == 1 || remote_attempts % 10 == 0 {
-            info!(
-                "{} tcp_bridge[{}]: connecting remote={} local={}",
-                NAME, label, remote_addr, local_addr
-            );
-        } else {
-            debug!(
-                "{} tcp_bridge[{}]: connecting remote={} local={}",
-                NAME, label, remote_addr, local_addr
-            );
-        }
+        debug!(
+            "{} tcp_bridge[{}]: connecting remote={} local={}",
+            NAME, label, remote_addr, local_addr
+        );
 
         let connect_result = tokio::select! {
             _ = cancel.cancelled() => {
@@ -268,9 +260,10 @@ async fn tcp_bridge(
 
         match connect_result {
             Err(_) => {
-                if remote_attempts == 1 || remote_attempts % 10 == 0 {
+                if !remote_unavailable {
+                    remote_unavailable = true;
                     info!(
-                        "{} tcp_bridge[{}]: timeout connecting to remote server {}",
+                        "{} tcp_bridge[{}]: remote server {} unavailable (timeout)",
                         NAME, label, remote_addr
                     );
                 } else {
@@ -281,9 +274,10 @@ async fn tcp_bridge(
                 }
             }
             Ok(Err(e)) => {
-                if remote_attempts == 1 || remote_attempts % 10 == 0 {
+                if !remote_unavailable {
+                    remote_unavailable = true;
                     info!(
-                        "{} tcp_bridge[{}]: failed to connect to remote server {}: {}",
+                        "{} tcp_bridge[{}]: remote server {} unavailable ({})",
                         NAME, label, remote_addr, e
                     );
                 } else {
@@ -294,6 +288,14 @@ async fn tcp_bridge(
                 }
             }
             Ok(Ok(mut remote)) => {
+                if remote_unavailable {
+                    info!(
+                        "{} tcp_bridge[{}]: remote server {} available again",
+                        NAME, label, remote_addr
+                    );
+                    remote_unavailable = false;
+                }
+
                 debug!(
                     "{} tcp_bridge[{}]: remote connected: {}",
                     NAME, label, remote_addr
