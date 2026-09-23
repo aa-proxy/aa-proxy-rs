@@ -303,6 +303,11 @@ impl FfsGadget {
     ) -> Option<AccessorySession> {
         const MTP_WAIT_TIMEOUT: Duration = Duration::from_secs(6);
         const MAX_TRIES: u32 = 2;
+        // How long to wait after tearing a failed gadget down before trying
+        // again. Deliberately generous (not just "a moment") — too short a
+        // gap has been observed to leave old/slow UDC drivers (dwc2 on a
+        // 4.4 kernel) in a stuck state after a few rapid rebind attempts.
+        const RETRY_SETTLE_DELAY: Duration = Duration::from_millis(1000);
 
         self.teardown_active().await;
         self.sweep_stray_gadgets();
@@ -331,7 +336,13 @@ impl FfsGadget {
                         );
                         self.teardown_active().await;
                         self.sweep_stray_gadgets();
-                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        // Old/slow UDC drivers (seen on a 4.4 kernel dwc2
+                        // controller) can need real time to fully drop the
+                        // previous gadget before a fresh bind attempt
+                        // succeeds; a too-short gap here reproduced as a
+                        // rapid connect/disconnect storm in dmesg that
+                        // eventually left the controller stuck.
+                        tokio::time::sleep(RETRY_SETTLE_DELAY).await;
                     }
                 }
             }
@@ -348,6 +359,7 @@ impl FfsGadget {
                     "{} 🔌 USB Manager: proceeding straight to the accessory gadget anyway",
                     NAME
                 );
+                tokio::time::sleep(RETRY_SETTLE_DELAY).await;
             } else {
                 info!("{} 🔌 USB Manager: switching to accessory gadget", NAME);
                 // let the host perceive the interface change, same as the
@@ -600,6 +612,7 @@ fn handle_ep0_event(event: Event) -> bool {
             if (request_type & USB_TYPE_MASK) == USB_TYPE_VENDOR {
                 match request {
                     AOA_GET_PROTOCOL => {
+                        info!("{} received AOA GET_PROTOCOL", NAME);
                         let _ = req.send(&[0x02, 0x00]);
                     }
                     _ => {
@@ -652,7 +665,9 @@ fn handle_ep0_event(event: Event) -> bool {
             }
         }
 
-        _ => {}
+        other => {
+            info!("{} ep0 event: {other:?}", NAME);
+        }
     }
 
     false
