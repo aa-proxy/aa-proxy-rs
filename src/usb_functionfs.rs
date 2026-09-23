@@ -41,7 +41,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_util::io::{SinkWriter, StreamReader};
@@ -440,18 +440,15 @@ impl FfsGadget {
         // *not* the AAWireless POC's "Google"/"Nexus"/"1.0" placeholder
         // identity: this is the real, proven identity for this project,
         // no need to guess when we have it.
-        let mut mtp_server = MtpServer::new(
+        let mut mtp_server_slot = Some(MtpServer::new(
             &self.manufacturer,
             &self.product,
             &self.firmware_version,
             &self.serial,
             &self.product,
-        );
-        let mtp_task = tokio::spawn(async move {
-            if let Err(e) = mtp_server.start(mtp_ep1, mtp_ep2).await {
-                debug!("{} MTP responder stopped: {e}", NAME);
-            }
-        });
+        ));
+        let mut mtp_endpoints = Some((mtp_ep1, mtp_ep2));
+        let mut mtp_task: Option<JoinHandle<()>> = None;
 
         let deadline = tokio::time::Instant::now() + wait_timeout;
         let result = loop {
@@ -465,6 +462,26 @@ impl FfsGadget {
             match timeout(remaining, custom.wait_event()).await {
                 Ok(Ok(())) => match custom.event() {
                     Ok(event) => {
+                        if matches!(&event, Event::Enable) {
+                            if let (Some(mut server), Some((ep1, ep2))) =
+                                (mtp_server_slot.take(), mtp_endpoints.take())
+                            {
+                                // Only start the MTP responder once the host
+                                // has actually finished enumeration
+                                // (FunctionFS FUNCTIONFS_ENABLE) — on a
+                                // slow/old UDC driver, touching the bulk
+                                // endpoints any earlier (their
+                                // max_packet_size() specifically) has been
+                                // observed to fail outright with ENODEV
+                                // rather than just being slow (see the same
+                                // fix in `run_accessory_stage`).
+                                mtp_task = Some(tokio::spawn(async move {
+                                    if let Err(e) = server.start(ep1, ep2).await {
+                                        debug!("{} MTP responder stopped: {e}", NAME);
+                                    }
+                                }));
+                            }
+                        }
                         if handle_ep0_event(event) {
                             break Ok(());
                         }
@@ -476,7 +493,9 @@ impl FfsGadget {
             }
         };
 
-        mtp_task.abort();
+        if let Some(task) = mtp_task {
+            task.abort();
+        }
         let _ = reg.remove();
         result
     }
@@ -551,6 +570,8 @@ impl FfsGadget {
             NAME, AOA_ACCESSORY_VID, AOA_ACCESSORY_PID
         );
 
+        let enabled = Arc::new(Notify::new());
+        let enabled_bg = enabled.clone();
         let cancel = CancellationToken::new();
         let cancel_bg = cancel.clone();
         let ep0_task = tokio::spawn(async move {
@@ -563,13 +584,37 @@ impl FfsGadget {
                             break;
                         }
                         match custom.event() {
-                            Ok(event) => { handle_ep0_event(event); }
+                            Ok(event) => {
+                                if matches!(&event, Event::Enable) {
+                                    enabled_bg.notify_one();
+                                }
+                                handle_ep0_event(event);
+                            }
                             Err(e) => debug!("{} accessory ep0: event() error: {e}", NAME),
                         }
                     }
                 }
             }
         });
+
+        // The bulk endpoint files only become truly usable once the host has
+        // finished enumerating this gadget (FunctionFS FUNCTIONFS_ENABLE,
+        // i.e. `Event::Enable` above) — on a slow/old UDC driver, querying
+        // them (via `FfsRead`/`FfsWrite`'s `max_packet_size()`) any earlier
+        // has been observed to fail outright with ENODEV rather than just
+        // being slow. Wait for it, bounded, before touching them; if it
+        // never comes within the window, fall through and try anyway
+        // (matches this function's overall "don't block forever" style).
+        const ENABLE_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+        if timeout(ENABLE_WAIT_TIMEOUT, enabled.notified())
+            .await
+            .is_err()
+        {
+            debug!(
+                "{} accessory: no ENABLE event seen within {ENABLE_WAIT_TIMEOUT:?}, trying anyway",
+                NAME
+            );
+        }
 
         let reader = FfsRead::new(ep_out).context("setting up accessory read pipe")?;
         let writer = FfsWrite::new(ep_in).context("setting up accessory write pipe")?;
