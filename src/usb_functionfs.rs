@@ -477,7 +477,7 @@ impl FfsGadget {
                                 // fix in `run_accessory_stage`).
                                 mtp_task = Some(tokio::spawn(async move {
                                     if let Err(e) = server.start(ep1, ep2).await {
-                                        debug!("{} MTP responder stopped: {e}", NAME);
+                                        info!("{} MTP responder stopped: {e}", NAME);
                                     }
                                 }));
                             }
@@ -610,7 +610,7 @@ impl FfsGadget {
             .await
             .is_err()
         {
-            debug!(
+            info!(
                 "{} accessory: no ENABLE event seen within {ENABLE_WAIT_TIMEOUT:?}, trying anyway",
                 NAME
             );
