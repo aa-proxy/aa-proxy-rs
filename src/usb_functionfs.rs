@@ -572,7 +572,30 @@ impl FfsGadget {
         let mut config = Config::new("config").with_function(handle);
         if attempt_usb_stick {
             if let Some(path) = &self.usb_stick {
-                if path.exists() {
+                if !path.exists() {
+                    warn!(
+                        "{} 🔌 USB Manager: configured usb_stick path not found, skipping: {}",
+                        NAME,
+                        path.display()
+                    );
+                } else if let Some(mount_point) = currently_mounted_at(path) {
+                    // Handing a block device (or its backing file) that's
+                    // *currently mounted* to the mass-storage driver means
+                    // two independent paths (the kernel's own filesystem
+                    // and the USB host) can write to the same blocks at
+                    // once. Best case: silent corruption. Worst case, seen
+                    // on at least one board here: the whole system reboots
+                    // as soon as anything touches it. Refuse outright
+                    // rather than attempt it.
+                    warn!(
+                        "{} 🔌 USB Manager: usb_stick {} is currently mounted at {} — refusing \
+                         to also expose it as USB mass storage (this can corrupt data or crash \
+                         the board); skipping",
+                        NAME,
+                        path.display(),
+                        mount_point.display()
+                    );
+                } else {
                     match Msd::new(path) {
                         Ok((_msd, msd_handle)) => {
                             config = config.with_function(msd_handle);
@@ -590,12 +613,6 @@ impl FfsGadget {
                             );
                         }
                     }
-                } else {
-                    warn!(
-                        "{} 🔌 USB Manager: configured usb_stick path not found, skipping: {}",
-                        NAME,
-                        path.display()
-                    );
                 }
             }
         }
@@ -671,6 +688,28 @@ impl FfsGadget {
 
         Ok(AccessorySession { reader, writer })
     }
+}
+
+/// Returns the mount point if `path` (typically a block device like
+/// `/dev/mmcblk0p3`) is currently mounted anywhere, by scanning
+/// `/proc/mounts`. Best-effort: only catches the "it's a block device
+/// that's an active mount source" case — the one that's actually
+/// dangerous (the kernel's own filesystem and the USB host both writing
+/// to the same blocks at once) — not loop-mounted disk image files traced
+/// back to their mount.
+fn currently_mounted_at(path: &std::path::Path) -> Option<PathBuf> {
+    let canonical = std::fs::canonicalize(path).ok()?;
+    let mounts = std::fs::read_to_string("/proc/mounts").ok()?;
+    for line in mounts.lines() {
+        let mut fields = line.split_whitespace();
+        let (Some(source), Some(mount_point)) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        if std::fs::canonicalize(source).ok().as_deref() == Some(canonical.as_path()) {
+            return Some(PathBuf::from(mount_point));
+        }
+    }
+    None
 }
 
 /// Same file `main.rs::get_serial_number()` reads; duplicated here (rather
