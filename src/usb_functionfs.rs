@@ -369,8 +369,40 @@ impl FfsGadget {
             }
         }
 
-        match self.run_accessory_stage(&udc).await {
+        match self
+            .run_accessory_stage(&udc, self.usb_stick.is_some())
+            .await
+        {
             Ok(session) => Some(session),
+            Err(e) if self.usb_stick.is_some() => {
+                // Could be the mass-storage LUN specifically (wrong
+                // permissions, a write-protected/busy block device, etc.)
+                // — that shouldn't take the whole Android Auto session down
+                // with it. Retry once without it; if the accessory gadget
+                // binds fine on its own, the LUN really was the problem.
+                warn!(
+                    "{} 🔌 USB Manager: failed to enable accessory gadget with usb_stick attached: {e:#}",
+                    NAME
+                );
+                warn!(
+                    "{} 🔌 USB Manager: retrying without the USB mass-storage LUN",
+                    NAME
+                );
+                self.teardown_active().await;
+                self.sweep_stray_gadgets();
+                match self.run_accessory_stage(&udc, false).await {
+                    Ok(session) => Some(session),
+                    Err(e) => {
+                        warn!(
+                            "{} 🔌 USB Manager: failed to enable accessory gadget (without usb_stick too): {e:#}",
+                            NAME
+                        );
+                        self.teardown_active().await;
+                        self.sweep_stray_gadgets();
+                        None
+                    }
+                }
+            }
             Err(e) => {
                 warn!(
                     "{} 🔌 USB Manager: failed to enable accessory gadget: {e:#}",
@@ -511,7 +543,16 @@ impl FfsGadget {
     /// already on it). A background task keeps servicing ep0 for the life
     /// of the session so the host's other control requests (there
     /// shouldn't normally be many) don't stall.
-    async fn run_accessory_stage(&mut self, udc: &Udc) -> Result<AccessorySession> {
+    /// `attempt_usb_stick`: whether to try attaching the configured
+    /// `usb_stick` mass-storage LUN this time — see the retry-without-it
+    /// logic in the caller (`wait_for_accessory_session`), which sets this
+    /// to `false` on a second attempt if attaching it caused the whole
+    /// gadget bind to fail.
+    async fn run_accessory_stage(
+        &mut self,
+        udc: &Udc,
+        attempt_usb_stick: bool,
+    ) -> Result<AccessorySession> {
         let (ep_out, ep_out_dir) = EndpointDirection::host_to_device();
         let (ep_in, ep_in_dir) = EndpointDirection::device_to_host();
 
@@ -529,31 +570,33 @@ impl FfsGadget {
         let (mut custom, handle) = builder.build();
 
         let mut config = Config::new("config").with_function(handle);
-        if let Some(path) = &self.usb_stick {
-            if path.exists() {
-                match Msd::new(path) {
-                    Ok((_msd, msd_handle)) => {
-                        config = config.with_function(msd_handle);
-                        info!(
-                            "{} 🔌 attaching USB mass-storage LUN: {}",
-                            NAME,
-                            path.display()
-                        );
+        if attempt_usb_stick {
+            if let Some(path) = &self.usb_stick {
+                if path.exists() {
+                    match Msd::new(path) {
+                        Ok((_msd, msd_handle)) => {
+                            config = config.with_function(msd_handle);
+                            info!(
+                                "{} 🔌 attaching USB mass-storage LUN: {}",
+                                NAME,
+                                path.display()
+                            );
+                        }
+                        Err(e) => {
+                            warn!(
+                                "{} 🔌 USB Manager: failed to set up mass-storage LUN ({}): {e:#}",
+                                NAME,
+                                path.display()
+                            );
+                        }
                     }
-                    Err(e) => {
-                        warn!(
-                            "{} 🔌 USB Manager: failed to set up mass-storage LUN ({}): {e:#}",
-                            NAME,
-                            path.display()
-                        );
-                    }
+                } else {
+                    warn!(
+                        "{} 🔌 USB Manager: configured usb_stick path not found, skipping: {}",
+                        NAME,
+                        path.display()
+                    );
                 }
-            } else {
-                warn!(
-                    "{} 🔌 USB Manager: configured usb_stick path not found, skipping: {}",
-                    NAME,
-                    path.display()
-                );
             }
         }
 
