@@ -390,6 +390,7 @@ impl FfsGadget {
                 );
                 self.teardown_active().await;
                 self.sweep_stray_gadgets();
+                tokio::time::sleep(RETRY_SETTLE_DELAY).await;
                 match self.run_accessory_stage(&udc, false).await {
                     Ok(session) => Some(session),
                     Err(e) => {
