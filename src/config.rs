@@ -651,7 +651,6 @@ pub struct AppConfig {
     pub ev_battery_logger: Option<String>,
     pub ev_connector_types: EvConnectorTypes,
     pub enable_ssh: bool,
-    pub usb_serial_console: bool,
     pub wifi_version: u16,
     pub band: String,
     pub country_code: String,
@@ -1052,7 +1051,6 @@ impl Default for AppConfig {
             action_requested: None,
             ev_connector_types: EvConnectorTypes::default(),
             enable_ssh: true,
-            usb_serial_console: false,
             wifi_version: get_latest_wifi_version_from(&iw_cache).unwrap_or(1),
             band: if supports_5ghz_wifi_cached(&iw_cache) {
                 // Eventually: Add check for 6 GHz
@@ -1408,7 +1406,6 @@ impl AppConfig {
         }
         doc["ev_connector_types"] = value(self.ev_connector_types.to_string());
         doc["enable_ssh"] = value(self.enable_ssh);
-        doc["usb_serial_console"] = value(self.usb_serial_console);
         doc["wifi_version"] = value(self.wifi_version as i64);
         doc["band"] = value(self.band.to_string());
         doc["country_code"] = value(&self.country_code);

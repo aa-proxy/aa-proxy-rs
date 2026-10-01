@@ -888,10 +888,6 @@
         "aa_server_tcp_addr": {
           "typ": "string",
           "description": "Optional direct TCP address for the Android Auto Head Unit Server on the phone/MD side, e.g. `127.0.0.1:5278` or `192.168.1.9:5279`. Leave empty to keep the normal USB/Bluetooth/Wi-Fi MD transport. When set, aa-proxy-rs skips the Bluetooth/Wi-Fi AA handshake and opens this TCP connection only after the HU/DHU side is ready. Also don't forget to run `socat TCP-LISTEN:5279,bind=0.0.0.0,reuseaddr,fork TCP:127.0.0.1:5278`."
-        },
-        "usb_serial_console": {
-          "typ": "boolean",
-          "description": "Enable the USB serial gadget (ttyGS0) for low-level console debugging. Should be disabled during normal Android Auto operation."
         }
       }
     },
