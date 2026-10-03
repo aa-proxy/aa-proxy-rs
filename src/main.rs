@@ -973,6 +973,12 @@ async fn tokio_main(
                 error!("{} 🔌 USB init error: {}", NAME, e);
             }
         }
+        // init() just removed every gadget, so an accessory session (and its
+        // "ready" signal) left over from a previous iteration that restarted
+        // before io_loop took it now refers to a dead gadget. Drop both, or
+        // the next phone connection would be relayed to dead endpoints.
+        *hu_accessory.lock().await = None;
+        let _ = tokio::time::timeout(Duration::ZERO, usb_accessory_ready.notified()).await;
 
         let wired_usb_present = cfg.wired.is_some() && usb_stream::is_present(&cfg.wired);
         if let Some(ref mut bluetooth) = bluetooth {
