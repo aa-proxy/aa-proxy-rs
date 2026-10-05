@@ -878,13 +878,36 @@ fn filter_iw_list_cached(iw_output: &str, pattern: &str) -> bool {
     iw_output.lines().any(|line| line.contains(pattern))
 }
 
+/// Check whether any frequency line of the `iw list` output (e.g. `* 5180 MHz [36] (20.0 dBm)`
+/// or `* 5180.0 MHz [36] (20.0 dBm)`) falls into `range_mhz`.
+/// Depending on the iw version / driver the frequency is printed with or without the
+/// fractional part, so we parse the number instead of matching a fixed string.
+fn iw_has_freq_in_range(iw_output: &str, range_mhz: std::ops::RangeInclusive<u32>) -> bool {
+    iw_output.lines().any(|line| {
+        let mut parts = line.split_whitespace();
+        if parts.next() != Some("*") {
+            return false;
+        }
+        let freq = match parts.next().and_then(|f| f.parse::<f32>().ok()) {
+            Some(f) => f,
+            None => return false,
+        };
+        // "* 6.0 Mbps" etc. must not match
+        if parts.next() != Some("MHz") {
+            return false;
+        }
+        range_mhz.contains(&(freq.round() as u32))
+    })
+}
+
 fn supports_5ghz_wifi_cached(iw_output: &str) -> bool {
-    filter_iw_list_cached(iw_output, "5180.0 MHz")
+    // 5 GHz band: 5150-5895 MHz (6 GHz starts at 5925 MHz)
+    iw_has_freq_in_range(iw_output, 5150..=5895)
 }
 
 fn get_latest_wifi_version_from(iw_output: &str) -> std::io::Result<u16> {
     // note:
-    // for checking 6GHz: filter_iw_list_cached(iw_output, "5955.0 MHz")
+    // for checking 6GHz: iw_has_freq_in_range(iw_output, 5925..=7125)
     // We don't use this right now. This is for future expansion with Wi-Fi 6E devices
 
     if filter_iw_list_cached(iw_output, "HE PHY Capabilities") {
