@@ -70,6 +70,7 @@ This project is currently tested and built for the following boards that support
 - AAWireless 3
 - [Radxa Zero 3W](https://radxa.com/products/zeros/zero3w/)
 - [MilkV DuoS](https://milkv.io/duo-s)
+- Orange Pi Zero 2W
 
 More details: https://aa-proxy.github.io/docs/supported-hardware
 
