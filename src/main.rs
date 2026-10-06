@@ -9,7 +9,7 @@ use aa_proxy_rs::config::{Action, AppConfig, TCP_SERVER_PORT};
 use aa_proxy_rs::crash;
 use aa_proxy_rs::device_info;
 use aa_proxy_rs::ev::BatteryData;
-use aa_proxy_rs::led::{LedColor, LedManager, LedMode};
+use aa_proxy_rs::led::{LedManager, LedStatus};
 use aa_proxy_rs::mitm::send_byebye;
 use aa_proxy_rs::mitm::OdometerData;
 use aa_proxy_rs::mitm::Packet;
@@ -745,11 +745,12 @@ async fn tokio_main(
         clean_disconnect_and_exit(tx_signal, config_signal, "signal exit").await;
     });
 
-    // LED support
+    // LED support: RGB LEDs on AAWireless, otherwise a single LED labeled
+    // "aa-proxy" in the device tree, if the board has one
     let mut led_manager = if led_support {
         Some(LedManager::new(100))
     } else {
-        None
+        LedManager::new_single(100)
     };
 
     let mut cfg = config.read().await.clone();
@@ -957,6 +958,10 @@ async fn tokio_main(
 
     // main connection loop
     let mut need_restart = restart_tx.subscribe();
+    // an iteration that doesn't reach the connected state ended on a `continue`
+    // (USB/Bluetooth/handshake failure): show the error until we connect
+    let mut iteration_completed = true;
+    let mut led_error = false;
     loop {
         if shutdown_requested.load(Ordering::Relaxed) {
             info!(
@@ -965,8 +970,17 @@ async fn tokio_main(
             );
             break Ok(());
         }
+        if !iteration_completed {
+            led_error = true;
+        }
+        iteration_completed = false;
         if let Some(ref mut leds) = led_manager {
-            leds.set_led(LedColor::Green, LedMode::Heartbeat).await;
+            leds.set_status(if led_error {
+                LedStatus::Error
+            } else {
+                LedStatus::Waiting
+            })
+            .await;
         }
         if let Some(ref mut usb) = usb {
             if let Err(e) = usb.init() {
@@ -1187,6 +1201,10 @@ async fn tokio_main(
             }
         }
 
+        // handshake done, only the USB side is left
+        if let Some(ref mut leds) = led_manager {
+            leds.set_status(LedStatus::Connecting).await;
+        }
         if !cfg.change_usb_order {
             if !enable_usb_if_present(
                 &mut usb,
@@ -1202,8 +1220,10 @@ async fn tokio_main(
         }
 
         // inform via LED about successful connection
+        iteration_completed = true;
+        led_error = false;
         if let Some(ref mut leds) = led_manager {
-            leds.set_led(LedColor::Blue, LedMode::On).await;
+            leds.set_status(LedStatus::Connected).await;
         }
         // wait for restart notification
         let _ = need_restart.recv().await;
