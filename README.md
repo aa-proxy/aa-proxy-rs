@@ -121,6 +121,37 @@ From the next time onward, the system should automatically connect to your phone
 >
 > See below for instructions on how to connect to the device's Wi-Fi network.
 
+## Status LED
+If the board has a status LED, aa-proxy-rs uses it to show the connection status.
+At startup it looks for `/sys/class/leds/aa-proxy`: when it exists the LED is driven,
+otherwise nothing happens, so boards without a LED work as usual.
+
+| Status | LED | When |
+|---|---|---|
+| Waiting | heartbeat (double pulse) | Bluetooth/Wi-Fi handshake in progress |
+| Connecting | slow blink (500/500 ms) | handshake done, USB being set up |
+| Connected | steady on | session running |
+| Error | fast blink (100/100 ms) | last attempt failed, until the next connection |
+
+AAWireless boards (RGB LEDs) keep their own behavior: green heartbeat while waiting, steady blue when connected.
+
+To enable it on another board, give the LED the label `aa-proxy` in the device tree
+(the kernel needs `CONFIG_LEDS_GPIO` and the `heartbeat`, `timer` and `default-on` triggers):
+
+```dts
+leds {
+	compatible = "gpio-leds";
+
+	led-0 {
+		label = "aa-proxy";
+		gpios = <&pio 2 13 GPIO_ACTIVE_HIGH>; /* PC13 */
+	};
+};
+```
+
+On boot the log tells whether the LED was found (`single LED detected` or
+`no /sys/class/leds/aa-proxy LED found`).
+
 ## Embedded Web Interface
 When you connect to the device's WiFi network, you can access the web interface, which is available by default at: [http://10.0.0.1](http://10.0.0.1).
 
