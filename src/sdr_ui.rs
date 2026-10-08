@@ -363,12 +363,15 @@ pub async fn process_service_discovery_response(
 ) -> Result<SdrUiApplySummary> {
     let path = cfg.sdr_ui_override_file.clone();
     let vehicle_info = vehicle_info_from_sdr(msg);
-    let vehicle_id = vehicle_fingerprint(&vehicle_info);
+    let fingerprint = vehicle_fingerprint(&vehicle_info);
     let vehicle_name = vehicle_name(&vehicle_info);
     let phone = current_phone();
     let snapshot = snapshot_displays(msg);
 
     let mut profiles = read_profiles_file(&path).await?;
+    // Some head units report an unstable vehicle_id between sessions, which changes the
+    // fingerprint. Try to reuse an already known profile that differs only by that hash.
+    let vehicle_id = resolve_vehicle_id(&profiles, &vehicle_info, &fingerprint);
     let file_enabled = profiles.enabled;
     let autocreate = cfg.sdr_ui_override_autocreate_profiles && profiles.autocreate_profiles;
     let mut changed = false;
@@ -1068,6 +1071,21 @@ fn vehicle_info_from_sdr(msg: &ServiceDiscoveryResponse) -> SdrUiVehicleInfo {
     let hu = &msg.headunit_info;
     let vehicle_id = first_non_empty(&[hu.vehicle_id(), msg.vehicle_id()]);
 
+    // Diagnostics for unstable vehicle_id reports: log only hashes, never raw values.
+    debug!(
+        "{} vehicle_id sources: headunit_info=<b>{}</> service_discovery=<b>{}</> (used: <b>{}</>)",
+        NAME,
+        describe_id_source(hu.vehicle_id()),
+        describe_id_source(msg.vehicle_id()),
+        if non_empty_string(hu.vehicle_id()).is_some() {
+            "headunit_info"
+        } else if non_empty_string(msg.vehicle_id()).is_some() {
+            "service_discovery"
+        } else {
+            "none"
+        }
+    );
+
     SdrUiVehicleInfo {
         make: first_non_empty(&[hu.make(), msg.make()]),
         model: first_non_empty(&[hu.model(), msg.model()]),
@@ -1118,6 +1136,74 @@ fn vehicle_fingerprint(info: &SdrUiVehicleInfo) -> String {
     .to_ascii_lowercase();
 
     format!("veh_{}", short_hash(&raw))
+}
+
+/// Short description of a raw vehicle_id source (hash + length) for logging.
+fn describe_id_source(value: &str) -> String {
+    match non_empty_string(value) {
+        Some(v) => format!("{}(len={})", short_hash(&v), v.len()),
+        None => "empty".to_string(),
+    }
+}
+
+/// Normalised view of all vehicle fields except `vehicle_id_hash`.
+fn stable_vehicle_fields(info: &SdrUiVehicleInfo) -> [String; 9] {
+    let n = |v: &Option<String>| v.as_deref().unwrap_or("").trim().to_ascii_lowercase();
+    [
+        n(&info.make),
+        n(&info.model),
+        n(&info.year),
+        n(&info.display_name),
+        n(&info.driver_position),
+        n(&info.head_unit_make),
+        n(&info.head_unit_model),
+        n(&info.head_unit_software_build),
+        n(&info.head_unit_software_version),
+    ]
+}
+
+/// Picks the profile id to use for the connected head unit.
+///
+/// An exact fingerprint match always wins. Otherwise, if a stored profile matches on every
+/// field except `vehicle_id_hash` (which some head units don't report stably), that profile
+/// is reused (enabled profiles preferred) so user overrides keep being applied. Only when
+/// nothing matches the new fingerprint is used (and a new profile gets created).
+fn resolve_vehicle_id(
+    profiles: &SdrUiProfilesFile,
+    info: &SdrUiVehicleInfo,
+    fingerprint: &str,
+) -> String {
+    if profiles.vehicles.iter().any(|v| v.id == fingerprint) {
+        return fingerprint.to_string();
+    }
+
+    let wanted = stable_vehicle_fields(info);
+    let mut candidates = profiles
+        .vehicles
+        .iter()
+        .filter(|v| stable_vehicle_fields(&v.info) == wanted);
+
+    let first = candidates.next();
+    let chosen = match first {
+        Some(first) if first.enabled => Some(first),
+        Some(first) => candidates.find(|v| v.enabled).or(Some(first)),
+        None => None,
+    };
+
+    match chosen {
+        Some(profile) => {
+            warn!(
+                "{} vehicle_id_hash changed ({} -> {}); reusing existing profile <b>{}</> \
+                 (all other head unit fields match)",
+                NAME,
+                profile.info.vehicle_id_hash.as_deref().unwrap_or("none"),
+                info.vehicle_id_hash.as_deref().unwrap_or("none"),
+                profile.id
+            );
+            profile.id.clone()
+        }
+        None => fingerprint.to_string(),
+    }
 }
 
 fn vehicle_name(info: &SdrUiVehicleInfo) -> String {
@@ -1257,6 +1343,101 @@ mod tests {
         assert_eq!(insets.right(), 789); // clamped: width 800, left 10 -> max right 789
 
         *CURRENT_SDR_UI.lock().unwrap() = None;
+    }
+
+    fn zenec_info(hash: Option<&str>) -> SdrUiVehicleInfo {
+        SdrUiVehicleInfo {
+            make: Some("ZENEC".into()),
+            model: Some("ZENEC".into()),
+            year: Some("2022".into()),
+            vehicle_id_hash: hash.map(str::to_string),
+            display_name: Some("Home".into()),
+            driver_position: Some("DRIVER_POSITION_LEFT".into()),
+            head_unit_make: Some("ZENEC".into()),
+            head_unit_model: Some("1269 V1.0".into()),
+            head_unit_software_build: Some("1269 V1.0".into()),
+            head_unit_software_version: Some("0.1".into()),
+        }
+    }
+
+    fn profile_for(info: SdrUiVehicleInfo, enabled: bool) -> SdrUiVehicleProfile {
+        SdrUiVehicleProfile {
+            id: vehicle_fingerprint(&info),
+            enabled,
+            info,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn unstable_vehicle_id_hash_changes_fingerprint() {
+        assert_ne!(
+            vehicle_fingerprint(&zenec_info(Some("26aba93be9a3"))),
+            vehicle_fingerprint(&zenec_info(Some("3e65e8b80e68")))
+        );
+    }
+
+    #[test]
+    fn resolve_prefers_exact_match() {
+        let a = profile_for(zenec_info(Some("aaa")), false);
+        let b = profile_for(zenec_info(Some("bbb")), true);
+        let profiles = SdrUiProfilesFile {
+            vehicles: vec![a.clone(), b.clone()],
+            ..Default::default()
+        };
+        let info = zenec_info(Some("aaa"));
+        assert_eq!(
+            resolve_vehicle_id(&profiles, &info, &vehicle_fingerprint(&info)),
+            a.id
+        );
+    }
+
+    #[test]
+    fn resolve_reuses_profile_when_only_id_hash_differs() {
+        let known = profile_for(zenec_info(Some("26aba93be9a3")), true);
+        let profiles = SdrUiProfilesFile {
+            vehicles: vec![known.clone()],
+            ..Default::default()
+        };
+        let info = zenec_info(Some("3e65e8b80e68"));
+        assert_eq!(
+            resolve_vehicle_id(&profiles, &info, &vehicle_fingerprint(&info)),
+            known.id
+        );
+        // Head unit that stops reporting the id at all is matched as well.
+        let info = zenec_info(None);
+        assert_eq!(
+            resolve_vehicle_id(&profiles, &info, &vehicle_fingerprint(&info)),
+            known.id
+        );
+    }
+
+    #[test]
+    fn resolve_prefers_enabled_among_duplicates() {
+        let disabled = profile_for(zenec_info(Some("aaa")), false);
+        let enabled = profile_for(zenec_info(Some("bbb")), true);
+        let profiles = SdrUiProfilesFile {
+            vehicles: vec![disabled, enabled.clone()],
+            ..Default::default()
+        };
+        let info = zenec_info(Some("ccc"));
+        assert_eq!(
+            resolve_vehicle_id(&profiles, &info, &vehicle_fingerprint(&info)),
+            enabled.id
+        );
+    }
+
+    #[test]
+    fn resolve_does_not_merge_different_head_units() {
+        let known = profile_for(zenec_info(Some("aaa")), true);
+        let profiles = SdrUiProfilesFile {
+            vehicles: vec![known],
+            ..Default::default()
+        };
+        let mut other = zenec_info(Some("bbb"));
+        other.head_unit_software_version = Some("0.2".into());
+        let fp = vehicle_fingerprint(&other);
+        assert_eq!(resolve_vehicle_id(&profiles, &other, &fp), fp);
     }
 
     #[test]
