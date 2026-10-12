@@ -90,6 +90,10 @@ pub use crate::media_tap::{
     media_tcp_server, AudioStreamConfig, MediaSink, MediaStreamInfo, MediaStreamKind,
 };
 use crate::media_tap::{reassemble_media_packet, tap_media_message, MediaFrameBuffer};
+use crate::packet_fragment::{
+    fragment_plain_payload, openauto_continuation_fragment_payload_bytes,
+    PlainPayloadFragmentOptions, DEFAULT_FIRST_FRAGMENT_PAYLOAD_BYTES,
+};
 
 // module name for logging engine
 pub fn get_name(proxy_type: ProxyType) -> String {
@@ -2669,60 +2673,137 @@ pub async fn pkt_modify_hook(
     // if source=rust_h264 is active, reassemble media packets and feed the
     // selected injected display directly.
     let map_album_art_h264_active = crate::map_album_art_h264::is_active(cfg);
-    if proxy_type == ProxyType::MobileDevice && (tap_media || map_album_art_h264_active) {
-        if let Some(frame_data) = reassemble_media_packet(&mut ctx.media_fragments, pkt) {
-            if frame_data.len() >= 2 {
-                if map_album_art_h264_active {
-                    crate::map_album_art_h264::maybe_feed_media_frame(
-                        cfg,
-                        pkt.channel,
-                        ctx.injected_media_profile_ids
-                            .get(&pkt.channel)
-                            .map(|id| id.as_str()),
-                        &frame_data,
-                    );
+    let tap_media_active =
+        tap_media && (ctx.media_dump_base_port.is_some() || !ctx.media_channels.is_empty());
+    let obd_overlay_active = proxy_type == ProxyType::MobileDevice
+        && flow == PacketFlow::FromEndpoint
+        && (pkt.flags & _CONTROL) == 0
+        && crate::obd_overlay::is_active_for_packet(pkt.channel, pkt.flags, &cfg.obd_text_path);
+    if proxy_type == ProxyType::MobileDevice
+        && flow == PacketFlow::FromEndpoint
+        && (pkt.flags & _CONTROL) == 0
+        && !obd_overlay_active
+        && (pkt.flags & FRAME_TYPE_MASK) == (FRAME_TYPE_FIRST | FRAME_TYPE_LAST)
+        && pkt.payload.len() >= 2
+        && crate::obd_overlay::is_registered_video_channel(pkt.channel)
+    {
+        crate::obd_overlay::observe_codec_config(pkt.channel, &pkt.payload);
+    }
+    if proxy_type == ProxyType::MobileDevice
+        && (tap_media || map_album_art_h264_active || obd_overlay_active)
+    {
+        let was_multi_fragment = (pkt.flags & FRAME_TYPE_MASK) != FRAME_TYPE_MASK;
+        match reassemble_media_packet(&mut ctx.media_fragments, pkt) {
+            Some(frame_data) => {
+                if !obd_overlay_active
+                    && frame_data.len() >= 2
+                    && crate::obd_overlay::is_registered_video_channel(pkt.channel)
+                {
+                    crate::obd_overlay::observe_codec_config(pkt.channel, &frame_data);
                 }
+                if obd_overlay_active
+                    && !tap_media_active
+                    && !map_album_art_h264_active
+                    && frame_data.len() >= 2
+                {
+                    if let Some(ref hu_tx) = ctx.hu_tx {
+                        crate::obd_overlay::enqueue_video_media_message(
+                            pkt.channel,
+                            pkt.flags,
+                            frame_data,
+                            hu_tx.clone(),
+                        );
+                        return Ok(PacketAction::Drop);
+                    }
+                }
+                let (out_frames, overlay_modified) = if obd_overlay_active && frame_data.len() >= 2
+                {
+                    crate::obd_overlay::process_video_media_message(pkt.channel, frame_data)
+                } else {
+                    (vec![frame_data], false)
+                };
 
-                if tap_media {
-                    if let Some(sink) = media_sink_for_channel(ctx, pkt.channel).await {
-                        // If video focus on this channel just came back to PROJECTED
-                        // (HU-initiated via VideoFocusRequest, or the phone's own
-                        // unsolicited indication), the phone is about to restart its
-                        // encoder for this channel -- the same "fresh start" as a
-                        // reconnect, just without one. Without this, a focus toggle
-                        // produces the exact bug a reconnect used to: the next IDR
-                        // gets treated as steady-state (seen_first_idr already true
-                        // from earlier in this same session) and the preview is left
-                        // with a single bare IDR -- often a black/loading frame.
-                        let focus_msg_id = frame_data
-                            .get(0..2)
-                            .map(|b| u16::from_be_bytes([b[0], b[1]]));
-                        if focus_msg_id == Some(MEDIA_MESSAGE_VIDEO_FOCUS_NOTIFICATION as u16) {
-                            if let Ok(notif) =
-                                VideoFocusNotification::parse_from_bytes(&frame_data[2..])
-                            {
-                                if matches!(
-                                    notif.focus(),
-                                    VideoFocusMode::VIDEO_FOCUS_PROJECTED
-                                        | VideoFocusMode::VIDEO_FOCUS_PROJECTED_NO_INPUT_FOCUS
-                                ) {
-                                    sink.reset_for_new_session();
-                                    info!(
-                                        "{} media tap: ch {:#04x} video focus -> PROJECTED; next IDR treated as fresh session start",
-                                        get_name(proxy_type),
-                                        pkt.channel
-                                    );
-                                }
-                            }
-                        }
-                        tap_media_message(proxy_type, pkt, &sink, &frame_data).await;
-                    } else {
-                        debug!(
-                            "{} media tap: no sink registered for channel {:#04x}",
-                            get_name(proxy_type),
-                            pkt.channel
+                for out_frame in &out_frames {
+                    if out_frame.len() < 2 {
+                        continue;
+                    }
+
+                    if map_album_art_h264_active {
+                        crate::map_album_art_h264::maybe_feed_media_frame(
+                            cfg,
+                            pkt.channel,
+                            ctx.injected_media_profile_ids
+                                .get(&pkt.channel)
+                                .map(|id| id.as_str()),
+                            out_frame,
                         );
                     }
+
+                    if tap_media {
+                        if let Some(sink) = media_sink_for_channel(ctx, pkt.channel).await {
+                            // If video focus on this channel just came back to PROJECTED
+                            // (HU-initiated via VideoFocusRequest, or the phone's own
+                            // unsolicited indication), the phone is about to restart its
+                            // encoder for this channel -- the same "fresh start" as a
+                            // reconnect, just without one. Without this, a focus toggle
+                            // produces the exact bug a reconnect used to: the next IDR
+                            // gets treated as steady-state (seen_first_idr already true
+                            // from earlier in this same session) and the preview is left
+                            // with a single bare IDR -- often a black/loading frame.
+                            let focus_msg_id = out_frame
+                                .get(0..2)
+                                .map(|b| u16::from_be_bytes([b[0], b[1]]));
+                            if focus_msg_id == Some(MEDIA_MESSAGE_VIDEO_FOCUS_NOTIFICATION as u16) {
+                                if let Ok(notif) =
+                                    VideoFocusNotification::parse_from_bytes(&out_frame[2..])
+                                {
+                                    if matches!(
+                                        notif.focus(),
+                                        VideoFocusMode::VIDEO_FOCUS_PROJECTED
+                                            | VideoFocusMode::VIDEO_FOCUS_PROJECTED_NO_INPUT_FOCUS
+                                    ) {
+                                        sink.reset_for_new_session();
+                                        info!(
+                                            "{} media tap: ch {:#04x} video focus -> PROJECTED; next IDR treated as fresh session start",
+                                            get_name(proxy_type),
+                                            pkt.channel
+                                        );
+                                    }
+                                }
+                            }
+                            tap_media_message(proxy_type, pkt, &sink, out_frame).await;
+                        } else {
+                            debug!(
+                                "{} media tap: no sink registered for channel {:#04x}",
+                                get_name(proxy_type),
+                                pkt.channel
+                            );
+                        }
+                    }
+                }
+
+                if obd_overlay_active && (overlay_modified || was_multi_fragment) {
+                    let first_chunk = DEFAULT_FIRST_FRAGMENT_PAYLOAD_BYTES;
+                    let cont_chunk = openauto_continuation_fragment_payload_bytes(first_chunk);
+                    let mut replacement_packets = Vec::new();
+                    for out_frame in &out_frames {
+                        let opts = PlainPayloadFragmentOptions {
+                            channel: pkt.channel,
+                            base_flags: pkt.flags,
+                            first_fragment_payload_bytes: first_chunk,
+                            continuation_fragment_payload_bytes: cont_chunk,
+                            first_final_length: u32::try_from(out_frame.len()).ok(),
+                        };
+                        replacement_packets.extend(fragment_plain_payload(out_frame, opts));
+                    }
+                    return Ok(PacketAction::Replace(replacement_packets));
+                }
+            }
+            None => {
+                if obd_overlay_active {
+                    // Drop intermediate fragments while reassembling the video message;
+                    // the complete (and possibly overlaid) message will be emitted on FRAME_TYPE_LAST.
+                    return Ok(PacketAction::Drop);
                 }
             }
         }
@@ -3509,6 +3590,11 @@ pub async fn pkt_modify_hook(
             // injected vendor/display services.
             update_debug_channel_kinds(ctx, &msg);
             update_map_album_art_media_playback_channel_from_sdr(proxy_type, ctx, &msg);
+            crate::obd_overlay::register_video_channels_from_sdr(
+                &mut msg,
+                cfg.obd_overlay_enabled,
+                &cfg.obd_text_path,
+            );
 
             // Populate media tap channels from the final rewritten SDR. Ports are opened
             // lazily and only for the media sinks actually present in this SDR.

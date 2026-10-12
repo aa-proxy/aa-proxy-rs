@@ -634,6 +634,22 @@
           }
         },
         {
+          "title": "📟 OBD video overlay",
+          "requires": "mitm",
+          "advanced": true,
+          "values": {
+            "obd_overlay_enabled": {
+              "typ": "boolean",
+              "description": "Enable the H.264 OBD text overlay on the main Android Auto video. Requires mitm = true. The phone video is decoded, the text is drawn and the stream is re-encoded (extra CPU load, VIDEO_FPS_60 is capped to 30). When disabled the video path is completely untouched. Applies on the next connection. Disabled by default."
+            },
+            "obd_text_path": {
+              "typ": "string",
+              "description": "Path to the live OBD overlay JSON (or plain-text) file in shared memory. The overlay is shown only while this file exists and its \"text\" field is non-empty. Default: `/dev/shm/obd_overlay.json`.",
+              "requires": "obd_overlay_enabled"
+            }
+          }
+        },
+        {
           "title": "🔌 EV routing",
           "requires": "mitm",
           "values": {

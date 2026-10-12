@@ -34,6 +34,7 @@ pub const DEFAULT_SDR_UI_OVERRIDE_FILE: &str =
     concat!(base_config_dir!(), "/sdr-ui-overrides.toml");
 pub const DEFAULT_INJECT_DISPLAYS_FILE: &str = concat!(base_config_dir!(), "/inject-displays.toml");
 pub const DEFAULT_MAP_ALBUM_ART_FILE: &str = "/data/aa-proxy-rs/map-album-art.png";
+pub const DEFAULT_OBD_TEXT_PATH: &str = "/dev/shm/obd_overlay.json";
 
 pub type SharedConfig = Arc<RwLock<AppConfig>>;
 pub type SharedConfigJson = Arc<RwLock<ConfigJson>>;
@@ -552,6 +553,13 @@ pub struct AppConfig {
     pub sdr_ui_override_file: PathBuf,
     /// TOML file used to store injected display service profiles. Display IDs are assigned automatically from the current SDR.
     pub inject_displays_file: PathBuf,
+    /// Enable the H.264 OBD text overlay (decode -> draw -> re-encode of the phone video).
+    /// Disabled by default; when false the video path is completely untouched.
+    /// Evaluated per Android Auto session (at ServiceDiscoveryResponse), so a change applies on the next connection.
+    pub obd_overlay_enabled: bool,
+    /// Path to the live OBD JSON (or plain-text) overlay file in shared memory.
+    #[serde(alias = "OBD_TEXT_PATH")]
+    pub obd_text_path: PathBuf,
     pub stats_interval: u16,
     #[serde(default, deserialize_with = "empty_string_as_none")]
     pub udc: Option<String>,
@@ -1017,6 +1025,8 @@ impl Default for AppConfig {
             sdr_ui_override_autocreate_profiles: true,
             sdr_ui_override_file: DEFAULT_SDR_UI_OVERRIDE_FILE.into(),
             inject_displays_file: DEFAULT_INJECT_DISPLAYS_FILE.into(),
+            obd_overlay_enabled: false,
+            obd_text_path: DEFAULT_OBD_TEXT_PATH.into(),
             stats_interval: 0,
             udc: None,
             usb_stick: None,
@@ -1363,6 +1373,8 @@ impl AppConfig {
             value(self.sdr_ui_override_autocreate_profiles);
         doc["sdr_ui_override_file"] = value(self.sdr_ui_override_file.display().to_string());
         doc["inject_displays_file"] = value(self.inject_displays_file.display().to_string());
+        doc["obd_overlay_enabled"] = value(self.obd_overlay_enabled);
+        doc["obd_text_path"] = value(self.obd_text_path.display().to_string());
         doc["stats_interval"] = value(self.stats_interval as i64);
         if let Some(udc) = &self.udc {
             doc["udc"] = value(udc);

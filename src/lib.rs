@@ -32,6 +32,7 @@ pub mod mitm;
 pub mod mitm_prettyprint;
 pub mod mpegts;
 pub mod mtp;
+pub mod obd_overlay;
 pub mod packet_fragment;
 pub mod proxy;
 #[cfg(feature = "wasm-scripting")]
