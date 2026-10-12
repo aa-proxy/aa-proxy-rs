@@ -36,6 +36,7 @@ The project initially focused on supporting the Raspberry Pi, but has since grow
   - **Injected display support** – define auxiliary/cluster displays with custom FPS, DPI, touchscreen support, and startup actions
   - **Media tap registry & reverse bridge** – dynamically expose media streams to [companion app](https://aa-proxy.github.io/docs/companion-app) via reverse TCP bridge
   - **Album art injection** – override album artwork from static images, uploads, or live injected display frames
+  - **[OBD video overlay](#obd-video-overlay)** – draw live text (OBD values, board temperature, alerts) on top of the Android Auto video; opt-in via `obd_overlay_enabled`
   - **Event injection** – key event injection via `/inject_event` and rotary controller support via `/inject_rotary`
   - **WASM scripting** – write hooks that modify AA packets on the fly via `wasmtime`
     - Persistent script state and lifecycle hooks
@@ -201,6 +202,51 @@ Example with Google Maps, where a `Report` button is available after changing th
 |160 DPI (default)|130 DPI|
 |---|---|
 |![](images/160dpi.png)|![](images/130dpi.png)
+
+### OBD video overlay
+aa-proxy-rs can draw a small text box (e.g. OBD values, board temperature and load, alerts) directly on the main Android Auto video.
+The phone video is decoded, the text is rendered and the stream is re-encoded to H.264 Constrained Baseline, using a pure-Rust codec
+(no external programs, system libraries or kernel configuration needed).
+
+![](images/obd-overlay.png)
+
+**It is disabled by default** and does not touch the video path unless you enable it in `config.toml` (it requires `mitm = true`):
+```toml
+obd_overlay_enabled = true
+# optional, this is the default:
+obd_text_path = "/dev/shm/obd_overlay.json"
+```
+The option is evaluated when an Android Auto session starts, so a change applies on the next connection. While enabled, every frame of the main display
+goes through the decode/render/encode pipeline (even with empty text), and `VIDEO_FPS_60` is capped to 30 (see `cap_video_fps_to_30`), which means extra CPU load.
+
+The content and look are controlled live by a JSON file (an [example with all keys and defaults](examples/obd_overlay.json)).
+It is re-read at most every `obd_poll_interval_ms`, so any change, including setting `"text"` to `""`, is applied on the next video frame without reconnecting.
+All keys are optional; a missing file or key falls back to the defaults. A file that does not start with `{` is treated as plain text to display.
+Feed it from any script or program, for example:
+```sh
+# write to a temporary file and rename it, so the overlay never reads a half-written file
+printf '{"text": "TEMP: %s C\\r\\nLOAD: %s"}' "$(( $(cat /sys/class/thermal/thermal_zone0/temp) / 1000 ))" "$(cut -d' ' -f1 /proc/loadavg)" \
+  > /dev/shm/obd_overlay.json.tmp && mv /dev/shm/obd_overlay.json.tmp /dev/shm/obd_overlay.json
+```
+Note: an incomplete or invalid JSON is not an error, but the overlay then falls back to the defaults with no text until the next valid read, hence the atomic write above.
+
+| Key | Default | Description |
+|---|---|---|
+| `text` | `""` | Text to show; `\r\n`, `\n` and `\r` start a new line. Empty/`null`/missing shows nothing. Characters outside ASCII are shown as `?` (except `°`, `ñ` and basic Latin accents) |
+| `obd_poll_interval_ms` | `250` | Minimum interval between reads of the file (min. 20) |
+| `box_margin_right_px`, `box_margin_bottom_px` | `100`, `9` | Distance of the box from the right/bottom edge of the video |
+| `box_padding_x_px`, `box_padding_y_px` | `12`, `9` | Padding between box border and text |
+| `box_border_px` | `0` | Border thickness (`0` = none) |
+| `box_opacity_percent` | `0` | Box background opacity (`0` = floating text with shadow only, `100` = solid) |
+| `box_bg_rgb`, `box_border_rgb` | `[16,22,32]`, `[0,200,255]` | Box background and border color |
+| `text_rgb`, `text_shadow_rgb` | `[245,250,255]`, `[0,0,0]` | Text and drop-shadow color |
+| `text_scale` | `2` | Integer scale of the built-in 8x8 font (`2` = 16x16 px) |
+| `line_spacing_px`, `char_spacing_px` | `6`, `1` | Extra spacing between lines/characters |
+| `max_display_lines`, `max_line_chars` | `14`, `42` | Truncation limits |
+| `h264_encoder_qp` | `26` | Fixed quantizer (0-51); lower = better quality and higher bitrate |
+| `h264_encoder_gop` | `600` | Keyframe interval in frames (extra IDRs are still produced on demand) |
+| `only_main_display` | `true` | Apply only to the main display, not to cluster/auxiliary ones |
+| `cap_video_fps_to_30` | `true` | Cap `VIDEO_FPS_60` to 30 in the `ServiceDiscoveryResponse` while the overlay is enabled |
 
 ## Google Maps EV routing
 Google introduced EV routing features at [CES24](https://blog.google/products/android/android-auto-new-features-ces24/).

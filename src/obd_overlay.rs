@@ -2489,6 +2489,24 @@ mod tests {
         assert!(bottom_half.iter().any(|&px| px != 200));
     }
 
+    #[test]
+    fn test_example_json_is_valid_and_matches_defaults() {
+        let raw = include_str!("../examples/obd_overlay.json");
+        let (cfg, lines) = parse_obd_payload(raw);
+        assert_eq!(
+            lines,
+            vec!["RPM: 2450".to_string(), "OIL: 90°C".to_string()]
+        );
+        assert_eq!(
+            ObdOverlayConfig {
+                text: String::new(),
+                ..cfg
+            },
+            ObdOverlayConfig::default(),
+            "examples/obd_overlay.json must list the built-in defaults"
+        );
+    }
+
     static TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     fn lock_test_state() -> std::sync::MutexGuard<'static, ()> {

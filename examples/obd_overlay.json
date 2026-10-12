@@ -1,0 +1,23 @@
+{
+  "obd_poll_interval_ms": 250,
+  "box_opacity_percent": 0,
+  "box_margin_right_px": 100,
+  "box_margin_bottom_px": 9,
+  "box_padding_x_px": 12,
+  "box_padding_y_px": 9,
+  "box_border_px": 0,
+  "text_scale": 2,
+  "line_spacing_px": 6,
+  "char_spacing_px": 1,
+  "max_display_lines": 14,
+  "max_line_chars": 42,
+  "box_bg_rgb": [16, 22, 32],
+  "box_border_rgb": [0, 200, 255],
+  "text_rgb": [245, 250, 255],
+  "text_shadow_rgb": [0, 0, 0],
+  "h264_encoder_qp": 26,
+  "h264_encoder_gop": 600,
+  "only_main_display": true,
+  "cap_video_fps_to_30": true,
+  "text": "RPM: 2450\r\nOIL: 90°C"
+}
