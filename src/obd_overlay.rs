@@ -90,14 +90,21 @@ pub const H264_ENCODER_GOP: u32 = 600;
 pub const ONLY_MAIN_DISPLAY: bool = true;
 
 /// Cap `VIDEO_FPS_60` (`16.67ms` per frame) to `VIDEO_FPS_30` (`33.33ms` per frame) in
-/// `ServiceDiscoveryResponse` when the overlay is active ([`obd_overlay_enabled`]).
-/// When the overlay is inactive (`/dev/shm/obd_overlay.json` is empty/missing), `ServiceDiscoveryResponse`
-/// and all video packets pass through 100% untouched at native `VIDEO_FPS_60`.
+/// `ServiceDiscoveryResponse` when the overlay is enabled ([`obd_overlay_enabled`]).
+/// When `obd_overlay_enabled = false`, `ServiceDiscoveryResponse` and all video packets pass
+/// through 100% untouched at native `VIDEO_FPS_60`.
 pub const CAP_VIDEO_FPS_TO_30: bool = true;
 
 // ============================================================================
 // JSON SCHEMA FOR `/dev/shm/obd_overlay.json`
 // ============================================================================
+
+fn deserialize_null_as_empty_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
+}
 
 /// Live JSON configuration and text loaded from [`OBD_TEXT_PATH`] (`/dev/shm/obd_overlay.json`).
 ///
@@ -147,7 +154,11 @@ pub struct ObdOverlayConfig {
     pub only_main_display: bool,
     #[serde(alias = "CAP_VIDEO_FPS_TO_30")]
     pub cap_video_fps_to_30: bool,
-    #[serde(alias = "TEXT")]
+    #[serde(
+        default,
+        alias = "TEXT",
+        deserialize_with = "deserialize_null_as_empty_string"
+    )]
     pub text: String,
 }
 
@@ -205,11 +216,24 @@ static OBD_TEXT_CACHE: LazyLock<Mutex<CachedObdText>> = LazyLock::new(|| {
 /// toggling mid-session would switch between re-encoded and original H.264 streams.
 static SESSION_ENABLED: AtomicBool = AtomicBool::new(false);
 
-/// Updates the active `obd_text_path` from `AppConfig` if it changed.
+/// Resolves `path` to [`DEFAULT_OBD_TEXT_PATH`] when empty or whitespace-only.
+fn resolve_obd_text_path(path: &Path) -> PathBuf {
+    let s = path.to_string_lossy();
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        PathBuf::from(DEFAULT_OBD_TEXT_PATH)
+    } else {
+        PathBuf::from(trimmed)
+    }
+}
+
+/// Updates the active `obd_text_path` from `AppConfig` if it changed, falling back to
+/// [`DEFAULT_OBD_TEXT_PATH`] when `path` is empty.
 pub fn set_obd_text_path(path: &Path) {
+    let resolved = resolve_obd_text_path(path);
     if let Ok(mut cache) = OBD_TEXT_CACHE.lock() {
-        if cache.path != path {
-            cache.path = path.to_path_buf();
+        if cache.path != resolved {
+            cache.path = resolved;
             cache.last_check = None;
         }
     }
@@ -713,15 +737,17 @@ fn send_media_messages_to_hu(
     }
 }
 
-/// Returns `true` when the configured `obd_text_path` exists and contains non-empty text to display.
+/// Returns `true` when the OBD overlay is enabled for the current session (`obd_overlay_enabled = true`).
 pub fn obd_overlay_enabled() -> bool {
-    !get_cached_obd_lines().is_empty()
+    SESSION_ENABLED.load(Ordering::Relaxed)
 }
 
 /// Registers video media sink channels discovered in `ServiceDiscoveryResponse`.
 ///
-/// Channels are always registered during SDR discovery so that if the configured `obd_text_path`
-/// is created or populated later during the session, the overlay activates immediately without reconnecting.
+/// When `enabled` (`obd_overlay_enabled = true`), the overlay pipeline starts immediately for the
+/// session using the configured `obd_text_path` (or [`DEFAULT_OBD_TEXT_PATH`] if empty) and
+/// default [`ObdOverlayConfig`] values if the file is missing/empty. Even if `"text"` is initially
+/// empty, the H.264 pipeline engages from the start so text can be added or updated live at any time.
 pub fn register_video_channels_from_sdr(
     sdr: &mut ServiceDiscoveryResponse,
     enabled: bool,
@@ -741,9 +767,9 @@ pub fn register_video_channels_from_sdr(
         }
         return;
     }
-    set_obd_text_path(obd_text_path);
-    let (cfg, lines) = get_cached_obd_config_and_lines();
-    let overlay_currently_active = !lines.is_empty();
+    let resolved_path = resolve_obd_text_path(obd_text_path);
+    set_obd_text_path(&resolved_path);
+    let (cfg, _lines) = get_cached_obd_config_and_lines();
 
     let mut gates = match CHANNEL_GATES.lock() {
         Ok(guard) => guard,
@@ -783,7 +809,7 @@ pub fn register_video_channels_from_sdr(
             continue;
         }
 
-        if cfg.cap_video_fps_to_30 && overlay_currently_active {
+        if cfg.cap_video_fps_to_30 {
             let mut capped_count = 0usize;
             for vc in &mut sink.video_configs {
                 if vc.frame_rate() == VideoFrameRateType::VIDEO_FPS_60 {
@@ -803,13 +829,13 @@ pub fn register_video_channels_from_sdr(
             "obd_overlay: registered video channel {:#04x} ({:?}) for OBD text overlay from {}",
             ch,
             display_type,
-            obd_text_path.display()
+            resolved_path.display()
         );
         gates.insert(
             ch,
             ChannelGateState {
-                active_for_current_frame: false,
-                pipeline_engaged: overlay_currently_active,
+                active_for_current_frame: true,
+                pipeline_engaged: true,
             },
         );
         decoders.insert(ch, ChannelDecoderState::new());
@@ -828,9 +854,11 @@ pub fn is_registered_video_channel(channel: u8) -> bool {
         .unwrap_or(false)
 }
 
-/// Returns `true` if the OBD overlay is currently enabled (`obd_text_path` has text)
-/// or already engaged on `channel`.
+/// Returns `true` if the OBD overlay is currently enabled and engaged on `channel`.
 pub fn is_active_for_channel(channel: u8) -> bool {
+    if !SESSION_ENABLED.load(Ordering::Relaxed) {
+        return false;
+    }
     let overlay_now = obd_overlay_enabled() || PIPELINE_IN_FLIGHT.load(Ordering::Acquire) > 0;
     CHANNEL_GATES
         .lock()
@@ -843,12 +871,11 @@ pub fn is_active_for_channel(channel: u8) -> bool {
 }
 
 /// Evaluates whether the overlay is active for a specific packet on `channel`, latching the
-/// decision on `FRAME_TYPE_FIRST` (`0x01`) so multi-fragment frames are never split mid-message
-/// if `obd_text_path` changes while fragments are in flight.
+/// decision on `FRAME_TYPE_FIRST` (`0x01`) so multi-fragment frames are never split mid-message.
 ///
-/// Once the overlay encoder has engaged on `channel`, `pipeline_engaged` remains `true` for the
-/// session so that setting `"text": ""` mid-session cleanly erases the overlay box and maintains
-/// a valid H.264 bitstream matching the active `SPS + PPS`.
+/// When `obd_overlay_enabled = true`, `pipeline_engaged` is `true` from the start of the session
+/// even if `"text"` in `obd_text_path` is initially empty, so text can be added or cleared live
+/// at any point while maintaining a single continuous H.264 bitstream.
 pub fn is_active_for_packet(channel: u8, flags: u8, obd_text_path: &Path) -> bool {
     if !SESSION_ENABLED.load(Ordering::Relaxed) {
         return false;
@@ -1121,23 +1148,9 @@ pub fn process_video_media_message(channel: u8, frame_data: Vec<u8>) -> (Vec<Vec
 
     let msg_id = u16::from_be_bytes([frame_data[0], frame_data[1]]) as i32;
 
-    let (cfg, lines) = get_cached_obd_config_and_lines();
-    let already_engaged = VIDEO_ENCODERS
-        .lock()
-        .ok()
-        .and_then(|map| map.get(&channel).map(|s| s.emitted_encoder_codec_config))
-        .unwrap_or(false);
-
     if msg_id == MediaMessageId::MEDIA_MESSAGE_CODEC_CONFIG as i32 {
         observe_codec_config(channel, &frame_data);
-        if lines.is_empty() && !already_engaged {
-            return (vec![frame_data], false);
-        }
         return process_video_codec_config_in_place(channel, frame_data);
-    }
-
-    if lines.is_empty() && !already_engaged {
-        return (vec![frame_data], false);
     }
 
     if msg_id == MediaMessageId::MEDIA_MESSAGE_VIDEO_FOCUS_NOTIFICATION as i32 {
@@ -1161,6 +1174,7 @@ pub fn process_video_media_message(channel: u8, frame_data: Vec<u8>) -> (Vec<Vec
         return (vec![frame_data], false);
     }
 
+    let (cfg, lines) = get_cached_obd_config_and_lines();
     process_video_data_frame_with_config(channel, frame_data, &lines, &cfg)
 }
 
@@ -1405,16 +1419,6 @@ pub fn process_video_data_frame_with_config(
 ) -> (Vec<Vec<u8>>, bool) {
     if frame_data.len() <= 10 {
         return (vec![frame_data], false);
-    }
-    if lines.is_empty() {
-        let already_engaged = VIDEO_ENCODERS
-            .lock()
-            .ok()
-            .and_then(|map| map.get(&channel).map(|s| s.emitted_encoder_codec_config))
-            .unwrap_or(false);
-        if !already_engaged {
-            return (vec![frame_data], false);
-        }
     }
 
     let mut timestamp_bytes = [0u8; 8];
@@ -2485,7 +2489,15 @@ mod tests {
         assert!(bottom_half.iter().any(|&px| px != 200));
     }
 
+    static TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    fn lock_test_state() -> std::sync::MutexGuard<'static, ()> {
+        TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn register_test_channel(ch: u8) {
+        SESSION_ENABLED.store(true, Ordering::Release);
+        set_obd_text_path(Path::new(DEFAULT_OBD_TEXT_PATH));
         CHANNEL_GATES.lock().unwrap().insert(
             ch,
             ChannelGateState {
@@ -2505,6 +2517,7 @@ mod tests {
 
     #[test]
     fn test_h264_roundtrip_overlay_pipeline() {
+        let _guard = lock_test_state();
         let ch: u8 = 0x77;
         register_test_channel(ch);
 
@@ -2540,6 +2553,7 @@ mod tests {
 
     #[test]
     fn test_car_hu_codec_config_and_pframe_conformance() {
+        let _guard = lock_test_state();
         let ch: u8 = 0x78;
         register_test_channel(ch);
 
@@ -2636,6 +2650,7 @@ mod tests {
 
     #[test]
     fn test_fast_skip_and_full_encode_interleaving_conformance() {
+        let _guard = lock_test_state();
         let ch: u8 = 0x79;
         register_test_channel(ch);
 
@@ -2730,5 +2745,143 @@ mod tests {
         let final_b = dec_b.flush().expect("strict decoder flush final");
         assert_eq!(final_b.width as usize, width);
         assert_eq!(final_b.height as usize, height);
+    }
+
+    #[test]
+    fn test_starts_when_enabled_with_empty_path_or_empty_text_and_adds_text_later() {
+        use crate::mitm::protos::{MediaSinkService, Service, VideoConfiguration};
+        let _guard = lock_test_state();
+
+        // 1. Empty obd_text_path resolves to DEFAULT_OBD_TEXT_PATH and takes default config values
+        assert_eq!(
+            resolve_obd_text_path(Path::new("")),
+            PathBuf::from(DEFAULT_OBD_TEXT_PATH)
+        );
+        assert_eq!(
+            resolve_obd_text_path(Path::new("   ")),
+            PathBuf::from(DEFAULT_OBD_TEXT_PATH)
+        );
+
+        let (default_cfg, empty_lines) = parse_obd_payload("");
+        assert_eq!(default_cfg, ObdOverlayConfig::default());
+        assert!(empty_lines.is_empty());
+
+        // 2. JSON with empty or null "text" preserves config values and does not fail
+        let (json_empty_text_cfg, json_empty_lines) =
+            parse_obd_payload(r#"{"box_opacity_percent": 40, "text": ""}"#);
+        assert_eq!(json_empty_text_cfg.box_opacity_percent, 40);
+        assert!(json_empty_lines.is_empty());
+
+        let (json_null_text_cfg, json_null_lines) =
+            parse_obd_payload(r#"{"box_opacity_percent": 45, "text": null}"#);
+        assert_eq!(json_null_text_cfg.box_opacity_percent, 45);
+        assert!(json_null_lines.is_empty());
+
+        // 3. When obd_overlay_enabled = true and JSON has "text": "", SDR registration
+        //    immediately starts the functionality (caps FPS to 30 and engages packet gate)
+        let tmp_json = std::env::temp_dir().join(format!(
+            "aa_proxy_obd_empty_start_{}.json",
+            std::process::id()
+        ));
+        fs::write(
+            &tmp_json,
+            r#"{"obd_poll_interval_ms": 20, "box_opacity_percent": 50, "text": ""}"#,
+        )
+        .expect("write initial empty-text JSON");
+
+        let ch: u8 = 0x7A;
+        let mut sdr = ServiceDiscoveryResponse::new();
+        let mut svc = Service::new();
+        svc.set_id(i32::from(ch));
+        let mut sink = MediaSinkService::new();
+        sink.set_available_type(MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP);
+        sink.set_display_type(DisplayType::DISPLAY_TYPE_MAIN);
+        let mut vc = VideoConfiguration::new();
+        vc.set_frame_rate(VideoFrameRateType::VIDEO_FPS_60);
+        sink.video_configs.push(vc);
+        svc.media_sink_service = protobuf::MessageField::some(sink);
+        sdr.services.push(svc);
+
+        register_video_channels_from_sdr(&mut sdr, true, &tmp_json);
+        assert!(obd_overlay_enabled());
+        assert_eq!(
+            sdr.services[0]
+                .media_sink_service
+                .as_ref()
+                .unwrap()
+                .video_configs[0]
+                .frame_rate(),
+            VideoFrameRateType::VIDEO_FPS_30
+        );
+        assert!(is_active_for_packet(
+            ch,
+            crate::mitm::FRAME_TYPE_FIRST | crate::mitm::FRAME_TYPE_LAST,
+            &tmp_json
+        ));
+
+        // 4. Stream starts with empty text: CODEC_CONFIG and Frame 0 are processed by the pipeline
+        let width = 320;
+        let height = 192;
+        let mut enc_cfg = EncoderConfig::baseline(width, height);
+        enc_cfg.weightp = false;
+        let mut source_encoder = Encoder::new(enc_cfg).expect("source encoder init");
+        let src_frame = YuvFrame {
+            width,
+            height,
+            y: vec![200u8; width * height],
+            u: vec![128u8; (width / 2) * (height / 2)],
+            v: vec![128u8; (width / 2) * (height / 2)],
+        };
+        let annex_b0 = source_encoder.encode(&src_frame);
+
+        let mut codec_cfg_msg = vec![0x00, 0x01];
+        for nal in split_annex_b_nals(&annex_b0) {
+            let nt = nal[0] & 0x1F;
+            if nt == 7 || nt == 8 {
+                codec_cfg_msg.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+                codec_cfg_msg.extend_from_slice(nal);
+            }
+        }
+        let (cfg_out, cfg_mod) = process_video_media_message(ch, codec_cfg_msg);
+        assert!(
+            cfg_mod,
+            "CODEC_CONFIG must be rewritten even when text is empty"
+        );
+
+        let mut msg0 = vec![0x00, 0x00, 0, 0, 0, 0, 0, 0, 0, 1];
+        msg0.extend_from_slice(&annex_b0);
+        let (out0, mod0) = process_video_media_message(ch, msg0);
+        assert!(mod0, "Frame 0 must be processed even when text is empty");
+
+        // 5. Now add text to the JSON file mid-session and verify the next frame renders it
+        fs::write(
+            &tmp_json,
+            r#"{"obd_poll_interval_ms": 20, "box_opacity_percent": 80, "text": "RPM: 3000\nSOC: 85%"}"#,
+        )
+        .expect("write updated text JSON");
+        if let Ok(mut cache) = OBD_TEXT_CACHE.lock() {
+            cache.last_check = None;
+        }
+
+        let annex_b1 = source_encoder.encode(&src_frame);
+        let mut msg1 = vec![0x00, 0x00, 0, 0, 0, 0, 0, 0, 0, 2];
+        msg1.extend_from_slice(&annex_b1);
+        let (out1, mod1) = process_video_media_message(ch, msg1);
+        assert!(mod1);
+        assert!(
+            out1[0][10..].len() > 11,
+            "Frame with newly added text must run full encode, not 11B skip"
+        );
+
+        let mut dec = Decoder::new();
+        assert!(dec.decode(&cfg_out[0][2..]).unwrap().is_none());
+        let decoded0 = dec.decode(&out0[0][10..]).unwrap().expect("decode frame 0");
+        let decoded1 = dec.decode(&out1[0][10..]).unwrap().expect("decode frame 1");
+        assert_ne!(
+            decoded0.y, decoded1.y,
+            "Decoded frame after adding text must differ from empty-text frame"
+        );
+
+        let _ = fs::remove_file(&tmp_json);
     }
 }

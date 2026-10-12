@@ -83,6 +83,21 @@ where
     }
 }
 
+fn default_obd_text_path() -> PathBuf {
+    PathBuf::from(DEFAULT_OBD_TEXT_PATH)
+}
+
+fn empty_string_as_default_obd_text_path<'de, D>(deserializer: D) -> Result<PathBuf, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let v: Option<String> = Option::deserialize(deserializer)?;
+    match v {
+        Some(s) if !s.trim().is_empty() => Ok(PathBuf::from(s.trim())),
+        _ => Ok(default_obd_text_path()),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BtScoMediaBridgeAudioType {
@@ -558,7 +573,11 @@ pub struct AppConfig {
     /// Evaluated per Android Auto session (at ServiceDiscoveryResponse), so a change applies on the next connection.
     pub obd_overlay_enabled: bool,
     /// Path to the live OBD JSON (or plain-text) overlay file in shared memory.
-    #[serde(alias = "OBD_TEXT_PATH")]
+    #[serde(
+        default = "default_obd_text_path",
+        alias = "OBD_TEXT_PATH",
+        deserialize_with = "empty_string_as_default_obd_text_path"
+    )]
     pub obd_text_path: PathBuf,
     pub stats_interval: u16,
     #[serde(default, deserialize_with = "empty_string_as_none")]
@@ -1374,7 +1393,12 @@ impl AppConfig {
         doc["sdr_ui_override_file"] = value(self.sdr_ui_override_file.display().to_string());
         doc["inject_displays_file"] = value(self.inject_displays_file.display().to_string());
         doc["obd_overlay_enabled"] = value(self.obd_overlay_enabled);
-        doc["obd_text_path"] = value(self.obd_text_path.display().to_string());
+        let obd_text_path_str = self.obd_text_path.display().to_string();
+        doc["obd_text_path"] = value(if obd_text_path_str.trim().is_empty() {
+            DEFAULT_OBD_TEXT_PATH.to_string()
+        } else {
+            obd_text_path_str
+        });
         doc["stats_interval"] = value(self.stats_interval as i64);
         if let Some(udc) = &self.udc {
             doc["udc"] = value(udc);
