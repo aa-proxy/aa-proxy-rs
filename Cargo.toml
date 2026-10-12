@@ -80,6 +80,7 @@ wasmtime-wasi = { version = "38", optional = true }
 notify = { version = "8", optional = true }
 ureq = "2"
 rust_h264 = "0.4"
+rusty_h264 = "0.16"
 png = "0.17"
 wpactrl = "0.5.1"
 
@@ -99,4 +100,3 @@ strip = true      # Automatically strips symbols and debug info
 lto = true        # Optional: Enables Link-Time Optimization for even smaller binaries
 codegen-units = 1 # Optional: Reduces parallel code generation, allowing better optimization
 panic = "abort"   # Removes unwinding machinery for smaller, slightly faster binaries
-
