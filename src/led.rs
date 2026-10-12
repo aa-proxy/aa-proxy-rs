@@ -46,8 +46,8 @@ struct LedState {
 const SINGLE_LED_NAME: &str = "aa-proxy";
 
 pub struct LedManager {
-    brightness: u8, // 1–100
-    single: bool,   // one mono LED instead of the RGB trio
+    brightness: u8,            // 1–100
+    single: bool,              // one mono LED instead of the RGB trio
     status: Option<LedStatus>, // last status applied (single LED only)
     state: LedState,
     override_enabled: bool,
@@ -112,7 +112,8 @@ impl LedManager {
             LedStatus::Connected => ("default-on", None),
             LedStatus::Error => ("timer", Some((100, 100))),
         };
-        self.write_led(SINGLE_LED_NAME, trigger, self.brightness).await;
+        self.write_led(SINGLE_LED_NAME, trigger, self.brightness)
+            .await;
         // delay_* only exist once the timer trigger is active
         if let Some((on_ms, off_ms)) = blink_ms {
             let base_path = format!("/sys/class/leds/{}", SINGLE_LED_NAME);
@@ -152,7 +153,8 @@ impl LedManager {
         let led_off = "none";
 
         if self.single {
-            self.write_led(SINGLE_LED_NAME, trigger, self.brightness).await;
+            self.write_led(SINGLE_LED_NAME, trigger, self.brightness)
+                .await;
             return;
         }
 
