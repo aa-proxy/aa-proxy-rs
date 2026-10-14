@@ -1249,7 +1249,9 @@ mod tests {
         let last_payload = original[10..].to_vec();
 
         let mut injector = MapAlbumArtInjector::default();
+        injector.media_playback_channel = Some(0x08);
         let mut cfg = test_config();
+        cfg.map_album_art_enabled = true;
         let tmp_path = std::env::temp_dir().join(format!(
             "aa-proxy-map-album-art-test-{}.png",
             std::process::id()
