@@ -7,6 +7,7 @@
   "box_padding_y_px": 9,
   "box_border_px": 0,
   "text_scale": 2,
+  "font_path": "",
   "line_spacing_px": 6,
   "char_spacing_px": 1,
   "max_display_lines": 14,

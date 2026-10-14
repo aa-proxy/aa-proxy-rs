@@ -646,6 +646,11 @@
               "typ": "string",
               "description": "Path to the live OBD overlay JSON (or plain-text) file in shared memory. If empty, defaults to `/dev/shm/obd_overlay.json`. The overlay pipeline starts immediately when `obd_overlay_enabled = true` even if this file or its \"text\" field is initially empty, allowing text to be added or updated live. Default: `/dev/shm/obd_overlay.json`.",
               "requires": "obd_overlay_enabled"
+            },
+            "obd_font_path": {
+              "typ": "string",
+              "description": "Optional path to a TTF font file for rendering the OBD overlay text (anti-aliased, national characters, HTML styling such as <b>, <i>, <u>, <font color>). If empty, missing or not a valid font, the built-in bitmap font is used. With a TTF font \"text_scale\" in the overlay JSON is the font size (1-4 = 12/24/36/48 px, larger = pixels). A font with many glyphs can use tens of MB of RAM. A non-empty \"font_path\" in the overlay JSON takes precedence. Default: empty.",
+              "requires": "obd_overlay_enabled"
             }
           }
         },

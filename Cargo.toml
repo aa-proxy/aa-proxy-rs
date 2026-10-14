@@ -83,6 +83,7 @@ rust_h264 = "0.4"
 rusty_h264 = "0.16"
 png = "0.17"
 wpactrl = "0.5.1"
+fontdue = "0.9.4"
 
 [patch.crates-io]
 tokio-uring = { git = "https://github.com/manio/tokio-uring", branch = "musl-riscv" }

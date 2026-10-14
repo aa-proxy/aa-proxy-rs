@@ -2678,7 +2678,12 @@ pub async fn pkt_modify_hook(
     let obd_overlay_active = proxy_type == ProxyType::MobileDevice
         && flow == PacketFlow::FromEndpoint
         && (pkt.flags & _CONTROL) == 0
-        && crate::obd_overlay::is_active_for_packet(pkt.channel, pkt.flags, &cfg.obd_text_path);
+        && crate::obd_overlay::is_active_for_packet(
+            pkt.channel,
+            pkt.flags,
+            &cfg.obd_text_path,
+            &cfg.obd_font_path,
+        );
     if proxy_type == ProxyType::MobileDevice
         && flow == PacketFlow::FromEndpoint
         && (pkt.flags & _CONTROL) == 0
@@ -3594,6 +3599,7 @@ pub async fn pkt_modify_hook(
                 &mut msg,
                 cfg.obd_overlay_enabled,
                 &cfg.obd_text_path,
+                &cfg.obd_font_path,
             );
 
             // Populate media tap channels from the final rewritten SDR. Ports are opened

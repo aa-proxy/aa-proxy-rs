@@ -22,7 +22,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Condvar, LazyLock, Mutex};
+use std::sync::{Arc, Condvar, LazyLock, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -106,6 +106,34 @@ where
     Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
 }
 
+fn default_text_scale() -> usize {
+    TEXT_SCALE
+}
+
+fn deserialize_text_scale<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum ScaleRepr {
+        Int(usize),
+        Float(f64),
+        Str(String),
+    }
+
+    match Option::<ScaleRepr>::deserialize(deserializer)? {
+        None => Ok(TEXT_SCALE),
+        Some(ScaleRepr::Int(i)) => Ok(i),
+        Some(ScaleRepr::Float(f)) => Ok(f.round().max(1.0) as usize),
+        Some(ScaleRepr::Str(s)) => s
+            .trim()
+            .parse::<f64>()
+            .map(|f| f.round().max(1.0) as usize)
+            .map_err(serde::de::Error::custom),
+    }
+}
+
 /// Live JSON configuration and text loaded from [`OBD_TEXT_PATH`] (`/dev/shm/obd_overlay.json`).
 ///
 /// Any omitted field automatically defaults to the corresponding constant from
@@ -128,8 +156,20 @@ pub struct ObdOverlayConfig {
     pub box_padding_y_px: usize,
     #[serde(alias = "BOX_BORDER_PX")]
     pub box_border_px: usize,
-    #[serde(alias = "TEXT_SCALE")]
+    #[serde(
+        default = "default_text_scale",
+        alias = "TEXT_SCALE",
+        deserialize_with = "deserialize_text_scale"
+    )]
     pub text_scale: usize,
+    #[serde(
+        default,
+        alias = "FONT_PATH",
+        alias = "font_path",
+        alias = "OBD_FONT_PATH",
+        deserialize_with = "deserialize_null_as_empty_string"
+    )]
+    pub font_path: String,
     #[serde(alias = "LINE_SPACING_PX")]
     pub line_spacing_px: usize,
     #[serde(alias = "CHAR_SPACING_PX")]
@@ -173,6 +213,7 @@ impl Default for ObdOverlayConfig {
             box_padding_y_px: BOX_PADDING_Y_PX,
             box_border_px: BOX_BORDER_PX,
             text_scale: TEXT_SCALE,
+            font_path: String::new(),
             line_spacing_px: LINE_SPACING_PX,
             char_spacing_px: CHAR_SPACING_PX,
             max_display_lines: MAX_DISPLAY_LINES,
@@ -237,6 +278,185 @@ pub fn set_obd_text_path(path: &Path) {
             cache.last_check = None;
         }
     }
+}
+
+/// Largest TTF font size (in pixels) the overlay will ever render. `text_scale` comes from a live,
+/// user-writable file and this process is built with `panic = "abort"`, so absurd values must be
+/// bounded (a 100000 px glyph bitmap alone needs ~14 GB).
+const MAX_TTF_FONT_PX: f32 = 200.0;
+
+/// Largest integer scale of the built-in 8x8 bitmap font (32 -> 256x256 px glyphs).
+const MAX_BITMAP_TEXT_SCALE: usize = 32;
+
+/// Minimum interval between checks of the TTF file (existence and modification time).
+const FONT_CHECK_INTERVAL: Duration = Duration::from_millis(500);
+
+/// TTF font size in pixels for a given `text_scale`: `1..=4` are presets (12/24/36/48 px, so the
+/// default `2` gives 24 px), larger values are the size itself. Always bounded by [`MAX_TTF_FONT_PX`].
+fn ttf_base_font_size(text_scale: usize) -> f32 {
+    let px = if text_scale <= 4 {
+        (text_scale.max(1) * 12) as f32
+    } else {
+        text_scale as f32
+    };
+    px.min(MAX_TTF_FONT_PX)
+}
+
+struct CachedObdFont {
+    /// `obd_font_path` from `config.toml`.
+    config_path: PathBuf,
+    /// `"font_path"` from the live JSON file; takes precedence over `config_path` when non-empty.
+    json_path: PathBuf,
+    /// Effective path currently loaded (`json_path` if set, otherwise `config_path`).
+    path: PathBuf,
+    last_check: Option<Instant>,
+    /// Modification time seen by the last load attempt for `path` (`Some(None)` = mtime not
+    /// available). `None` = no attempt yet. A failed attempt is not repeated until the file changes.
+    attempted_mtime: Option<Option<std::time::SystemTime>>,
+    font: Option<Arc<fontdue::Font>>,
+}
+
+impl CachedObdFont {
+    fn refresh_effective_path(&mut self) {
+        let effective = if self.json_path.as_os_str().is_empty() {
+            self.config_path.clone()
+        } else {
+            self.json_path.clone()
+        };
+        if effective != self.path {
+            self.path = effective;
+            self.last_check = None;
+            self.attempted_mtime = None;
+            self.font = None;
+        }
+    }
+}
+
+static OBD_FONT_CACHE: LazyLock<Mutex<CachedObdFont>> = LazyLock::new(|| {
+    Mutex::new(CachedObdFont {
+        config_path: PathBuf::new(),
+        json_path: PathBuf::new(),
+        path: PathBuf::new(),
+        last_check: None,
+        attempted_mtime: None,
+        font: None,
+    })
+});
+
+/// Number of font file read+parse attempts (used by tests to verify they are not repeated).
+#[cfg(test)]
+static FONT_LOAD_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+
+fn trimmed_path(path: &Path) -> PathBuf {
+    let s = path.to_string_lossy();
+    PathBuf::from(s.trim())
+}
+
+/// Sets the TTF font path from `obd_font_path` in `config.toml`. Empty or whitespace-only means
+/// "no TTF font" (built-in bitmap font). A non-empty `"font_path"` in the live JSON file
+/// ([`set_obd_json_font_path`]) takes precedence over this value.
+pub fn set_obd_font_path(path: &Path) {
+    let resolved = trimmed_path(path);
+    if let Ok(mut cache) = OBD_FONT_CACHE.lock() {
+        if cache.config_path != resolved {
+            cache.config_path = resolved;
+            cache.refresh_effective_path();
+        }
+    }
+}
+
+/// Sets the TTF font path from `"font_path"` in the live JSON file (empty = not set).
+pub fn set_obd_json_font_path(path: &str) {
+    let resolved = trimmed_path(Path::new(path));
+    if let Ok(mut cache) = OBD_FONT_CACHE.lock() {
+        if cache.json_path != resolved {
+            cache.json_path = resolved;
+            cache.refresh_effective_path();
+        }
+    }
+}
+
+/// Retrieves the active TTF font if the effective font path exists, is non-empty, and parses
+/// successfully. Returns `None` if the path is empty, does not exist, is an empty file (0 bytes),
+/// or fails to parse, in which case text rendering falls back to the built-in bitmap font.
+///
+/// The font file is re-checked at most every [`FONT_CHECK_INTERVAL`] and (re)loaded only when its
+/// modification time changes. Reading and parsing a font takes tens of milliseconds, so it is done
+/// without holding the cache lock, which is also taken by the packet-handling thread.
+pub fn get_cached_obd_font() -> Option<Arc<fontdue::Font>> {
+    let now = Instant::now();
+
+    // Phase 1 (locked): decide whether the file has to be (re)loaded.
+    let (path, mtime) = {
+        let mut cache = OBD_FONT_CACHE.lock().ok()?;
+        if cache.path.as_os_str().is_empty() {
+            cache.font = None;
+            return None;
+        }
+        let due = cache
+            .last_check
+            .map(|last| now.duration_since(last) >= FONT_CHECK_INTERVAL)
+            .unwrap_or(true);
+        if !due {
+            return cache.font.clone();
+        }
+        cache.last_check = Some(now);
+        let path = cache.path.clone();
+        match fs::metadata(&path) {
+            Ok(meta) if meta.len() > 0 => {
+                let mtime = meta.modified().ok();
+                if cache.attempted_mtime == Some(mtime) {
+                    return cache.font.clone();
+                }
+                (path, mtime)
+            }
+            _ => {
+                // Missing or empty file: bitmap fallback; retry when it appears.
+                cache.font = None;
+                cache.attempted_mtime = None;
+                return None;
+            }
+        }
+    };
+
+    // Phase 2 (unlocked): read and parse.
+    #[cfg(test)]
+    FONT_LOAD_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+    let loaded = match fs::read(&path) {
+        Ok(bytes) if !bytes.is_empty() => {
+            match fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default()) {
+                Ok(font) => {
+                    info!("obd_overlay: loaded TTF font from {}", path.display());
+                    Some(Arc::new(font))
+                }
+                Err(err) => {
+                    warn!(
+                        "obd_overlay: failed to parse TTF font {}: {:?}",
+                        path.display(),
+                        err
+                    );
+                    None
+                }
+            }
+        }
+        Ok(_) => None,
+        Err(e) => {
+            warn!(
+                "obd_overlay: failed to read TTF font {}: {:?}",
+                path.display(),
+                e
+            );
+            None
+        }
+    };
+
+    // Phase 3 (locked): publish the result unless the path changed in the meantime.
+    let mut cache = OBD_FONT_CACHE.lock().ok()?;
+    if cache.path == path {
+        cache.attempted_mtime = Some(mtime);
+        cache.font = loaded;
+    }
+    cache.font.clone()
 }
 
 /// Lightweight per-channel packet gate state locked on `from_stream` (Core 1) for <50ns.
@@ -752,9 +972,12 @@ pub fn register_video_channels_from_sdr(
     sdr: &mut ServiceDiscoveryResponse,
     enabled: bool,
     obd_text_path: &Path,
+    obd_font_path: &Path,
 ) {
     SESSION_ENABLED.store(enabled, Ordering::Release);
     if !enabled {
+        set_obd_font_path(Path::new(""));
+        set_obd_json_font_path("");
         // Drop any state left over from a previous (enabled) session.
         if let (Ok(mut g), Ok(mut d), Ok(mut e)) = (
             CHANNEL_GATES.lock(),
@@ -769,6 +992,7 @@ pub fn register_video_channels_from_sdr(
     }
     let resolved_path = resolve_obd_text_path(obd_text_path);
     set_obd_text_path(&resolved_path);
+    set_obd_font_path(obd_font_path);
     let (cfg, _lines) = get_cached_obd_config_and_lines();
 
     let mut gates = match CHANNEL_GATES.lock() {
@@ -876,13 +1100,19 @@ pub fn is_active_for_channel(channel: u8) -> bool {
 /// When `obd_overlay_enabled = true`, `pipeline_engaged` is `true` from the start of the session
 /// even if `"text"` in `obd_text_path` is initially empty, so text can be added or cleared live
 /// at any point while maintaining a single continuous H.264 bitstream.
-pub fn is_active_for_packet(channel: u8, flags: u8, obd_text_path: &Path) -> bool {
+pub fn is_active_for_packet(
+    channel: u8,
+    flags: u8,
+    obd_text_path: &Path,
+    obd_font_path: &Path,
+) -> bool {
     if !SESSION_ENABLED.load(Ordering::Relaxed) {
         return false;
     }
     let is_first_fragment = (flags & crate::mitm::FRAME_TYPE_FIRST) != 0;
     let overlay_now = if is_first_fragment {
         set_obd_text_path(obd_text_path);
+        set_obd_font_path(obd_font_path);
         obd_overlay_enabled()
     } else {
         false
@@ -984,6 +1214,7 @@ pub fn get_cached_obd_config_and_lines() -> (ObdOverlayConfig, Vec<String>) {
                 cache.lines.clear();
             }
         }
+        set_obd_json_font_path(&cache.config.font_path);
     }
 
     (cache.config.clone(), cache.lines.clone())
@@ -1080,6 +1311,63 @@ pub fn parse_obd_text_lines(raw: &str) -> Vec<String> {
     parse_obd_text_lines_with_limits(raw, MAX_DISPLAY_LINES, MAX_LINE_CHARS)
 }
 
+fn normalize_html_breaks(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '<' {
+            let mut tag = String::new();
+            while let Some(&tc) = chars.peek() {
+                chars.next();
+                if tc == '>' {
+                    break;
+                }
+                tag.push(tc);
+            }
+            let tag_lower = tag.trim().to_ascii_lowercase();
+            if tag_lower == "br"
+                || tag_lower == "br/"
+                || tag_lower.starts_with("br ")
+                || tag_lower == "/p"
+                || tag_lower == "/div"
+            {
+                out.push('\n');
+            } else {
+                out.push('<');
+                out.push_str(&tag);
+                out.push('>');
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn truncate_line_respecting_html(s: &str, max_visible_chars: usize) -> String {
+    if !s.contains('<') {
+        return truncate_line(s, max_visible_chars);
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut visible_count = 0;
+    let mut in_tag = false;
+    for ch in s.chars() {
+        if ch == '<' {
+            in_tag = true;
+            out.push(ch);
+        } else if ch == '>' {
+            in_tag = false;
+            out.push(ch);
+        } else if in_tag {
+            out.push(ch);
+        } else if visible_count < max_visible_chars {
+            out.push(ch);
+            visible_count += 1;
+        }
+    }
+    out
+}
+
 fn parse_obd_text_lines_with_limits(
     raw: &str,
     max_display_lines: usize,
@@ -1090,13 +1378,14 @@ fn parse_obd_text_lines_with_limits(
     }
 
     // Normalize both escaped sequences (\\r\\n, \\n, \\r) and raw characters (\r\n, \r, \n)
-    // so any carriage return or newline representation produces a separate line.
-    let normalized = raw
+    let preprocessed = raw
         .replace("\\r\\n", "\n")
         .replace("\\n", "\n")
         .replace("\\r", "\n")
         .replace("\r\n", "\n")
         .replace('\r', "\n");
+
+    let normalized = normalize_html_breaks(&preprocessed);
 
     let char_limit = max_line_chars.max(1);
     let mut lines: Vec<String> = normalized
@@ -1104,16 +1393,16 @@ fn parse_obd_text_lines_with_limits(
         .map(|line| {
             let expanded = line.replace('\t', "  ");
             let trimmed_end = expanded.trim_end();
-            truncate_line(trimmed_end, char_limit)
+            truncate_line_respecting_html(trimmed_end, char_limit)
         })
         .collect();
 
     // Remove leading/trailing completely empty lines (e.g. trailing newline at EOF),
     // while preserving intentional blank lines between non-empty lines.
-    while lines.first().map(|l| l.is_empty()).unwrap_or(false) {
+    while lines.first().map(|l| l.trim().is_empty()).unwrap_or(false) {
         lines.remove(0);
     }
-    while lines.last().map(|l| l.is_empty()).unwrap_or(false) {
+    while lines.last().map(|l| l.trim().is_empty()).unwrap_or(false) {
         lines.pop();
     }
 
@@ -2067,6 +2356,452 @@ fn blend_channel(dst: u8, src: u8, alpha_255: u32) -> u8 {
     (((dst as u32) * inv + (src as u32) * alpha_255 + 127) / 255) as u8
 }
 
+// ============================================================================
+// HTML & CSS STYLING FOR OBD OVERLAY
+// ============================================================================
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StyledSpan {
+    pub text: String,
+    pub fg_color: (u8, u8, u8),
+    pub bg_color: Option<(u8, u8, u8)>,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub font_size: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StyledLine {
+    pub spans: Vec<StyledSpan>,
+}
+
+#[derive(Debug, Clone)]
+struct StyleState {
+    fg_color: (u8, u8, u8),
+    bg_color: Option<(u8, u8, u8)>,
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    font_size: f32,
+}
+
+/// Parses standard CSS color strings: `#rgb`, `#rrggbb`, `#rrggbbaa`, `rgb(...)`, or common web color names.
+pub fn parse_css_color(s: &str) -> Option<(u8, u8, u8)> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    if let Some(hex) = s.strip_prefix('#') {
+        let hex = hex.trim();
+        // The slicing below is by byte; non-ASCII input would split a character and panic.
+        if !hex.is_ascii() {
+            return None;
+        }
+        match hex.len() {
+            3 => {
+                let r = u8::from_str_radix(&hex[0..1], 16).ok()?;
+                let g = u8::from_str_radix(&hex[1..2], 16).ok()?;
+                let b = u8::from_str_radix(&hex[2..3], 16).ok()?;
+                return Some((r * 17, g * 17, b * 17));
+            }
+            6 | 8 => {
+                let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+                let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+                let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+                return Some((r, g, b));
+            }
+            _ => return None,
+        }
+    }
+    if s.starts_with("rgb(") || s.starts_with("rgba(") {
+        let inside = s.split_once('(')?.1.strip_suffix(')')?;
+        let parts: Vec<&str> = inside.split(',').map(|p| p.trim()).collect();
+        if parts.len() >= 3 {
+            let r: u8 = parts[0].parse().ok()?;
+            let g: u8 = parts[1].parse().ok()?;
+            let b: u8 = parts[2].parse().ok()?;
+            return Some((r, g, b));
+        }
+    }
+    match s.to_ascii_lowercase().as_str() {
+        "white" => Some((255, 255, 255)),
+        "black" => Some((0, 0, 0)),
+        "red" => Some((255, 0, 0)),
+        "green" => Some((0, 255, 0)),
+        "lime" => Some((50, 205, 50)),
+        "blue" => Some((0, 100, 255)),
+        "yellow" => Some((255, 255, 0)),
+        "cyan" | "aqua" => Some((0, 255, 255)),
+        "magenta" | "fuchsia" => Some((255, 0, 255)),
+        "orange" => Some((255, 165, 0)),
+        "gray" | "grey" => Some((128, 128, 128)),
+        "darkgray" | "darkgrey" => Some((64, 64, 64)),
+        "lightgray" | "lightgrey" => Some((211, 211, 211)),
+        "silver" => Some((192, 192, 192)),
+        "maroon" => Some((128, 0, 0)),
+        "olive" => Some((128, 128, 0)),
+        "navy" => Some((0, 0, 128)),
+        "purple" => Some((128, 0, 128)),
+        "teal" => Some((0, 128, 128)),
+        "gold" => Some((255, 215, 0)),
+        "coral" => Some((255, 127, 80)),
+        "tomato" => Some((255, 99, 71)),
+        _ => None,
+    }
+}
+
+fn parse_css_style_declarations(style_str: &str, state: &mut StyleState) {
+    for decl in style_str.split(';') {
+        let decl = decl.trim();
+        if decl.is_empty() {
+            continue;
+        }
+        if let Some((prop, val)) = decl.split_once(':') {
+            let prop = prop.trim().to_ascii_lowercase();
+            let val = val.trim();
+            match prop.as_str() {
+                "color" => {
+                    if let Some(c) = parse_css_color(val) {
+                        state.fg_color = c;
+                    }
+                }
+                "background-color" | "background" => {
+                    if val.eq_ignore_ascii_case("transparent") || val.eq_ignore_ascii_case("none") {
+                        state.bg_color = None;
+                    } else if let Some(c) = parse_css_color(val) {
+                        state.bg_color = Some(c);
+                    }
+                }
+                "font-weight" => {
+                    let v_lower = val.to_ascii_lowercase();
+                    if v_lower == "bold"
+                        || v_lower == "bolder"
+                        || v_lower == "700"
+                        || v_lower == "800"
+                        || v_lower == "900"
+                    {
+                        state.bold = true;
+                    } else if v_lower == "normal" || v_lower == "lighter" || v_lower == "400" {
+                        state.bold = false;
+                    }
+                }
+                "font-style" => {
+                    let v_lower = val.to_ascii_lowercase();
+                    if v_lower == "italic" || v_lower == "oblique" {
+                        state.italic = true;
+                    } else if v_lower == "normal" {
+                        state.italic = false;
+                    }
+                }
+                "text-decoration" | "text-decoration-line" => {
+                    let v_lower = val.to_ascii_lowercase();
+                    if v_lower.contains("underline") {
+                        state.underline = true;
+                    } else if v_lower.contains("none") {
+                        state.underline = false;
+                    }
+                }
+                "font-size" => {
+                    let num_part: String = val
+                        .chars()
+                        .take_while(|c| c.is_ascii_digit() || *c == '.')
+                        .collect();
+                    if let Ok(sz) = num_part.parse::<f32>() {
+                        if (6.0..=120.0).contains(&sz) {
+                            state.font_size = sz;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn parse_tag_attributes(tag_body: &str) -> HashMap<String, String> {
+    let mut attrs = HashMap::new();
+    let mut chars = tag_body.chars().peekable();
+    while let Some(&c) = chars.peek() {
+        if c.is_whitespace() {
+            break;
+        }
+        chars.next();
+    }
+    while chars.peek().is_some() {
+        while let Some(&c) = chars.peek() {
+            if !c.is_whitespace() {
+                break;
+            }
+            chars.next();
+        }
+        let mut key = String::new();
+        while let Some(&c) = chars.peek() {
+            if c == '=' || c.is_whitespace() || c == '/' || c == '>' {
+                break;
+            }
+            key.push(c);
+            chars.next();
+        }
+        if key.is_empty() {
+            chars.next();
+            continue;
+        }
+        while let Some(&c) = chars.peek() {
+            if !c.is_whitespace() {
+                break;
+            }
+            chars.next();
+        }
+        if chars.peek() == Some(&'=') {
+            chars.next();
+            while let Some(&c) = chars.peek() {
+                if !c.is_whitespace() {
+                    break;
+                }
+                chars.next();
+            }
+            let mut val = String::new();
+            if let Some(&quote) = chars.peek() {
+                if quote == '"' || quote == '\'' {
+                    chars.next();
+                    for c in chars.by_ref() {
+                        if c == quote {
+                            break;
+                        }
+                        val.push(c);
+                    }
+                } else {
+                    while let Some(&c) = chars.peek() {
+                        if c.is_whitespace() || c == '>' || c == '/' {
+                            break;
+                        }
+                        val.push(c);
+                        chars.next();
+                    }
+                }
+            }
+            attrs.insert(key.to_ascii_lowercase(), val);
+        } else {
+            attrs.insert(key.to_ascii_lowercase(), String::new());
+        }
+    }
+    attrs
+}
+
+fn decode_html_entities(s: &str) -> String {
+    s.replace("&nbsp;", " ")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&apos;", "'")
+        .replace("&deg;", "°")
+}
+
+/// Strips all HTML `<...>` tags and decodes entities, producing clean plain text for the 8x8 bitmap font fallback.
+pub fn strip_html_tags(s: &str) -> String {
+    if !s.contains('<') && !s.contains('&') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for ch in s.chars() {
+        if ch == '<' {
+            in_tag = true;
+        } else if ch == '>' {
+            in_tag = false;
+        } else if !in_tag {
+            out.push(ch);
+        }
+    }
+    decode_html_entities(&out)
+}
+
+/// Parses an HTML-formatted line into styled spans with bold, italic, underline, fg color, and bg color.
+pub fn parse_html_line(
+    raw_line: &str,
+    default_color: (u8, u8, u8),
+    default_font_size: f32,
+) -> StyledLine {
+    let mut state_stack = vec![StyleState {
+        fg_color: default_color,
+        bg_color: None,
+        bold: false,
+        italic: false,
+        underline: false,
+        font_size: default_font_size,
+    }];
+
+    let mut spans = Vec::new();
+    let mut cur_text = String::new();
+
+    let mut chars = raw_line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '<' {
+            let mut tag = String::new();
+            while let Some(&tc) = chars.peek() {
+                chars.next();
+                if tc == '>' {
+                    break;
+                }
+                tag.push(tc);
+            }
+            let trimmed_tag = tag.trim();
+            if let Some(closing_tag) = trimmed_tag.strip_prefix('/') {
+                let tag_name = closing_tag.trim().to_ascii_lowercase();
+                if !cur_text.is_empty() {
+                    let decoded = decode_html_entities(&cur_text);
+                    if !decoded.is_empty() {
+                        let top = state_stack.last().unwrap();
+                        spans.push(StyledSpan {
+                            text: decoded,
+                            fg_color: top.fg_color,
+                            bg_color: top.bg_color,
+                            bold: top.bold,
+                            italic: top.italic,
+                            underline: top.underline,
+                            font_size: top.font_size,
+                        });
+                    }
+                    cur_text.clear();
+                }
+                if state_stack.len() > 1 {
+                    match tag_name.as_str() {
+                        "b" | "strong" | "i" | "em" | "u" | "font" | "span" | "mark" => {
+                            state_stack.pop();
+                        }
+                        _ => {}
+                    }
+                }
+            } else {
+                if !cur_text.is_empty() {
+                    let decoded = decode_html_entities(&cur_text);
+                    if !decoded.is_empty() {
+                        let top = state_stack.last().unwrap();
+                        spans.push(StyledSpan {
+                            text: decoded,
+                            fg_color: top.fg_color,
+                            bg_color: top.bg_color,
+                            bold: top.bold,
+                            italic: top.italic,
+                            underline: top.underline,
+                            font_size: top.font_size,
+                        });
+                    }
+                    cur_text.clear();
+                }
+
+                let tag_name = trimmed_tag
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                let attrs = parse_tag_attributes(trimmed_tag);
+                let mut new_state = state_stack.last().unwrap().clone();
+
+                match tag_name.as_str() {
+                    "b" | "strong" => {
+                        new_state.bold = true;
+                        state_stack.push(new_state);
+                    }
+                    "i" | "em" => {
+                        new_state.italic = true;
+                        state_stack.push(new_state);
+                    }
+                    "u" => {
+                        new_state.underline = true;
+                        state_stack.push(new_state);
+                    }
+                    "mark" => {
+                        new_state.bg_color = Some((255, 255, 0));
+                        if let Some(style) = attrs.get("style") {
+                            parse_css_style_declarations(style, &mut new_state);
+                        }
+                        state_stack.push(new_state);
+                    }
+                    "font" => {
+                        if let Some(color_val) = attrs.get("color") {
+                            if let Some(c) = parse_css_color(color_val) {
+                                new_state.fg_color = c;
+                            }
+                        }
+                        state_stack.push(new_state);
+                    }
+                    "span" => {
+                        if let Some(style) = attrs.get("style") {
+                            parse_css_style_declarations(style, &mut new_state);
+                        }
+                        state_stack.push(new_state);
+                    }
+                    _ => {}
+                }
+            }
+        } else {
+            cur_text.push(c);
+        }
+    }
+
+    if !cur_text.is_empty() {
+        let decoded = decode_html_entities(&cur_text);
+        if !decoded.is_empty() {
+            let top = state_stack.last().unwrap();
+            spans.push(StyledSpan {
+                text: decoded,
+                fg_color: top.fg_color,
+                bg_color: top.bg_color,
+                bold: top.bold,
+                italic: top.italic,
+                underline: top.underline,
+                font_size: top.font_size,
+            });
+        }
+    }
+
+    StyledLine { spans }
+}
+
+fn draw_colored_rect(
+    frame: &mut YuvFrame,
+    x0: usize,
+    y0: usize,
+    x1: usize,
+    y1: usize,
+    color_y: u8,
+    color_u: u8,
+    color_v: u8,
+) {
+    if x0 >= x1 || y0 >= y1 || x0 >= frame.width || y0 >= frame.height {
+        return;
+    }
+    let x1 = x1.min(frame.width);
+    let y1 = y1.min(frame.height);
+    let stride_y = frame.width;
+    let stride_uv = frame.width / 2;
+
+    for y in y0..y1 {
+        let row_off = y * stride_y;
+        for x in x0..x1 {
+            frame.y[row_off + x] = color_y;
+        }
+    }
+
+    let uv_x0 = x0 / 2;
+    let uv_x1 = x1.div_ceil(2).min(stride_uv);
+    let uv_y0 = y0 / 2;
+    let uv_y1 = y1.div_ceil(2).min(frame.height / 2);
+
+    for uy in uv_y0..uv_y1 {
+        let row_off = uy * stride_uv;
+        for ux in uv_x0..uv_x1 {
+            let idx = row_off + ux;
+            frame.u[idx] = color_u;
+            frame.v[idx] = color_v;
+        }
+    }
+}
+
 /// Draws a translucent box with multi-line text near the bottom-right corner of `frame`
 /// using default [`ObdOverlayConfig`].
 pub fn draw_obd_box_yuv420(frame: &mut YuvFrame, lines: &[String]) {
@@ -2074,31 +2809,105 @@ pub fn draw_obd_box_yuv420(frame: &mut YuvFrame, lines: &[String]) {
 }
 
 /// Draws a translucent box with multi-line text on `frame` parameterized by [`ObdOverlayConfig`].
+/// If a TTF font is loaded (via `obd_font_path`), it renders text using the TTF font with `text_scale`
+/// as the font size in points/pixels. If no TTF font is loaded, it falls back to the built-in 8x8 bitmap font.
 pub fn draw_obd_box_yuv420_with_config(
     frame: &mut YuvFrame,
     lines: &[String],
     cfg: &ObdOverlayConfig,
 ) {
+    let font = get_cached_obd_font();
+    draw_obd_box_yuv420_with_config_and_font(frame, lines, cfg, font.as_deref());
+}
+
+/// Draws a translucent box with multi-line text on `frame` with an explicit optional TTF font.
+pub fn draw_obd_box_yuv420_with_config_and_font(
+    frame: &mut YuvFrame,
+    lines: &[String],
+    cfg: &ObdOverlayConfig,
+    font: Option<&fontdue::Font>,
+) {
     if lines.is_empty() || frame.width < 32 || frame.height < 32 {
         return;
     }
 
-    let scale = cfg.text_scale.max(1);
-    let glyph_w = 8 * scale;
-    let glyph_h = 8 * scale;
-    let char_step_x = glyph_w + cfg.char_spacing_px * scale;
-    let line_step_y = glyph_h + cfg.line_spacing_px;
-
-    let max_chars = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
-    if max_chars == 0 {
-        return;
-    }
-
-    let text_block_w = max_chars * char_step_x - (cfg.char_spacing_px * scale);
-    let text_block_h = lines.len() * line_step_y - cfg.line_spacing_px;
-
     let total_pad_x = cfg.box_padding_x_px + cfg.box_border_px;
     let total_pad_y = cfg.box_padding_y_px + cfg.box_border_px;
+
+    // Presets 1 -> 12px, 2 -> 24px (default), 3 -> 36px, 4 -> 48px; larger values are the size.
+    let base_font_size = ttf_base_font_size(cfg.text_scale);
+
+    let styled_lines: Vec<StyledLine> = lines
+        .iter()
+        .map(|l| parse_html_line(l, cfg.text_rgb, base_font_size))
+        .collect();
+
+    let clean_bitmap_lines: Vec<String> = lines.iter().map(|l| strip_html_tags(l)).collect();
+
+    let (text_block_w, text_block_h) = if let Some(font) = font {
+        let line_metrics = font.horizontal_line_metrics(base_font_size);
+        let line_height = line_metrics
+            .map(|m| m.new_line_size.ceil() as usize)
+            .unwrap_or((base_font_size * 1.2).ceil() as usize)
+            + cfg.line_spacing_px;
+
+        let max_w = styled_lines
+            .iter()
+            .map(|line| {
+                let mut line_w = 0.0f32;
+                for span in &line.spans {
+                    for ch in span.text.chars() {
+                        let m = font.metrics(ch, span.font_size);
+                        let bold_extra = if span.bold { 1.0 } else { 0.0 };
+                        let italic_extra = if span.italic {
+                            (span.font_size * 0.1).ceil()
+                        } else {
+                            0.0
+                        };
+                        line_w += m.advance_width
+                            + bold_extra
+                            + italic_extra
+                            + cfg.char_spacing_px as f32;
+                    }
+                }
+                if line_w > 0.0 {
+                    line_w -= cfg.char_spacing_px as f32;
+                }
+                line_w.max(0.0).ceil() as usize
+            })
+            .max()
+            .unwrap_or(0);
+
+        let total_h = if styled_lines.is_empty() {
+            0
+        } else {
+            styled_lines.len() * line_height
+        };
+        (max_w, total_h)
+    } else {
+        let scale = cfg.text_scale.clamp(1, MAX_BITMAP_TEXT_SCALE);
+        let glyph_w = 8 * scale;
+        let glyph_h = 8 * scale;
+        let char_step_x = glyph_w + cfg.char_spacing_px * scale;
+        let line_step_y = glyph_h + cfg.line_spacing_px;
+
+        let max_chars = clean_bitmap_lines
+            .iter()
+            .map(|l| l.chars().count())
+            .max()
+            .unwrap_or(0);
+        if max_chars == 0 {
+            return;
+        }
+
+        let w = max_chars * char_step_x - (cfg.char_spacing_px * scale);
+        let h = clean_bitmap_lines.len() * line_step_y - cfg.line_spacing_px;
+        (w, h)
+    };
+
+    if text_block_w == 0 || text_block_h == 0 {
+        return;
+    }
 
     let box_w = (text_block_w + total_pad_x * 2).min(frame.width);
     let box_h = (text_block_h + total_pad_y * 2).min(frame.height);
@@ -2168,8 +2977,7 @@ pub fn draw_obd_box_yuv420_with_config(
         }
     }
 
-    // 3. Render multi-line text with 1px drop shadow
-    let (txt_y, txt_u, txt_v) = rgb_to_BT601_yuv(cfg.text_rgb.0, cfg.text_rgb.1, cfg.text_rgb.2);
+    // 3. Render multi-line text with drop shadow
     let (shd_y, _shd_u, _shd_v) = rgb_to_BT601_yuv(
         cfg.text_shadow_rgb.0,
         cfg.text_shadow_rgb.1,
@@ -2179,26 +2987,233 @@ pub fn draw_obd_box_yuv420_with_config(
     let text_start_x = box_x0 + total_pad_x;
     let text_start_y = box_y0 + total_pad_y;
 
-    for (line_idx, line) in lines.iter().enumerate() {
-        let line_y = text_start_y + line_idx * line_step_y;
-        if line_y + glyph_h > box_y1 {
-            break;
-        }
-        for (char_idx, ch) in line.chars().enumerate() {
-            let char_x = text_start_x + char_idx * char_step_x;
-            if char_x + glyph_w > box_x1 {
+    if let Some(font) = font {
+        let line_metrics = font.horizontal_line_metrics(base_font_size);
+        let line_height = line_metrics
+            .map(|m| m.new_line_size.ceil() as usize)
+            .unwrap_or((base_font_size * 1.2).ceil() as usize)
+            + cfg.line_spacing_px;
+        let ascent = line_metrics
+            .map(|m| m.ascent.ceil() as usize)
+            .unwrap_or((base_font_size * 0.85).ceil() as usize);
+
+        for (line_idx, line) in styled_lines.iter().enumerate() {
+            let line_top_y = text_start_y + line_idx * line_height;
+            if line_top_y >= box_y1 {
                 break;
             }
-            let glyph = glyph_for_char(ch);
-            draw_scaled_glyph(
-                frame,
-                char_x,
-                line_y,
-                scale,
-                &glyph,
-                (txt_y, txt_u, txt_v),
-                shd_y,
-            );
+            let baseline_y = line_top_y + ascent;
+            let mut cursor_x = text_start_x as f32;
+
+            // Pass A: Draw span background rectangles first
+            let mut bg_cursor_x = cursor_x;
+            for span in &line.spans {
+                let mut span_w = 0.0f32;
+                for ch in span.text.chars() {
+                    let m = font.metrics(ch, span.font_size);
+                    let bold_extra = if span.bold { 1.0 } else { 0.0 };
+                    let italic_extra = if span.italic {
+                        (span.font_size * 0.1).ceil()
+                    } else {
+                        0.0
+                    };
+                    span_w +=
+                        m.advance_width + bold_extra + italic_extra + cfg.char_spacing_px as f32;
+                }
+                if let Some(bg_rgb) = span.bg_color {
+                    let (bg_y, bg_u, bg_v) = rgb_to_BT601_yuv(bg_rgb.0, bg_rgb.1, bg_rgb.2);
+                    let pad_x = 2usize;
+                    let span_x0 = (bg_cursor_x.round() as usize)
+                        .saturating_sub(pad_x)
+                        .max(box_x0);
+                    let span_x1 = ((bg_cursor_x + span_w).round() as usize + pad_x).min(box_x1);
+                    let span_y0 = line_top_y.min(box_y1);
+                    let span_y1 =
+                        (line_top_y + line_height.saturating_sub(cfg.line_spacing_px)).min(box_y1);
+                    draw_colored_rect(frame, span_x0, span_y0, span_x1, span_y1, bg_y, bg_u, bg_v);
+                }
+                bg_cursor_x += span_w;
+            }
+
+            // Pass B: Draw glyphs and underlines
+            for span in &line.spans {
+                let (span_txt_y, span_txt_u, span_txt_v) =
+                    rgb_to_BT601_yuv(span.fg_color.0, span.fg_color.1, span.fg_color.2);
+                let span_start_x = cursor_x;
+
+                for ch in span.text.chars() {
+                    if cursor_x as usize >= box_x1 {
+                        break;
+                    }
+                    let (metrics, bitmap) = font.rasterize(ch, span.font_size);
+                    let glyph_x0 = cursor_x.round() as isize + metrics.xmin as isize;
+                    let glyph_y0 =
+                        baseline_y as isize - (metrics.ymin + metrics.height as i32) as isize;
+
+                    draw_ttf_glyph(
+                        frame,
+                        glyph_x0,
+                        glyph_y0,
+                        metrics.width,
+                        metrics.height,
+                        &bitmap,
+                        (span_txt_y, span_txt_u, span_txt_v),
+                        shd_y,
+                        box_x1,
+                        box_y1,
+                        span.bold,
+                        span.italic,
+                    );
+
+                    let bold_extra = if span.bold { 1.0 } else { 0.0 };
+                    let italic_extra = if span.italic {
+                        (span.font_size * 0.1).ceil()
+                    } else {
+                        0.0
+                    };
+                    cursor_x += metrics.advance_width
+                        + bold_extra
+                        + italic_extra
+                        + cfg.char_spacing_px as f32;
+                }
+
+                if span.underline {
+                    let u_x0 = (span_start_x.round() as usize).min(box_x1);
+                    let u_x1 = (cursor_x.round() as usize).min(box_x1);
+                    let u_y0 = (baseline_y + 2).min(box_y1);
+                    let u_y1 = (u_y0 + 2).min(box_y1);
+                    draw_colored_rect(
+                        frame, u_x0, u_y0, u_x1, u_y1, span_txt_y, span_txt_u, span_txt_v,
+                    );
+                }
+            }
+        }
+    } else {
+        let (txt_y, txt_u, txt_v) =
+            rgb_to_BT601_yuv(cfg.text_rgb.0, cfg.text_rgb.1, cfg.text_rgb.2);
+        let scale = cfg.text_scale.clamp(1, MAX_BITMAP_TEXT_SCALE);
+        let glyph_w = 8 * scale;
+        let glyph_h = 8 * scale;
+        let char_step_x = glyph_w + cfg.char_spacing_px * scale;
+        let line_step_y = glyph_h + cfg.line_spacing_px;
+
+        for (line_idx, line) in clean_bitmap_lines.iter().enumerate() {
+            let line_y = text_start_y + line_idx * line_step_y;
+            if line_y + glyph_h > box_y1 {
+                break;
+            }
+            for (char_idx, ch) in line.chars().enumerate() {
+                let char_x = text_start_x + char_idx * char_step_x;
+                if char_x + glyph_w > box_x1 {
+                    break;
+                }
+                let glyph = glyph_for_char(ch);
+                draw_scaled_glyph(
+                    frame,
+                    char_x,
+                    line_y,
+                    scale,
+                    &glyph,
+                    (txt_y, txt_u, txt_v),
+                    shd_y,
+                );
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_ttf_glyph(
+    frame: &mut YuvFrame,
+    x0: isize,
+    y0: isize,
+    width: usize,
+    height: usize,
+    bitmap: &[u8],
+    txt_yuv: (u8, u8, u8),
+    shadow_y: u8,
+    clip_x1: usize,
+    clip_y1: usize,
+    bold: bool,
+    italic: bool,
+) {
+    if width == 0 || height == 0 || bitmap.is_empty() {
+        return;
+    }
+    let frame_w = frame.width;
+    let frame_h = frame.height;
+    let stride_uv = frame_w / 2;
+    let (txt_y, txt_u, txt_v) = txt_yuv;
+
+    // 1. Drop shadow offset (+1px)
+    let shadow_offset: isize = 1;
+    let bold_passes = if bold { 2 } else { 1 };
+    for pass in 0..bold_passes {
+        for gy in 0..height {
+            let row_off = gy * width;
+            let shear = if italic {
+                ((height.saturating_sub(gy)) as isize) / 4
+            } else {
+                0
+            };
+            for gx in 0..width {
+                let alpha = bitmap[row_off + gx] as u32;
+                if alpha == 0 {
+                    continue;
+                }
+                let sx = x0 + gx as isize + pass as isize + shear + shadow_offset;
+                let sy = y0 + gy as isize + shadow_offset;
+                if sx >= 0
+                    && (sx as usize) < clip_x1
+                    && (sx as usize) < frame_w
+                    && sy >= 0
+                    && (sy as usize) < clip_y1
+                    && (sy as usize) < frame_h
+                {
+                    let idx_y = (sy as usize) * frame_w + (sx as usize);
+                    frame.y[idx_y] = blend_channel(frame.y[idx_y], shadow_y, alpha);
+                }
+            }
+        }
+    }
+
+    // 2. Foreground antialiased glyph on Y and U/V planes
+    for pass in 0..bold_passes {
+        for gy in 0..height {
+            let row_off = gy * width;
+            let shear = if italic {
+                ((height.saturating_sub(gy)) as isize) / 4
+            } else {
+                0
+            };
+            for gx in 0..width {
+                let alpha = bitmap[row_off + gx] as u32;
+                if alpha == 0 {
+                    continue;
+                }
+                let fx = x0 + gx as isize + pass as isize + shear;
+                let fy = y0 + gy as isize;
+                if fx >= 0
+                    && (fx as usize) < clip_x1
+                    && (fx as usize) < frame_w
+                    && fy >= 0
+                    && (fy as usize) < clip_y1
+                    && (fy as usize) < frame_h
+                {
+                    let px = fx as usize;
+                    let py = fy as usize;
+                    let idx_y = py * frame_w + px;
+                    frame.y[idx_y] = blend_channel(frame.y[idx_y], txt_y, alpha);
+
+                    let uv_x = px / 2;
+                    let uv_y = py / 2;
+                    if uv_x < stride_uv && uv_y < frame_h / 2 {
+                        let idx_uv = uv_y * stride_uv + uv_x;
+                        frame.u[idx_uv] = blend_channel(frame.u[idx_uv], txt_u, alpha);
+                        frame.v[idx_uv] = blend_channel(frame.v[idx_uv], txt_v, alpha);
+                    }
+                }
+            }
         }
     }
 }
@@ -2820,7 +3835,7 @@ mod tests {
         svc.media_sink_service = protobuf::MessageField::some(sink);
         sdr.services.push(svc);
 
-        register_video_channels_from_sdr(&mut sdr, true, &tmp_json);
+        register_video_channels_from_sdr(&mut sdr, true, &tmp_json, Path::new(""));
         assert!(obd_overlay_enabled());
         assert_eq!(
             sdr.services[0]
@@ -2834,7 +3849,8 @@ mod tests {
         assert!(is_active_for_packet(
             ch,
             crate::mitm::FRAME_TYPE_FIRST | crate::mitm::FRAME_TYPE_LAST,
-            &tmp_json
+            &tmp_json,
+            Path::new(""),
         ));
 
         // 4. Stream starts with empty text: CODEC_CONFIG and Frame 0 are processed by the pipeline
@@ -2901,5 +3917,392 @@ mod tests {
         );
 
         let _ = fs::remove_file(&tmp_json);
+    }
+
+    #[test]
+    fn test_deserialize_text_scale_and_font_path() {
+        let json_int = r#"{"text_scale": 24, "font_path": "/tmp/custom.ttf"}"#;
+        let (cfg_int, _) = parse_obd_payload(json_int);
+        assert_eq!(cfg_int.text_scale, 24);
+        assert_eq!(cfg_int.font_path, "/tmp/custom.ttf");
+
+        let json_float = r#"{"text_scale": 28.4}"#;
+        let (cfg_float, _) = parse_obd_payload(json_float);
+        assert_eq!(cfg_float.text_scale, 28);
+
+        let json_str = r#"{"text_scale": "32"}"#;
+        let (cfg_str, _) = parse_obd_payload(json_str);
+        assert_eq!(cfg_str.text_scale, 32);
+
+        let json_default = r#"{}"#;
+        let (cfg_def, _) = parse_obd_payload(json_default);
+        assert_eq!(cfg_def.text_scale, TEXT_SCALE);
+        assert_eq!(cfg_def.font_path, "");
+    }
+
+    #[test]
+    fn test_ttf_font_fallback_and_rendering() {
+        let _guard = lock_test_state();
+
+        // 1. Empty font path returns None -> fallback to bitmap font
+        set_obd_font_path(Path::new(""));
+        assert!(get_cached_obd_font().is_none());
+
+        // Verify drawing works with None font (bitmap mode)
+        let mut frame_bitmap = YuvFrame::black(640, 480);
+        let lines = vec!["SPEED: 100 KM/H".to_string(), "RPM: 3500".to_string()];
+        draw_obd_box_yuv420(&mut frame_bitmap, &lines);
+        let non_zero_y_bitmap = frame_bitmap.y.iter().filter(|&&y| y > 16).count();
+        assert!(non_zero_y_bitmap > 0, "Bitmap rendering must modify pixels");
+
+        // 2. Nonexistent font path returns None -> fallback to bitmap font
+        set_obd_font_path(Path::new("/tmp/nonexistent_font_12345.ttf"));
+        assert!(get_cached_obd_font().is_none());
+
+        // 3. Empty font file (0 bytes) returns None -> fallback to bitmap font
+        let tmp_empty = std::env::temp_dir().join(format!("empty_font_{}.ttf", std::process::id()));
+        fs::write(&tmp_empty, b"").expect("write empty font file");
+        set_obd_font_path(&tmp_empty);
+        assert!(get_cached_obd_font().is_none());
+        let _ = fs::remove_file(&tmp_empty);
+
+        // 4. Invalid / corrupt font file returns None -> fallback to bitmap font
+        let tmp_corrupt =
+            std::env::temp_dir().join(format!("corrupt_font_{}.ttf", std::process::id()));
+        fs::write(&tmp_corrupt, b"this is not a valid ttf file").expect("write corrupt font file");
+        set_obd_font_path(&tmp_corrupt);
+        assert!(get_cached_obd_font().is_none());
+        let _ = fs::remove_file(&tmp_corrupt);
+
+        // 5. If a real TTF font is available on the system, verify TTF rendering and text_scale
+        let system_fonts = [
+            Path::new("/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf"),
+            Path::new("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+            Path::new("/etc/aa-proxy-rs/FreeSans.ttf"),
+        ];
+        let found_font = system_fonts.iter().copied().find(|p| p.exists());
+        if let Some(system_font) = found_font {
+            set_obd_font_path(system_font);
+            let font = get_cached_obd_font();
+            assert!(font.is_some(), "Valid TTF font should parse successfully");
+
+            let mut cfg_ttf = ObdOverlayConfig {
+                text_scale: 24, // Used as font size
+                box_opacity_percent: 50,
+                ..ObdOverlayConfig::default()
+            };
+
+            let mut frame_ttf = YuvFrame::black(640, 480);
+            draw_obd_box_yuv420_with_config(&mut frame_ttf, &lines, &cfg_ttf);
+            let non_zero_y_ttf = frame_ttf.y.iter().filter(|&&y| y > 16).count();
+            assert!(
+                non_zero_y_ttf > 0,
+                "TTF font rendering must draw characters"
+            );
+
+            // Verify changing text_scale changes the rendered glyph size / layout
+            cfg_ttf.text_scale = 36;
+            let mut frame_ttf_larger = YuvFrame::black(640, 480);
+            draw_obd_box_yuv420_with_config(&mut frame_ttf_larger, &lines, &cfg_ttf);
+            let non_zero_y_larger = frame_ttf_larger.y.iter().filter(|&&y| y > 16).count();
+            assert_ne!(
+                non_zero_y_ttf, non_zero_y_larger,
+                "Larger text_scale font size must produce different pixel counts"
+            );
+        }
+
+        // Reset font path back to empty after test
+        set_obd_font_path(Path::new(""));
+    }
+
+    #[test]
+    fn test_parse_css_color() {
+        assert_eq!(parse_css_color("#fff"), Some((255, 255, 255)));
+        assert_eq!(parse_css_color("#000"), Some((0, 0, 0)));
+        assert_eq!(parse_css_color("#ff0000"), Some((255, 0, 0)));
+        assert_eq!(parse_css_color("#00ff00"), Some((0, 255, 0)));
+        assert_eq!(parse_css_color("#0000ff"), Some((0, 0, 255)));
+        assert_eq!(parse_css_color("rgb(255, 128, 0)"), Some((255, 128, 0)));
+        assert_eq!(parse_css_color("red"), Some((255, 0, 0)));
+        assert_eq!(parse_css_color("YELLOW"), Some((255, 255, 0)));
+        assert_eq!(parse_css_color("blue"), Some((0, 100, 255)));
+        assert_eq!(parse_css_color("invalid_color"), None);
+    }
+
+    #[test]
+    fn test_html_breaks_and_line_limits() {
+        let raw = "<b>RPM:</b> 2500<br><b>Speed:</b> 80 km/h<br/><b>Coolant:</b> 90°C";
+        let lines = parse_obd_text_lines(raw);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "<b>RPM:</b> 2500");
+        assert_eq!(lines[1], "<b>Speed:</b> 80 km/h");
+        assert_eq!(lines[2], "<b>Coolant:</b> 90°C");
+
+        // Verify that long HTML tags do not truncate the visible text prematurely
+        let long_tag_line =
+            r#"<span style="color: #ff0000; background-color: #000022">RPM: 3500</span>"#;
+        let parsed_long = parse_obd_text_lines(long_tag_line);
+        assert_eq!(parsed_long.len(), 1);
+        assert!(parsed_long[0].contains("RPM: 3500"));
+    }
+
+    #[test]
+    fn test_parse_html_line_styles() {
+        let line = r##"<b>Bold</b> <i>Italic</i> <font color="#ff0000">Red</font> <span style="background-color: #0000ff; color: #ffff00">BlueBg YellowText</span>"##;
+        let styled = parse_html_line(line, (255, 255, 255), 24.0);
+
+        // Find bold span
+        let bold_span = styled.spans.iter().find(|s| s.text == "Bold").unwrap();
+        assert!(bold_span.bold);
+        assert!(!bold_span.italic);
+
+        // Find italic span
+        let italic_span = styled.spans.iter().find(|s| s.text == "Italic").unwrap();
+        assert!(!italic_span.bold);
+        assert!(italic_span.italic);
+
+        // Find red span
+        let red_span = styled.spans.iter().find(|s| s.text == "Red").unwrap();
+        assert_eq!(red_span.fg_color, (255, 0, 0));
+
+        // Find span with bg and fg
+        let span_both = styled
+            .spans
+            .iter()
+            .find(|s| s.text == "BlueBg YellowText")
+            .unwrap();
+        assert_eq!(span_both.bg_color, Some((0, 0, 255)));
+        assert_eq!(span_both.fg_color, (255, 255, 0));
+    }
+
+    #[test]
+    fn test_strip_html_tags_for_bitmap() {
+        let html = "<b>RPM:</b> <font color=\"#ff0000\">2500</font> &amp; <span style=\"color: yellow\">OK</span>";
+        let stripped = strip_html_tags(html);
+        assert_eq!(stripped, "RPM: 2500 & OK");
+    }
+
+    #[test]
+    fn test_ttf_rendering_with_html_colors_and_styles() {
+        let _guard = lock_test_state();
+
+        let system_fonts = [
+            Path::new("/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf"),
+            Path::new("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+            Path::new("/etc/aa-proxy-rs/FreeSans.ttf"),
+        ];
+        let found_font = system_fonts.iter().copied().find(|p| p.exists());
+        if let Some(font_path) = found_font {
+            set_obd_font_path(font_path);
+            let font = get_cached_obd_font();
+            assert!(font.is_some());
+
+            let cfg = ObdOverlayConfig {
+                text_scale: 24,
+                box_opacity_percent: 60,
+                ..ObdOverlayConfig::default()
+            };
+
+            let lines = vec![
+                "<b>RPM:</b> <font color=\"#ff0000\">3200</font>".to_string(),
+                "<span style=\"background-color: #0000ff; color: #ffff00\">SPEED: 95 KM/H</span>"
+                    .to_string(),
+            ];
+
+            let mut frame = YuvFrame::black(640, 480);
+            draw_obd_box_yuv420_with_config(&mut frame, &lines, &cfg);
+
+            // Verify pixels were written to Y and chroma planes U/V
+            let non_zero_y = frame.y.iter().filter(|&&y| y > 16).count();
+            let non_128_u = frame.u.iter().filter(|&&u| u != 128).count();
+            let non_128_v = frame.v.iter().filter(|&&v| v != 128).count();
+
+            assert!(non_zero_y > 0, "Y plane must be modified by text");
+            assert!(
+                non_128_u > 0,
+                "U plane must be modified by colored text/background"
+            );
+            assert!(
+                non_128_v > 0,
+                "V plane must be modified by colored text/background"
+            );
+        }
+
+        set_obd_font_path(Path::new(""));
+    }
+
+    #[test]
+    fn test_parse_css_color_non_ascii_does_not_panic() {
+        // Byte-slicing a non-ASCII "#..." used to panic (and abort the whole process in release).
+        for s in [
+            "#é1", "#aéaaa", "#ł", "#日1", "#😀", "#aa😀a", "#°#", "#ff ła",
+        ] {
+            assert_eq!(parse_css_color(s), None, "{s:?}");
+        }
+        assert_eq!(parse_css_color("#0f0"), Some((0, 255, 0)));
+    }
+
+    #[test]
+    fn test_html_and_text_parsers_never_panic_on_garbage() {
+        let pieces = [
+            "<",
+            ">",
+            "</",
+            "/>",
+            "<b>",
+            "</b>",
+            "<i>",
+            "<u>",
+            "<br>",
+            "<span style=\"",
+            "\">",
+            "color:",
+            "#",
+            "é",
+            "ą",
+            "ł",
+            "°",
+            "日",
+            "😀",
+            "&amp;",
+            "&",
+            ";",
+            "rgb(",
+            ")",
+            ",",
+            "background-color:",
+            "font-size:",
+            "999",
+            "-1",
+            " ",
+            "'",
+            "=",
+            "font",
+            "mark",
+            "a",
+            "1",
+            "ff",
+            "\\n",
+            "\n",
+            "\r",
+        ];
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for _ in 0..20_000 {
+            let n = (next() % 14) as usize + 1;
+            let mut s = String::new();
+            for _ in 0..n {
+                s.push_str(pieces[(next() % pieces.len() as u64) as usize]);
+            }
+            let _ = parse_css_color(&s);
+            let _ = parse_html_line(&s, (255, 255, 255), 24.0);
+            let _ = strip_html_tags(&s);
+            let lines = parse_obd_text_lines(&s);
+            let mut frame = YuvFrame::black(160, 96);
+            draw_obd_box_yuv420_with_config_and_font(
+                &mut frame,
+                &lines,
+                &ObdOverlayConfig::default(),
+                None,
+            );
+        }
+    }
+
+    #[test]
+    fn test_text_scale_is_bounded() {
+        assert_eq!(ttf_base_font_size(0), 12.0);
+        assert_eq!(ttf_base_font_size(1), 12.0);
+        assert_eq!(ttf_base_font_size(2), 24.0);
+        assert_eq!(ttf_base_font_size(4), 48.0);
+        assert_eq!(ttf_base_font_size(5), 5.0);
+        assert_eq!(ttf_base_font_size(26), 26.0);
+        assert_eq!(ttf_base_font_size(100_000), MAX_TTF_FONT_PX);
+        assert_eq!(ttf_base_font_size(usize::MAX), MAX_TTF_FONT_PX);
+
+        // The built-in font must not overflow or take forever with an absurd scale either.
+        let cfg = ObdOverlayConfig {
+            text_scale: usize::MAX,
+            ..ObdOverlayConfig::default()
+        };
+        let mut frame = YuvFrame::black(320, 192);
+        let t = Instant::now();
+        draw_obd_box_yuv420_with_config_and_font(&mut frame, &["RPM 2450".to_string()], &cfg, None);
+        assert!(t.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn test_json_font_path_takes_precedence_and_is_not_overwritten_by_config() {
+        let _guard = lock_test_state();
+        let current = || OBD_FONT_CACHE.lock().unwrap().path.clone();
+
+        set_obd_font_path(Path::new("/cfg/a.ttf"));
+        assert_eq!(current(), PathBuf::from("/cfg/a.ttf"));
+
+        set_obd_json_font_path("/json/b.ttf");
+        assert_eq!(current(), PathBuf::from("/json/b.ttf"));
+
+        // The packet hook re-applies the config path on every frame; it must not undo the JSON one.
+        for _ in 0..3 {
+            set_obd_font_path(Path::new("/cfg/a.ttf"));
+            assert_eq!(current(), PathBuf::from("/json/b.ttf"));
+        }
+
+        // Removing "font_path" from the JSON falls back to the config path.
+        set_obd_json_font_path("");
+        assert_eq!(current(), PathBuf::from("/cfg/a.ttf"));
+
+        set_obd_font_path(Path::new(""));
+        assert_eq!(current(), PathBuf::new());
+    }
+
+    #[test]
+    fn test_invalid_font_is_parsed_once_per_file_version() {
+        let _guard = lock_test_state();
+        let tmp = std::env::temp_dir().join(format!("obd_bad_font_{}.ttf", std::process::id()));
+        fs::write(&tmp, b"definitely not a font").unwrap();
+
+        let force_check = || OBD_FONT_CACHE.lock().unwrap().last_check = None;
+        let before = FONT_LOAD_ATTEMPTS.load(Ordering::Relaxed);
+
+        set_obd_font_path(&tmp);
+        for _ in 0..5 {
+            force_check();
+            assert!(get_cached_obd_font().is_none());
+        }
+        assert_eq!(
+            FONT_LOAD_ATTEMPTS.load(Ordering::Relaxed) - before,
+            1,
+            "an unparsable font must not be re-read and re-parsed on every check"
+        );
+
+        // A changed file (new modification time) is tried again.
+        fs::write(&tmp, b"still not a font, but different").unwrap();
+        let f = fs::OpenOptions::new().write(true).open(&tmp).unwrap();
+        f.set_modified(std::time::SystemTime::now() + Duration::from_secs(10))
+            .unwrap();
+        drop(f);
+        force_check();
+        assert!(get_cached_obd_font().is_none());
+        assert_eq!(FONT_LOAD_ATTEMPTS.load(Ordering::Relaxed) - before, 2);
+
+        set_obd_font_path(Path::new(""));
+        let _ = fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn test_html_single_quoted_attributes() {
+        let styled = parse_html_line(
+            "<font color='#00ff00'>A</font><span style='color: red; background: #000033'>B</span>",
+            (255, 255, 255),
+            24.0,
+        );
+        assert_eq!(styled.spans[0].fg_color, (0, 255, 0));
+        assert_eq!(styled.spans[1].fg_color, (255, 0, 0));
+        assert_eq!(styled.spans[1].bg_color, Some((0, 0, 51)));
     }
 }

@@ -213,8 +213,9 @@ The phone video is decoded, the text is rendered and the stream is re-encoded to
 **It is disabled by default** and does not touch the video path unless you enable it in `config.toml` (it requires `mitm = true`):
 ```toml
 obd_overlay_enabled = true
-# optional, this is the default:
+# optional, these are the defaults:
 obd_text_path = "/dev/shm/obd_overlay.json"
+obd_font_path = ""   # path to a .ttf font, empty = built-in bitmap font (see below)
 ```
 The option is evaluated when an Android Auto session starts, so a change applies on the next connection. While enabled, every frame of the main display
 goes through the decode/render/encode pipeline (even with empty text), and `VIDEO_FPS_60` is capped to 30 (see `cap_video_fps_to_30`), which means extra CPU load.
@@ -232,7 +233,8 @@ Note: an incomplete or invalid JSON is not an error, but the overlay then falls 
 
 | Key | Default | Description |
 |---|---|---|
-| `text` | `""` | Text to show; `\r\n`, `\n` and `\r` start a new line. Empty/`null`/missing shows nothing. Characters outside ASCII are shown as `?` (except `°`, `ñ` and basic Latin accents) |
+| `text` | `""` | Text to show; `\r\n`, `\n` and `\r` start a new line. Empty/`null`/missing shows nothing. May contain [HTML styling](#ttf-fonts-and-html-styling). With the built-in font, characters outside ASCII are shown as `?` (except `°`, `ñ` and basic Latin accents) |
+| `font_path` | `""` | Path to a `.ttf` font; when set it takes precedence over `obd_font_path` from `config.toml` |
 | `obd_poll_interval_ms` | `250` | Minimum interval between reads of the file (min. 20) |
 | `box_margin_right_px`, `box_margin_bottom_px` | `100`, `9` | Distance of the box from the right/bottom edge of the video |
 | `box_padding_x_px`, `box_padding_y_px` | `12`, `9` | Padding between box border and text |
@@ -240,13 +242,41 @@ Note: an incomplete or invalid JSON is not an error, but the overlay then falls 
 | `box_opacity_percent` | `0` | Box background opacity (`0` = floating text with shadow only, `100` = solid) |
 | `box_bg_rgb`, `box_border_rgb` | `[16,22,32]`, `[0,200,255]` | Box background and border color |
 | `text_rgb`, `text_shadow_rgb` | `[245,250,255]`, `[0,0,0]` | Text and drop-shadow color |
-| `text_scale` | `2` | Integer scale of the built-in 8x8 font (`2` = 16x16 px) |
+| `text_scale` | `2` | Built-in font: integer scale of the 8x8 glyphs (`2` = 16x16 px, max. 32). TTF font: font size, where `1`-`4` are presets for 12/24/36/48 px (default `2` = 24 px) and larger values are the size in pixels (max. 200) |
 | `line_spacing_px`, `char_spacing_px` | `6`, `1` | Extra spacing between lines/characters |
 | `max_display_lines`, `max_line_chars` | `14`, `42` | Truncation limits |
 | `h264_encoder_qp` | `26` | Fixed quantizer (0-51); lower = better quality and higher bitrate |
 | `h264_encoder_gop` | `600` | Keyframe interval in frames (extra IDRs are still produced on demand) |
 | `only_main_display` | `true` | Apply only to the main display, not to cluster/auxiliary ones |
 | `cap_video_fps_to_30` | `true` | Cap `VIDEO_FPS_60` to 30 in the `ServiceDiscoveryResponse` while the overlay is enabled |
+
+#### TTF fonts and HTML styling
+By default the text is drawn with the built-in 8x8 bitmap font (ASCII only). Set `obd_font_path` in `config.toml` (or `"font_path"` in the JSON file,
+which takes precedence) to a TrueType (`.ttf`) file to get anti-aliased, proportional text with every character the font contains (e.g. Polish letters).
+A missing, empty or unparsable file silently falls back to the built-in font, and a changed file is picked up again without a restart.
+
+A font that matches the Android Auto look is [Google Sans](https://github.com/googlefonts/googlesans), published under the SIL Open Font License.
+It is not bundled with aa-proxy-rs: download the Regular `.ttf` and point `obd_font_path` to it (e.g. `/etc/aa-proxy-rs/GoogleSans-Regular.ttf`).
+Keep in mind that a font with thousands of glyphs needs a noticeable amount of RAM once loaded (about 45 MB for Google Sans) and that rendering
+a lot of TTF text costs more CPU than the built-in font, so on small boards prefer a lighter font and a few short lines.
+
+The `text` may contain a small subset of HTML (with the built-in font the tags are simply removed):
+
+| Markup | Effect |
+|---|---|
+| `<b>`, `<strong>`, `<i>`, `<em>`, `<u>` | bold, italic, underline (bold and italic are synthesized, a regular font file is enough) |
+| `<font color="...">`, `<span style="color: ...">` | text color |
+| `<span style="background-color: ...">` (or `background`), `<mark>` | background highlight (`<mark>` is yellow by default) |
+| `<span style="font-weight: bold; font-style: italic; text-decoration: underline; font-size: 18px">` | the same effects via CSS (`font-size` 6-120 px) |
+| `<br>`, `</p>`, `</div>` | new line (in addition to `\n` and `\r\n`) |
+| `&nbsp;` `&lt;` `&gt;` `&amp;` `&quot;` `&#39;` `&apos;` `&deg;` | entities |
+
+Colors can be `#rgb`, `#rrggbb`, `rgb(r, g, b)` or a common name (`red`, `green`, `lime`, `blue`, `yellow`, `cyan`, `orange`, `gray`, ...; the basic names
+are bright variants chosen for readability on video). Unknown tags are ignored and `max_line_chars` counts only visible characters.
+Single quotes avoid escaping inside the JSON string:
+```json
+{"text_scale": 24, "text": "<b>RPM:</b> <font color='#00ff00'>2450</font><br><i>Coolant:</i> <font color='#ff3300'>92&deg;C</font>"}
+```
 
 ## Google Maps EV routing
 Google introduced EV routing features at [CES24](https://blog.google/products/android/android-auto-new-features-ces24/).

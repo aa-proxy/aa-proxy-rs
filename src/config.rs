@@ -98,6 +98,21 @@ where
     }
 }
 
+fn default_obd_font_path() -> PathBuf {
+    PathBuf::new()
+}
+
+fn empty_string_as_default_obd_font_path<'de, D>(deserializer: D) -> Result<PathBuf, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let v: Option<String> = Option::deserialize(deserializer)?;
+    match v {
+        Some(s) if !s.trim().is_empty() => Ok(PathBuf::from(s.trim())),
+        _ => Ok(default_obd_font_path()),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BtScoMediaBridgeAudioType {
@@ -579,6 +594,16 @@ pub struct AppConfig {
         deserialize_with = "empty_string_as_default_obd_text_path"
     )]
     pub obd_text_path: PathBuf,
+    /// Optional path to a TTF font file for rendering the OBD overlay text.
+    /// If empty or if the file does not exist, the built-in bitmap font is used.
+    /// When a TTF font is used, "text_scale" in the overlay JSON defines the font size.
+    #[serde(
+        default = "default_obd_font_path",
+        alias = "OBD_FONT_PATH",
+        alias = "obd_font",
+        deserialize_with = "empty_string_as_default_obd_font_path"
+    )]
+    pub obd_font_path: PathBuf,
     pub stats_interval: u16,
     #[serde(default, deserialize_with = "empty_string_as_none")]
     pub udc: Option<String>,
@@ -1046,6 +1071,7 @@ impl Default for AppConfig {
             inject_displays_file: DEFAULT_INJECT_DISPLAYS_FILE.into(),
             obd_overlay_enabled: false,
             obd_text_path: DEFAULT_OBD_TEXT_PATH.into(),
+            obd_font_path: default_obd_font_path(),
             stats_interval: 0,
             udc: None,
             usb_stick: None,
@@ -1399,6 +1425,8 @@ impl AppConfig {
         } else {
             obd_text_path_str
         });
+        let obd_font_path_str = self.obd_font_path.display().to_string();
+        doc["obd_font_path"] = value(obd_font_path_str.trim().to_string());
         doc["stats_interval"] = value(self.stats_interval as i64);
         if let Some(udc) = &self.udc {
             doc["udc"] = value(udc);
