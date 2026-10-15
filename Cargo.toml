@@ -5,10 +5,9 @@ version = "1.1.0"
 edition = "2021"
 license = 'GPL-2.0'
 description = 'AndroidAuto wired/wireless proxy'
-documentation = 'https://github.com/manio/aa-proxy-rs'
+documentation = 'https://aa-proxy.github.io/docs/'
 readme = 'README.md'
 categories = ['command-line-utilities']
-homepage = 'https://github.com/manio/aa-proxy-rs'
 repository = 'https://github.com/manio/aa-proxy-rs'
 default-run = "aa-proxy-rs"
 
