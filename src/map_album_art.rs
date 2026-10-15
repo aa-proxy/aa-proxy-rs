@@ -77,6 +77,10 @@ impl Default for LatestAlbumArtStore {
 }
 
 impl LatestAlbumArtStore {
+    // `fetch_update` is deprecated since Rust 1.99 in favour of `try_update`, but
+    // `try_update` is stable only since 1.95, so keep the old name (and silence
+    // the warning) until the minimum supported toolchain is >= 1.95.
+    #[allow(deprecated)]
     fn next_version(&self) -> u64 {
         self.version
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
