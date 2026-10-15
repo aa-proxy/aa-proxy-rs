@@ -3396,8 +3396,7 @@ checksum = "703d5c7ef118737c72f1af64ad2f6f8c5e1921f818cdcb97b8fe6fc69bf66214"
 [[package]]
 name = "simplelog"
 version = "0.12.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16257adbfaef1ee58b1363bdc0664c9b8e1e30aed86049635fb5f147d065a9c0"
+source = "git+https://github.com/manio/simplelog.rs?branch=trailing-semicolon#690017c4a8073ac4901f17f6e159f241ecd25229"
 dependencies = [
  "ansi_term",
  "log",
