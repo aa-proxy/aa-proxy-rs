@@ -152,11 +152,52 @@ struct ActiveGadget {
     ep0_task: JoinHandle<()>,
 }
 
+/// Upper bound for any single synchronous configfs/UDC operation we push to
+/// the blocking pool. Unbinding a UDC with live FunctionFS endpoints is a
+/// kernel call that can block for a very long time (or forever) on some
+/// controllers; it must never run on a tokio worker thread, because on a
+/// single-core SBC that is the *only* worker: the webserver, the signal
+/// handlers and the whole proxy freeze with it (SIGTERM is never delivered to
+/// the tokio handler, only SIGKILL helps).
+const USB_BLOCKING_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Runs a synchronous gadget/configfs operation on the blocking pool and waits
+/// for it at most [`USB_BLOCKING_TIMEOUT`]. Returns `None` if it panicked or
+/// timed out (the blocking thread is then left to finish on its own).
+async fn run_blocking_usb<T, F>(what: &'static str, f: F) -> Option<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    match timeout(USB_BLOCKING_TIMEOUT, tokio::task::spawn_blocking(f)).await {
+        Ok(Ok(v)) => Some(v),
+        Ok(Err(e)) => {
+            warn!("{} 🔌 USB Manager: {what}: blocking task failed: {e}", NAME);
+            None
+        }
+        Err(_) => {
+            error!(
+                "{} 🔌 USB Manager: {what} did not finish within {}s (kernel/UDC stuck?), not waiting any longer",
+                NAME,
+                USB_BLOCKING_TIMEOUT.as_secs()
+            );
+            None
+        }
+    }
+}
+
 impl ActiveGadget {
     async fn teardown(self) {
-        self.ep0_cancel.cancel();
-        let _ = self.ep0_task.await;
-        // `_gadget`'s Drop unbinds from the UDC and removes it from configfs.
+        let ActiveGadget {
+            _gadget,
+            ep0_cancel,
+            ep0_task,
+        } = self;
+        ep0_cancel.cancel();
+        let _ = timeout(Duration::from_secs(5), ep0_task).await;
+        // `RegGadget`'s Drop unbinds from the UDC and removes it from configfs
+        // with synchronous I/O, so do it off the async worker threads.
+        let _ = run_blocking_usb("gadget teardown", move || drop(_gadget)).await;
     }
 }
 
@@ -231,10 +272,20 @@ impl FfsGadget {
     /// Removes any leftover USB gadgets from a previous run. Cheap/no-op
     /// if there are none; call once at startup, like the old
     /// `UsbGadgetState::init()`.
-    pub fn init(&mut self) -> Result<()> {
+    ///
+    /// Async on purpose: this is also called at the top of every main-loop
+    /// iteration, and `usb_gadget::remove_all()` does blocking UDC-unbind I/O.
+    pub async fn init(&mut self) -> Result<()> {
         info!("{} 🔌 Initializing USB Manager (FunctionFS)", NAME);
-        usb_gadget::remove_all().context("removing leftover USB gadgets")?;
-        Ok(())
+        // Tear our own gadget down properly first (cancels ep0, unbinds off the
+        // worker threads); remove_all() below then only sweeps leftovers.
+        self.teardown_active().await;
+        match run_blocking_usb("removing leftover USB gadgets", usb_gadget::remove_all).await {
+            Some(res) => res.context("removing leftover USB gadgets"),
+            None => Err(anyhow!(
+                "removing leftover USB gadgets: timed out or failed"
+            )),
+        }
     }
 
     fn select_udc(&self) -> Result<Udc> {
@@ -265,8 +316,8 @@ impl FfsGadget {
     /// a completely unrelated one (e.g. the accessory stage after a
     /// failed MTP stage) — so sweep them up after every failed attempt,
     /// not just between sessions.
-    fn sweep_stray_gadgets(&self) {
-        if let Err(e) = usb_gadget::remove_all() {
+    async fn sweep_stray_gadgets(&self) {
+        if let Some(Err(e)) = run_blocking_usb("stray-gadget sweep", usb_gadget::remove_all).await {
             debug!("{} 🔌 USB Manager: stray-gadget sweep: {e:#}", NAME);
         }
     }
@@ -310,7 +361,7 @@ impl FfsGadget {
         const RETRY_SETTLE_DELAY: Duration = Duration::from_millis(1000);
 
         self.teardown_active().await;
-        self.sweep_stray_gadgets();
+        self.sweep_stray_gadgets().await;
 
         let udc = match self.select_udc() {
             Ok(udc) => udc,
@@ -335,7 +386,7 @@ impl FfsGadget {
                             NAME
                         );
                         self.teardown_active().await;
-                        self.sweep_stray_gadgets();
+                        self.sweep_stray_gadgets().await;
                         // Old/slow UDC drivers (seen on a 4.4 kernel dwc2
                         // controller) can need real time to fully drop the
                         // previous gadget before a fresh bind attempt
@@ -389,7 +440,7 @@ impl FfsGadget {
                     NAME
                 );
                 self.teardown_active().await;
-                self.sweep_stray_gadgets();
+                self.sweep_stray_gadgets().await;
                 tokio::time::sleep(RETRY_SETTLE_DELAY).await;
                 match self.run_accessory_stage(&udc, false).await {
                     Ok(session) => Some(session),
@@ -399,7 +450,7 @@ impl FfsGadget {
                             NAME
                         );
                         self.teardown_active().await;
-                        self.sweep_stray_gadgets();
+                        self.sweep_stray_gadgets().await;
                         None
                     }
                 }
@@ -410,7 +461,7 @@ impl FfsGadget {
                     NAME
                 );
                 self.teardown_active().await;
-                self.sweep_stray_gadgets();
+                self.sweep_stray_gadgets().await;
                 None
             }
         }

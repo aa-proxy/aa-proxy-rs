@@ -588,6 +588,71 @@ async fn action_handler(config: &mut SharedConfig) {
     }
 }
 
+fn monotonic_ms() -> u64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: valid pointer to a local timespec
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+    (ts.tv_sec as u64) * 1000 + (ts.tv_nsec as u64) / 1_000_000
+}
+
+/// Plain OS thread (independent of tokio) that notices when the runtime stops
+/// ticking and logs *where* the process threads are stuck in the kernel
+/// (`wchan`, and the kernel stack when available). A frozen runtime cannot log
+/// about itself, so without this a hang leaves no trace after the last line.
+fn spawn_stall_watchdog(heartbeat: Arc<AtomicU64>) {
+    const STALL_AFTER_MS: u64 = 8_000;
+    let _ = thread::Builder::new()
+        .name("aa-proxy-watchdog".into())
+        .spawn(move || {
+            let mut stalled_since: Option<u64> = None;
+            loop {
+                thread::sleep(Duration::from_secs(2));
+                let last = heartbeat.load(Ordering::Relaxed);
+                if last == 0 {
+                    continue; // probe not started yet
+                }
+                let now = monotonic_ms();
+                let age = now.saturating_sub(last);
+                if age >= STALL_AFTER_MS {
+                    if stalled_since.is_none() {
+                        stalled_since = Some(last);
+                        error!(
+                            "watchdog: tokio runtime has not ticked for {} ms - dumping thread state",
+                            age
+                        );
+                        if let Ok(dir) = fs::read_dir("/proc/self/task") {
+                            for entry in dir.flatten() {
+                                let path = entry.path();
+                                let rd = |f: &str| {
+                                    fs::read_to_string(path.join(f))
+                                        .unwrap_or_default()
+                                        .trim()
+                                        .replace('\n', " | ")
+                                };
+                                error!(
+                                    "watchdog: tid={} comm={} state={} wchan={} stack={}",
+                                    entry.file_name().to_string_lossy(),
+                                    rd("comm"),
+                                    rd("stat").split_whitespace().nth(2).unwrap_or("?"),
+                                    rd("wchan"),
+                                    rd("stack"),
+                                );
+                            }
+                        }
+                    }
+                } else if let Some(since) = stalled_since.take() {
+                    warn!(
+                        "watchdog: runtime recovered after ~{} ms",
+                        now.saturating_sub(since)
+                    );
+                }
+            }
+        });
+}
+
 async fn clean_disconnect_and_exit(
     tx: Arc<Mutex<Option<Sender<Packet>>>>,
     config: SharedConfig,
@@ -982,8 +1047,21 @@ async fn tokio_main(
             })
             .await;
         }
+        // Discard restart notifications left over from the session that just
+        // ended. The Bluetooth keep-alive task sends its own `restart_tx` event
+        // when its handshake restart fails (bluetooth.rs), right after the
+        // io_loop already woke us up; with a capacity-1 broadcast channel that
+        // second event stays queued, so the *next* `need_restart.recv()` would
+        // return instantly, tear down the freshly bound USB gadget in the middle
+        // of the new session and restart it again.
+        loop {
+            match need_restart.try_recv() {
+                Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            }
+        }
         if let Some(ref mut usb) = usb {
-            if let Err(e) = usb.init() {
+            if let Err(e) = usb.init().await {
                 error!("{} 🔌 USB init error: {}", NAME, e);
             }
         }
@@ -1535,7 +1613,24 @@ fn main() -> Result<()> {
     let ws_event_tx_cloned = ws_event_tx.clone();
 
     // build and spawn main tokio runtime
-    let mut runtime = Builder::new_multi_thread().enable_all().build().unwrap();
+    // Never run with a single worker: on 1-core boards (Milk-V Duo etc.)
+    // `available_parallelism()` is 1, and then any blocking call on the runtime
+    // (sysfs/configfs/UDC I/O, ...) freezes everything, including the webserver
+    // and the SIGTERM handler. A second worker keeps those alive.
+    let worker_threads = thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .max(2);
+    let mut runtime = Builder::new_multi_thread()
+        .worker_threads(worker_threads)
+        .thread_name("aa-proxy-worker")
+        .enable_all()
+        .build()
+        .unwrap();
+
+    // heartbeat updated by scheduler_probe[0], watched by a plain OS thread
+    let heartbeat = Arc::new(AtomicU64::new(0));
+    spawn_stall_watchdog(heartbeat.clone());
 
     // Scheduler-latency probe: one task per worker thread, each ticking
     // every 200ms. If a tick's actual gap exceeds 1s, something blocked
@@ -1546,6 +1641,7 @@ fn main() -> Result<()> {
         .map(|n| n.get())
         .unwrap_or(1);
     for probe_id in 0..probe_workers {
+        let heartbeat = heartbeat.clone();
         runtime.spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_millis(200));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1553,6 +1649,9 @@ fn main() -> Result<()> {
             loop {
                 ticker.tick().await;
                 let now = Instant::now();
+                if probe_id == 0 {
+                    heartbeat.store(monotonic_ms(), Ordering::Relaxed);
+                }
                 let gap = now.duration_since(last);
                 if gap > Duration::from_secs(1) {
                     warn!(
