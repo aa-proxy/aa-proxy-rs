@@ -359,7 +359,10 @@ pub const VIDIOC_SUBSCRIBE_EVENT: libc::c_ulong = _iow::<v4l2_event_subscription
 
 fn xioctl<T>(fd: RawFd, request: libc::c_ulong, arg: *mut T) -> libc::c_int {
     loop {
-        let ret = unsafe { libc::ioctl(fd, request, arg) };
+        // `libc::Ioctl` is `c_ulong` on glibc but `c_int` on musl; the kernel only looks at the
+        // lower 32 bits of the request, so the cast is lossless for the V4L2 numbers.
+        #[allow(clippy::unnecessary_cast)]
+        let ret = unsafe { libc::ioctl(fd, request as libc::Ioctl, arg) };
         if ret == -1 {
             let err = std::io::Error::last_os_error();
             if err.raw_os_error() == Some(libc::EINTR) {
