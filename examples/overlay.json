@@ -1,5 +1,5 @@
 {
-  "obd_poll_interval_ms": 250,
+  "poll_interval_ms": 250,
   "box_opacity_percent": 0,
   "box_margin_right_px": 100,
   "box_margin_bottom_px": 9,

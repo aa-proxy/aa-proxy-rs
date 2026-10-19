@@ -2675,44 +2675,44 @@ pub async fn pkt_modify_hook(
     let map_album_art_h264_active = crate::map_album_art_h264::is_active(cfg);
     let tap_media_active =
         tap_media && (ctx.media_dump_base_port.is_some() || !ctx.media_channels.is_empty());
-    let obd_overlay_active = proxy_type == ProxyType::MobileDevice
+    let overlay_active = proxy_type == ProxyType::MobileDevice
         && flow == PacketFlow::FromEndpoint
         && (pkt.flags & _CONTROL) == 0
-        && crate::obd_overlay::is_active_for_packet(
+        && crate::overlay::is_active_for_packet(
             pkt.channel,
             pkt.flags,
-            &cfg.obd_text_path,
-            &cfg.obd_font_path,
+            &cfg.overlay_text_path,
+            &cfg.overlay_font_path,
         );
     if proxy_type == ProxyType::MobileDevice
         && flow == PacketFlow::FromEndpoint
         && (pkt.flags & _CONTROL) == 0
-        && !obd_overlay_active
+        && !overlay_active
         && (pkt.flags & FRAME_TYPE_MASK) == (FRAME_TYPE_FIRST | FRAME_TYPE_LAST)
         && pkt.payload.len() >= 2
-        && crate::obd_overlay::is_registered_video_channel(pkt.channel)
+        && crate::overlay::is_registered_video_channel(pkt.channel)
     {
-        crate::obd_overlay::observe_codec_config(pkt.channel, &pkt.payload);
+        crate::overlay::observe_codec_config(pkt.channel, &pkt.payload);
     }
     if proxy_type == ProxyType::MobileDevice
-        && (tap_media || map_album_art_h264_active || obd_overlay_active)
+        && (tap_media || map_album_art_h264_active || overlay_active)
     {
         let was_multi_fragment = (pkt.flags & FRAME_TYPE_MASK) != FRAME_TYPE_MASK;
         match reassemble_media_packet(&mut ctx.media_fragments, pkt) {
             Some(frame_data) => {
-                if !obd_overlay_active
+                if !overlay_active
                     && frame_data.len() >= 2
-                    && crate::obd_overlay::is_registered_video_channel(pkt.channel)
+                    && crate::overlay::is_registered_video_channel(pkt.channel)
                 {
-                    crate::obd_overlay::observe_codec_config(pkt.channel, &frame_data);
+                    crate::overlay::observe_codec_config(pkt.channel, &frame_data);
                 }
-                if obd_overlay_active
+                if overlay_active
                     && !tap_media_active
                     && !map_album_art_h264_active
                     && frame_data.len() >= 2
                 {
                     if let Some(ref hu_tx) = ctx.hu_tx {
-                        crate::obd_overlay::enqueue_video_media_message(
+                        crate::overlay::enqueue_video_media_message(
                             pkt.channel,
                             pkt.flags,
                             frame_data,
@@ -2721,9 +2721,8 @@ pub async fn pkt_modify_hook(
                         return Ok(PacketAction::Drop);
                     }
                 }
-                let (out_frames, overlay_modified) = if obd_overlay_active && frame_data.len() >= 2
-                {
-                    crate::obd_overlay::process_video_media_message(pkt.channel, frame_data)
+                let (out_frames, overlay_modified) = if overlay_active && frame_data.len() >= 2 {
+                    crate::overlay::process_video_media_message(pkt.channel, frame_data)
                 } else {
                     (vec![frame_data], false)
                 };
@@ -2787,7 +2786,7 @@ pub async fn pkt_modify_hook(
                     }
                 }
 
-                if obd_overlay_active && (overlay_modified || was_multi_fragment) {
+                if overlay_active && (overlay_modified || was_multi_fragment) {
                     let first_chunk = DEFAULT_FIRST_FRAGMENT_PAYLOAD_BYTES;
                     let cont_chunk = openauto_continuation_fragment_payload_bytes(first_chunk);
                     let mut replacement_packets = Vec::new();
@@ -2805,7 +2804,7 @@ pub async fn pkt_modify_hook(
                 }
             }
             None => {
-                if obd_overlay_active {
+                if overlay_active {
                     // Drop intermediate fragments while reassembling the video message;
                     // the complete (and possibly overlaid) message will be emitted on FRAME_TYPE_LAST.
                     return Ok(PacketAction::Drop);
@@ -3595,14 +3594,14 @@ pub async fn pkt_modify_hook(
             // injected vendor/display services.
             update_debug_channel_kinds(ctx, &msg);
             update_map_album_art_media_playback_channel_from_sdr(proxy_type, ctx, &msg);
-            crate::obd_overlay::register_video_channels_from_sdr(
+            crate::overlay::register_video_channels_from_sdr(
                 &mut msg,
-                cfg.obd_overlay_enabled,
-                &cfg.obd_text_path,
-                &cfg.obd_font_path,
-                cfg.obd_hw_accel,
-                &cfg.obd_v4l2_decoder,
-                &cfg.obd_v4l2_encoder,
+                cfg.overlay_enabled,
+                &cfg.overlay_text_path,
+                &cfg.overlay_font_path,
+                cfg.overlay_hw_accel,
+                &cfg.overlay_v4l2_decoder,
+                &cfg.overlay_v4l2_encoder,
             );
 
             // Populate media tap channels from the final rewritten SDR. Ports are opened

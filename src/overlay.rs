@@ -1,11 +1,11 @@
-//! Pure-Rust H.264 video overlay for displaying live OBD text on Android Auto frames.
+//! Pure-Rust H.264 video overlay for displaying live text (e.g. OBD values, sensor data, alerts) on Android Auto frames.
 //!
-//! Reads JSON (or plain text) from the path configured by `obd_text_path` in `config.toml`
-//! (default `/dev/shm/obd_overlay.json`), splits carriage returns (`\r\n`, `\n`, `\r`) into
+//! Reads JSON (or plain text) from the path configured by `overlay_text_path` in `config.toml`
+//! (default `/dev/shm/overlay.json`), splits carriage returns (`\r\n`, `\n`, `\r`) into
 //! multiple lines, and renders a translucent box with text near the bottom-right corner of
 //! decoded YUV420 (`I420`) video frames before re-encoding to H.264 Baseline Annex-B via `rusty_h264`.
 
-use crate::config::DEFAULT_OBD_TEXT_PATH;
+use crate::config::DEFAULT_OVERLAY_TEXT_PATH;
 use crate::mitm::protos::{
     DisplayType, MediaCodecType, MediaMessageId, ServiceDiscoveryResponse, VideoFocusMode,
     VideoFocusNotification, VideoFrameRateType,
@@ -30,8 +30,8 @@ use std::time::{Duration, Instant};
 // EASY-TO-ADJUST OVERLAY CONFIGURATION CONSTANTS
 // ============================================================================
 
-/// Minimum interval (in milliseconds) between filesystem reads of `obd_text_path`.
-pub const OBD_POLL_INTERVAL_MS: u64 = 250;
+/// Minimum interval (in milliseconds) between filesystem reads of `overlay_text_path`.
+pub const POLL_INTERVAL_MS: u64 = 250;
 
 /// Opacity percentage of the overlay box background (`0` = fully transparent, `100` = fully opaque).
 pub const BOX_OPACITY_PERCENT: u8 = 0;
@@ -90,13 +90,13 @@ pub const H264_ENCODER_GOP: u32 = 600;
 pub const ONLY_MAIN_DISPLAY: bool = true;
 
 /// Cap `VIDEO_FPS_60` (`16.67ms` per frame) to `VIDEO_FPS_30` (`33.33ms` per frame) in
-/// `ServiceDiscoveryResponse` when the overlay is enabled ([`obd_overlay_enabled`]).
-/// When `obd_overlay_enabled = false`, `ServiceDiscoveryResponse` and all video packets pass
+/// `ServiceDiscoveryResponse` when the overlay is enabled ([`overlay_enabled`]).
+/// When `overlay_enabled = false`, `ServiceDiscoveryResponse` and all video packets pass
 /// through 100% untouched at native `VIDEO_FPS_60`.
 pub const CAP_VIDEO_FPS_TO_30: bool = true;
 
 // ============================================================================
-// JSON SCHEMA FOR `/dev/shm/obd_overlay.json`
+// JSON SCHEMA FOR `/dev/shm/overlay.json`
 // ============================================================================
 
 fn deserialize_null_as_empty_string<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -134,16 +134,16 @@ where
     }
 }
 
-/// Live JSON configuration and text loaded from [`OBD_TEXT_PATH`] (`/dev/shm/obd_overlay.json`).
+/// Live JSON configuration and text loaded from [`OVERLAY_TEXT_PATH`] (`/dev/shm/overlay.json`).
 ///
 /// Any omitted field automatically defaults to the corresponding constant from
 /// `EASY-TO-ADJUST OVERLAY CONFIGURATION CONSTANTS` above. Both `snake_case` and
 /// `UPPER_SNAKE_CASE` keys are accepted in JSON.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
-pub struct ObdOverlayConfig {
-    #[serde(alias = "OBD_POLL_INTERVAL_MS")]
-    pub obd_poll_interval_ms: u64,
+pub struct OverlayConfig {
+    #[serde(alias = "POLL_INTERVAL_MS")]
+    pub poll_interval_ms: u64,
     #[serde(alias = "BOX_OPACITY_PERCENT")]
     pub box_opacity_percent: u8,
     #[serde(alias = "BOX_MARGIN_RIGHT_PX")]
@@ -166,7 +166,7 @@ pub struct ObdOverlayConfig {
         default,
         alias = "FONT_PATH",
         alias = "font_path",
-        alias = "OBD_FONT_PATH",
+        alias = "OVERLAY_FONT_PATH",
         deserialize_with = "deserialize_null_as_empty_string"
     )]
     pub font_path: String,
@@ -202,10 +202,10 @@ pub struct ObdOverlayConfig {
     pub text: String,
 }
 
-impl Default for ObdOverlayConfig {
+impl Default for OverlayConfig {
     fn default() -> Self {
         Self {
-            obd_poll_interval_ms: OBD_POLL_INTERVAL_MS,
+            poll_interval_ms: POLL_INTERVAL_MS,
             box_opacity_percent: BOX_OPACITY_PERCENT,
             box_margin_right_px: BOX_MARGIN_RIGHT_PX,
             box_margin_bottom_px: BOX_MARGIN_BOTTOM_PX,
@@ -235,44 +235,44 @@ impl Default for ObdOverlayConfig {
 // INTERNAL STATE & LIVE TEXT CACHE
 // ============================================================================
 
-struct CachedObdText {
+struct CachedOverlayText {
     path: PathBuf,
     last_check: Option<Instant>,
-    config: ObdOverlayConfig,
+    config: OverlayConfig,
     lines: Vec<String>,
 }
 
-static OBD_TEXT_CACHE: LazyLock<Mutex<CachedObdText>> = LazyLock::new(|| {
-    Mutex::new(CachedObdText {
-        path: PathBuf::from(DEFAULT_OBD_TEXT_PATH),
+static OVERLAY_TEXT_CACHE: LazyLock<Mutex<CachedOverlayText>> = LazyLock::new(|| {
+    Mutex::new(CachedOverlayText {
+        path: PathBuf::from(DEFAULT_OVERLAY_TEXT_PATH),
         last_check: None,
-        config: ObdOverlayConfig::default(),
+        config: OverlayConfig::default(),
         lines: Vec::new(),
     })
 });
 
-/// Set at ServiceDiscoveryResponse time from `obd_overlay_enabled`. While `false` every hook in
+/// Set at ServiceDiscoveryResponse time from `overlay_enabled`. While `false` every hook in
 /// this module returns immediately (single relaxed atomic load: no locks, no file access), so the
 /// default build behaves exactly like one without the overlay. Decided once per session on purpose:
 /// toggling mid-session would switch between re-encoded and original H.264 streams.
 static SESSION_ENABLED: AtomicBool = AtomicBool::new(false);
 
-/// Resolves `path` to [`DEFAULT_OBD_TEXT_PATH`] when empty or whitespace-only.
-fn resolve_obd_text_path(path: &Path) -> PathBuf {
+/// Resolves `path` to [`DEFAULT_OVERLAY_TEXT_PATH`] when empty or whitespace-only.
+fn resolve_overlay_text_path(path: &Path) -> PathBuf {
     let s = path.to_string_lossy();
     let trimmed = s.trim();
     if trimmed.is_empty() {
-        PathBuf::from(DEFAULT_OBD_TEXT_PATH)
+        PathBuf::from(DEFAULT_OVERLAY_TEXT_PATH)
     } else {
         PathBuf::from(trimmed)
     }
 }
 
-/// Updates the active `obd_text_path` from `AppConfig` if it changed, falling back to
-/// [`DEFAULT_OBD_TEXT_PATH`] when `path` is empty.
-pub fn set_obd_text_path(path: &Path) {
-    let resolved = resolve_obd_text_path(path);
-    if let Ok(mut cache) = OBD_TEXT_CACHE.lock() {
+/// Updates the active `overlay_text_path` from `AppConfig` if it changed, falling back to
+/// [`DEFAULT_OVERLAY_TEXT_PATH`] when `path` is empty.
+pub fn set_overlay_text_path(path: &Path) {
+    let resolved = resolve_overlay_text_path(path);
+    if let Ok(mut cache) = OVERLAY_TEXT_CACHE.lock() {
         if cache.path != resolved {
             cache.path = resolved;
             cache.last_check = None;
@@ -302,8 +302,8 @@ fn ttf_base_font_size(text_scale: usize) -> f32 {
     px.min(MAX_TTF_FONT_PX)
 }
 
-struct CachedObdFont {
-    /// `obd_font_path` from `config.toml`.
+struct CachedOverlayFont {
+    /// `overlay_font_path` from `config.toml`.
     config_path: PathBuf,
     /// `"font_path"` from the live JSON file; takes precedence over `config_path` when non-empty.
     json_path: PathBuf,
@@ -316,7 +316,7 @@ struct CachedObdFont {
     font: Option<Arc<fontdue::Font>>,
 }
 
-impl CachedObdFont {
+impl CachedOverlayFont {
     fn refresh_effective_path(&mut self) {
         let effective = if self.json_path.as_os_str().is_empty() {
             self.config_path.clone()
@@ -332,8 +332,8 @@ impl CachedObdFont {
     }
 }
 
-static OBD_FONT_CACHE: LazyLock<Mutex<CachedObdFont>> = LazyLock::new(|| {
-    Mutex::new(CachedObdFont {
+static OVERLAY_FONT_CACHE: LazyLock<Mutex<CachedOverlayFont>> = LazyLock::new(|| {
+    Mutex::new(CachedOverlayFont {
         config_path: PathBuf::new(),
         json_path: PathBuf::new(),
         path: PathBuf::new(),
@@ -352,12 +352,12 @@ fn trimmed_path(path: &Path) -> PathBuf {
     PathBuf::from(s.trim())
 }
 
-/// Sets the TTF font path from `obd_font_path` in `config.toml`. Empty or whitespace-only means
+/// Sets the TTF font path from `overlay_font_path` in `config.toml`. Empty or whitespace-only means
 /// "no TTF font" (built-in bitmap font). A non-empty `"font_path"` in the live JSON file
-/// ([`set_obd_json_font_path`]) takes precedence over this value.
-pub fn set_obd_font_path(path: &Path) {
+/// ([`set_overlay_json_font_path`]) takes precedence over this value.
+pub fn set_overlay_font_path(path: &Path) {
     let resolved = trimmed_path(path);
-    if let Ok(mut cache) = OBD_FONT_CACHE.lock() {
+    if let Ok(mut cache) = OVERLAY_FONT_CACHE.lock() {
         if cache.config_path != resolved {
             cache.config_path = resolved;
             cache.refresh_effective_path();
@@ -366,9 +366,9 @@ pub fn set_obd_font_path(path: &Path) {
 }
 
 /// Sets the TTF font path from `"font_path"` in the live JSON file (empty = not set).
-pub fn set_obd_json_font_path(path: &str) {
+pub fn set_overlay_json_font_path(path: &str) {
     let resolved = trimmed_path(Path::new(path));
-    if let Ok(mut cache) = OBD_FONT_CACHE.lock() {
+    if let Ok(mut cache) = OVERLAY_FONT_CACHE.lock() {
         if cache.json_path != resolved {
             cache.json_path = resolved;
             cache.refresh_effective_path();
@@ -383,12 +383,12 @@ pub fn set_obd_json_font_path(path: &str) {
 /// The font file is re-checked at most every [`FONT_CHECK_INTERVAL`] and (re)loaded only when its
 /// modification time changes. Reading and parsing a font takes tens of milliseconds, so it is done
 /// without holding the cache lock, which is also taken by the packet-handling thread.
-pub fn get_cached_obd_font() -> Option<Arc<fontdue::Font>> {
+pub fn get_cached_overlay_font() -> Option<Arc<fontdue::Font>> {
     let now = Instant::now();
 
     // Phase 1 (locked): decide whether the file has to be (re)loaded.
     let (path, mtime) = {
-        let mut cache = OBD_FONT_CACHE.lock().ok()?;
+        let mut cache = OVERLAY_FONT_CACHE.lock().ok()?;
         if cache.path.as_os_str().is_empty() {
             cache.font = None;
             return None;
@@ -426,12 +426,12 @@ pub fn get_cached_obd_font() -> Option<Arc<fontdue::Font>> {
         Ok(bytes) if !bytes.is_empty() => {
             match fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default()) {
                 Ok(font) => {
-                    info!("obd_overlay: loaded TTF font from {}", path.display());
+                    info!("overlay: loaded TTF font from {}", path.display());
                     Some(Arc::new(font))
                 }
                 Err(err) => {
                     warn!(
-                        "obd_overlay: failed to parse TTF font {}: {:?}",
+                        "overlay: failed to parse TTF font {}: {:?}",
                         path.display(),
                         err
                     );
@@ -442,7 +442,7 @@ pub fn get_cached_obd_font() -> Option<Arc<fontdue::Font>> {
         Ok(_) => None,
         Err(e) => {
             warn!(
-                "obd_overlay: failed to read TTF font {}: {:?}",
+                "overlay: failed to read TTF font {}: {:?}",
                 path.display(),
                 e
             );
@@ -451,7 +451,7 @@ pub fn get_cached_obd_font() -> Option<Arc<fontdue::Font>> {
     };
 
     // Phase 3 (locked): publish the result unless the path changed in the meantime.
-    let mut cache = OBD_FONT_CACHE.lock().ok()?;
+    let mut cache = OVERLAY_FONT_CACHE.lock().ok()?;
     if cache.path == path {
         cache.attempted_mtime = Some(mtime);
         cache.font = loaded;
@@ -467,8 +467,8 @@ struct ChannelGateState {
     pipeline_engaged: bool,
 }
 
-static SESSION_HW_ACCEL: Mutex<crate::config::ObdHwAccel> =
-    Mutex::new(crate::config::ObdHwAccel::None);
+static SESSION_HW_ACCEL: Mutex<crate::config::OverlayHwAccel> =
+    Mutex::new(crate::config::OverlayHwAccel::None);
 static SESSION_V4L2_DEVICES: Mutex<Option<crate::v4l2_m2m::V4l2CodecDevices>> = Mutex::new(None);
 
 pub enum DecoderBackend {
@@ -496,7 +496,7 @@ fn channel_uses_v4l2_decoder(channel: u8) -> bool {
 /// Number of consecutive V4L2 encoder timeouts tolerated before falling back to software.
 const V4L2_ENC_MAX_CONSECUTIVE_TIMEOUTS: u32 = 10;
 
-/// Per-channel H.264 decoder state owned by the Stage-1 decoder worker (`obd-h264-dec`, Core 2).
+/// Per-channel H.264 decoder state owned by the Stage-1 decoder worker (`ovl-h264-dec`, Core 2).
 struct ChannelDecoderState {
     backend: DecoderBackend,
     phone_codec_config: Option<Vec<u8>>,
@@ -509,7 +509,7 @@ impl ChannelDecoderState {
                 match crate::v4l2_m2m::V4l2M2mDecoder::new(&devs.decoder_path) {
                     Ok(dec) => {
                         info!(
-                            "obd_overlay: ch {:#04x} initialized V4L2 M2M hardware decoder {}",
+                            "overlay: ch {:#04x} initialized V4L2 M2M hardware decoder {}",
                             channel,
                             devs.decoder_path.display()
                         );
@@ -517,7 +517,7 @@ impl ChannelDecoderState {
                     }
                     Err(e) => {
                         warn!(
-                            "obd_overlay: ch {:#04x} failed to initialize V4L2 decoder ({}): {:?}, using pure-Rust software decoder",
+                            "overlay: ch {:#04x} failed to initialize V4L2 decoder ({}): {:?}, using pure-Rust software decoder",
                             channel,
                             devs.decoder_path.display(),
                             e
@@ -543,7 +543,7 @@ impl ChannelDecoderState {
     }
 }
 
-/// Per-channel H.264 encoder state owned by the Stage-2 encoder worker (`obd-h264-enc`, Core 3).
+/// Per-channel H.264 encoder state owned by the Stage-2 encoder worker (`ovl-h264-enc`, Core 3).
 struct ChannelEncoderState {
     display_type: DisplayType,
     encoder: Option<EncoderBackend>,
@@ -557,7 +557,7 @@ struct ChannelEncoderState {
     out_poc_lsb: u32,
     last_encoded_yuv: Option<YuvFrame>,
     last_encoded_lines: Vec<String>,
-    last_encoded_cfg: Option<ObdOverlayConfig>,
+    last_encoded_cfg: Option<OverlayConfig>,
     hw_enc_timeouts: u32,
 }
 
@@ -620,14 +620,14 @@ impl ChannelEncoderState {
                     ) {
                         Ok(v4l2_enc) => {
                             info!(
-                                "obd_overlay: ch {:#04x} ({:?}) initialized V4L2 M2M hardware encoder {} ({}x{}, GOP={})",
+                                "overlay: ch {:#04x} ({:?}) initialized V4L2 M2M hardware encoder {} ({}x{}, GOP={})",
                                 channel, self.display_type, devs.encoder_path.display(), width, height, qp_gop.1
                             );
                             enc_backend = Some(EncoderBackend::V4l2(v4l2_enc));
                         }
                         Err(e) => {
                             warn!(
-                                "obd_overlay: ch {:#04x} failed to initialize V4L2 encoder ({}): {:?}, falling back to pure-Rust software encoder",
+                                "overlay: ch {:#04x} failed to initialize V4L2 encoder ({}): {:?}, falling back to pure-Rust software encoder",
                                 channel, devs.encoder_path.display(), e
                             );
                         }
@@ -639,14 +639,14 @@ impl ChannelEncoderState {
                 match create_baseline_encoder(width, height, qp_gop.0, qp_gop.1) {
                     Ok(enc) => {
                         debug!(
-                            "obd_overlay: ch {:#04x} ({:?}) initialized pure-Rust H.264 Constrained Baseline encoder {}x{} (qp={}, gop={}, weightp=false, zero-latency VUI)",
+                            "overlay: ch {:#04x} ({:?}) initialized pure-Rust H.264 Constrained Baseline encoder {}x{} (qp={}, gop={}, weightp=false, zero-latency VUI)",
                             channel, self.display_type, width, height, qp_gop.0, qp_gop.1
                         );
                         enc_backend = Some(EncoderBackend::Software(enc));
                     }
                     Err(e) => {
                         warn!(
-                            "obd_overlay: ch {:#04x} failed to initialize H.264 software encoder {}x{}: {:?}",
+                            "overlay: ch {:#04x} failed to initialize H.264 software encoder {}x{}: {:?}",
                             channel, width, height, e
                         );
                         return false;
@@ -738,7 +738,7 @@ static VIDEO_ENCODERS: LazyLock<Mutex<HashMap<u8, ChannelEncoderState>>> =
 static PIPELINE_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 
 // ============================================================================
-// MULTI-CORE BACKGROUND PIPELINE (Core 2: `obd-h264-dec`, Core 3: `obd-h264-enc`)
+// MULTI-CORE BACKGROUND PIPELINE (Core 2: `ovl-h264-dec`, Core 3: `ovl-h264-enc`)
 // ============================================================================
 
 struct Stage1Job {
@@ -815,19 +815,19 @@ static MULTICORE_PIPELINE: LazyLock<MulticorePipeline> = LazyLock::new(|| {
     let stage2: &'static WorkerQueue<Stage2Job> = &STAGE2_QUEUE;
 
     let _ = thread::Builder::new()
-        .name("obd-h264-dec".to_string())
+        .name("ovl-h264-dec".to_string())
         .spawn(move || stage1_decoder_worker_loop(stage1, stage2));
 
     let _ = thread::Builder::new()
-        .name("obd-h264-enc".to_string())
+        .name("ovl-h264-enc".to_string())
         .spawn(move || stage2_encoder_worker_loop(stage2));
 
-    info!("obd_overlay: started 2-thread multi-core H.264 pipeline (obd-h264-dec + obd-h264-enc)");
+    info!("overlay: started 2-thread multi-core H.264 pipeline (ovl-h264-dec + ovl-h264-enc)");
     MulticorePipeline { stage1 }
 });
 
 /// Enqueues a reassembled video media message from `from_stream` (Core 1) into the
-/// multi-core H.264 pipeline (`obd-h264-dec` on Core 2 -> `obd-h264-enc` on Core 3 -> `from_file` on Core 4).
+/// multi-core H.264 pipeline (`ovl-h264-dec` on Core 2 -> `ovl-h264-enc` on Core 3 -> `from_file` on Core 4).
 ///
 /// Never blocks `from_stream`, keeping Touch `InputReport` and `MEDIA_MESSAGE_ACK` latency at 0.00ms.
 pub fn enqueue_video_media_message(
@@ -1027,7 +1027,7 @@ fn stage2_encoder_worker_loop(stage2: &'static WorkerQueue<Stage2Job>) {
                 fallback_frame_data,
                 out_tx,
             } => {
-                let (cfg, lines) = get_cached_obd_config_and_lines();
+                let (cfg, lines) = get_cached_overlay_config_and_lines();
                 let (out_msgs, _) = encode_decoded_video_frame(
                     channel,
                     &timestamp_bytes,
@@ -1072,23 +1072,23 @@ fn send_media_messages_to_hu(
     }
 }
 
-/// Returns `true` when the OBD overlay is enabled for the current session (`obd_overlay_enabled = true`).
-pub fn obd_overlay_enabled() -> bool {
+/// Returns `true` when the overlay is enabled for the current session (`overlay_enabled = true`).
+pub fn overlay_enabled() -> bool {
     SESSION_ENABLED.load(Ordering::Relaxed)
 }
 
 /// Registers video media sink channels discovered in `ServiceDiscoveryResponse`.
 ///
-/// When `enabled` (`obd_overlay_enabled = true`), the overlay pipeline starts immediately for the
-/// session using the configured `obd_text_path` (or [`DEFAULT_OBD_TEXT_PATH`] if empty) and
-/// default [`ObdOverlayConfig`] values if the file is missing/empty. Even if `"text"` is initially
+/// When `enabled` (`overlay_enabled = true`), the overlay pipeline starts immediately for the
+/// session using the configured `overlay_text_path` (or [`DEFAULT_OVERLAY_TEXT_PATH`] if empty) and
+/// default [`OverlayConfig`] values if the file is missing/empty. Even if `"text"` is initially
 /// empty, the H.264 pipeline engages from the start so text can be added or updated live at any time.
 pub fn register_video_channels_from_sdr(
     sdr: &mut ServiceDiscoveryResponse,
     enabled: bool,
-    obd_text_path: &Path,
-    obd_font_path: &Path,
-    hw_accel: crate::config::ObdHwAccel,
+    overlay_text_path: &Path,
+    overlay_font_path: &Path,
+    hw_accel: crate::config::OverlayHwAccel,
     v4l2_decoder: &str,
     v4l2_encoder: &str,
 ) {
@@ -1096,18 +1096,18 @@ pub fn register_video_channels_from_sdr(
     if let Ok(mut lock) = SESSION_HW_ACCEL.lock() {
         *lock = hw_accel;
     }
-    if enabled && hw_accel != crate::config::ObdHwAccel::None {
+    if enabled && hw_accel != crate::config::OverlayHwAccel::None {
         let probed =
             crate::v4l2_m2m::probe_v4l2_codec_devices(Some(v4l2_decoder), Some(v4l2_encoder));
         if let Some(devs) = &probed {
             info!(
-                "obd_overlay: V4L2 M2M hardware acceleration enabled (decoder: {}, encoder: {})",
+                "overlay: V4L2 M2M hardware acceleration enabled (decoder: {}, encoder: {})",
                 devs.decoder_path.display(),
                 devs.encoder_path.display()
             );
         } else {
             info!(
-                "obd_overlay: V4L2 M2M hardware codecs not found or not accessible, using pure-Rust software pipeline"
+                "overlay: V4L2 M2M hardware codecs not found or not accessible, using pure-Rust software pipeline"
             );
         }
         if let Ok(mut lock) = SESSION_V4L2_DEVICES.lock() {
@@ -1120,8 +1120,8 @@ pub fn register_video_channels_from_sdr(
     }
 
     if !enabled {
-        set_obd_font_path(Path::new(""));
-        set_obd_json_font_path("");
+        set_overlay_font_path(Path::new(""));
+        set_overlay_json_font_path("");
         // Drop any state left over from a previous (enabled) session.
         if let (Ok(mut g), Ok(mut d), Ok(mut e)) = (
             CHANNEL_GATES.lock(),
@@ -1134,10 +1134,10 @@ pub fn register_video_channels_from_sdr(
         }
         return;
     }
-    let resolved_path = resolve_obd_text_path(obd_text_path);
-    set_obd_text_path(&resolved_path);
-    set_obd_font_path(obd_font_path);
-    let (cfg, _lines) = get_cached_obd_config_and_lines();
+    let resolved_path = resolve_overlay_text_path(overlay_text_path);
+    set_overlay_text_path(&resolved_path);
+    set_overlay_font_path(overlay_font_path);
+    let (cfg, _lines) = get_cached_overlay_config_and_lines();
 
     let mut gates = match CHANNEL_GATES.lock() {
         Ok(guard) => guard,
@@ -1171,7 +1171,7 @@ pub fn register_video_channels_from_sdr(
         let display_type = sink.display_type();
         if cfg.only_main_display && display_type != DisplayType::DISPLAY_TYPE_MAIN {
             debug!(
-                "obd_overlay: skipping non-main video channel {:#04x} ({:?})",
+                "overlay: skipping non-main video channel {:#04x} ({:?})",
                 ch, display_type
             );
             continue;
@@ -1187,14 +1187,14 @@ pub fn register_video_channels_from_sdr(
             }
             if capped_count > 0 {
                 info!(
-                    "obd_overlay: capped ch {:#04x} ({:?}) video_configs frame_rate VIDEO_FPS_60 -> VIDEO_FPS_30 ({} config(s))",
+                    "overlay: capped ch {:#04x} ({:?}) video_configs frame_rate VIDEO_FPS_60 -> VIDEO_FPS_30 ({} config(s))",
                     ch, display_type, capped_count
                 );
             }
         }
 
         info!(
-            "obd_overlay: registered video channel {:#04x} ({:?}) for OBD text overlay from {}",
+            "overlay: registered video channel {:#04x} ({:?}) for text overlay from {}",
             ch,
             display_type,
             resolved_path.display()
@@ -1222,12 +1222,12 @@ pub fn is_registered_video_channel(channel: u8) -> bool {
         .unwrap_or(false)
 }
 
-/// Returns `true` if the OBD overlay is currently enabled and engaged on `channel`.
+/// Returns `true` if the overlay is currently enabled and engaged on `channel`.
 pub fn is_active_for_channel(channel: u8) -> bool {
     if !SESSION_ENABLED.load(Ordering::Relaxed) {
         return false;
     }
-    let overlay_now = obd_overlay_enabled() || PIPELINE_IN_FLIGHT.load(Ordering::Acquire) > 0;
+    let overlay_now = overlay_enabled() || PIPELINE_IN_FLIGHT.load(Ordering::Acquire) > 0;
     CHANNEL_GATES
         .lock()
         .map(|map| {
@@ -1241,23 +1241,23 @@ pub fn is_active_for_channel(channel: u8) -> bool {
 /// Evaluates whether the overlay is active for a specific packet on `channel`, latching the
 /// decision on `FRAME_TYPE_FIRST` (`0x01`) so multi-fragment frames are never split mid-message.
 ///
-/// When `obd_overlay_enabled = true`, `pipeline_engaged` is `true` from the start of the session
-/// even if `"text"` in `obd_text_path` is initially empty, so text can be added or cleared live
+/// When `overlay_enabled = true`, `pipeline_engaged` is `true` from the start of the session
+/// even if `"text"` in `overlay_text_path` is initially empty, so text can be added or cleared live
 /// at any point while maintaining a single continuous H.264 bitstream.
 pub fn is_active_for_packet(
     channel: u8,
     flags: u8,
-    obd_text_path: &Path,
-    obd_font_path: &Path,
+    overlay_text_path: &Path,
+    overlay_font_path: &Path,
 ) -> bool {
     if !SESSION_ENABLED.load(Ordering::Relaxed) {
         return false;
     }
     let is_first_fragment = (flags & crate::mitm::FRAME_TYPE_FIRST) != 0;
     let overlay_now = if is_first_fragment {
-        set_obd_text_path(obd_text_path);
-        set_obd_font_path(obd_font_path);
-        obd_overlay_enabled()
+        set_overlay_text_path(overlay_text_path);
+        set_overlay_font_path(overlay_font_path);
+        overlay_enabled()
     } else {
         false
     };
@@ -1296,7 +1296,7 @@ fn observe_codec_config_decoder_only(channel: u8, annex_b: &[u8]) {
                 DecoderBackend::Software(sw_dec) => {
                     if let Err(e) = sw_dec.decode(annex_b) {
                         warn!(
-                            "obd_overlay: ch {:#04x} failed to decode CODEC_CONFIG ({} bytes): {:?}",
+                            "overlay: ch {:#04x} failed to decode CODEC_CONFIG ({} bytes): {:?}",
                             channel,
                             annex_b.len(),
                             e
@@ -1309,7 +1309,7 @@ fn observe_codec_config_decoder_only(channel: u8, annex_b: &[u8]) {
 }
 
 fn observe_codec_config_encoder_only(channel: u8, parsed_dims: Option<(usize, usize)>) {
-    let (cfg, _) = get_cached_obd_config_and_lines();
+    let (cfg, _) = get_cached_overlay_config_and_lines();
     if let Ok(mut map) = VIDEO_ENCODERS.lock() {
         if let Some(state) = map.get_mut(&channel) {
             state.reset_encoder();
@@ -1322,7 +1322,7 @@ fn observe_codec_config_encoder_only(channel: u8, parsed_dims: Option<(usize, us
 }
 
 /// Records `MEDIA_MESSAGE_CODEC_CONFIG` (SPS/PPS) on registered video channels even while
-/// `obd_text_path` is empty so the H.264 decoder is ready whenever text is written.
+/// `overlay_text_path` is empty so the H.264 decoder is ready whenever text is written.
 pub fn observe_codec_config(channel: u8, frame_data: &[u8]) {
     if frame_data.len() <= 2 {
         return;
@@ -1337,16 +1337,16 @@ pub fn observe_codec_config(channel: u8, frame_data: &[u8]) {
     observe_codec_config_encoder_only(channel, parsed_dims);
 }
 
-/// Polls the configured `obd_text_path` at most once every `obd_poll_interval_ms` and returns `(config, lines)`.
-pub fn get_cached_obd_config_and_lines() -> (ObdOverlayConfig, Vec<String>) {
+/// Polls the configured `overlay_text_path` at most once every `poll_interval_ms` and returns `(config, lines)`.
+pub fn get_cached_overlay_config_and_lines() -> (OverlayConfig, Vec<String>) {
     let now = Instant::now();
 
-    let mut cache = match OBD_TEXT_CACHE.lock() {
+    let mut cache = match OVERLAY_TEXT_CACHE.lock() {
         Ok(guard) => guard,
-        Err(_) => return (ObdOverlayConfig::default(), Vec::new()),
+        Err(_) => return (OverlayConfig::default(), Vec::new()),
     };
 
-    let poll_interval = Duration::from_millis(cache.config.obd_poll_interval_ms.max(20));
+    let poll_interval = Duration::from_millis(cache.config.poll_interval_ms.max(20));
     let should_reload = cache
         .last_check
         .map(|last| now.duration_since(last) >= poll_interval)
@@ -1356,43 +1356,43 @@ pub fn get_cached_obd_config_and_lines() -> (ObdOverlayConfig, Vec<String>) {
         cache.last_check = Some(now);
         match fs::read_to_string(&cache.path) {
             Ok(raw) => {
-                let (cfg, lines) = parse_obd_payload(&raw);
+                let (cfg, lines) = parse_overlay_payload(&raw);
                 cache.config = cfg;
                 cache.lines = lines;
             }
             Err(_) => {
-                cache.config = ObdOverlayConfig::default();
+                cache.config = OverlayConfig::default();
                 cache.lines.clear();
             }
         }
-        set_obd_json_font_path(&cache.config.font_path);
+        set_overlay_json_font_path(&cache.config.font_path);
     }
 
     (cache.config.clone(), cache.lines.clone())
 }
 
-/// Polls the configured `obd_text_path` at most once every `obd_poll_interval_ms` and returns the parsed lines.
-pub fn get_cached_obd_lines() -> Vec<String> {
-    get_cached_obd_config_and_lines().1
+/// Polls the configured `overlay_text_path` at most once every `poll_interval_ms` and returns the parsed lines.
+pub fn get_cached_overlay_lines() -> Vec<String> {
+    get_cached_overlay_config_and_lines().1
 }
 
-/// Parses the contents of `obd_text_path` (default `/dev/shm/obd_overlay.json`) as JSON
-/// ([`ObdOverlayConfig`], with fallback to plain text if not JSON) and splits the `"text"`
+/// Parses the contents of `overlay_text_path` (default `/dev/shm/overlay.json`) as JSON
+/// ([`OverlayConfig`], with fallback to plain text if not JSON) and splits the `"text"`
 /// field on `\r\n`, `\n`, or `\r` into display lines.
-pub fn parse_obd_payload(raw: &str) -> (ObdOverlayConfig, Vec<String>) {
+pub fn parse_overlay_payload(raw: &str) -> (OverlayConfig, Vec<String>) {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return (ObdOverlayConfig::default(), Vec::new());
+        return (OverlayConfig::default(), Vec::new());
     }
 
     if trimmed.starts_with('{') {
-        let parsed_json = serde_json::from_str::<ObdOverlayConfig>(trimmed).or_else(|_| {
+        let parsed_json = serde_json::from_str::<OverlayConfig>(trimmed).or_else(|_| {
             let sanitized = escape_raw_newlines_in_json_strings(trimmed);
-            serde_json::from_str::<ObdOverlayConfig>(&sanitized)
+            serde_json::from_str::<OverlayConfig>(&sanitized)
         });
         match parsed_json {
             Ok(cfg) => {
-                let lines = parse_obd_text_lines_with_limits(
+                let lines = parse_overlay_text_lines_with_limits(
                     &cfg.text,
                     cfg.max_display_lines,
                     cfg.max_line_chars,
@@ -1400,19 +1400,20 @@ pub fn parse_obd_payload(raw: &str) -> (ObdOverlayConfig, Vec<String>) {
                 return (cfg, lines);
             }
             Err(e) => {
-                warn!("obd_overlay: failed to parse JSON payload: {:?}", e);
-                return (ObdOverlayConfig::default(), Vec::new());
+                warn!("overlay: failed to parse JSON payload: {:?}", e);
+                return (OverlayConfig::default(), Vec::new());
             }
         }
     }
 
-    let cfg = ObdOverlayConfig::default();
-    let lines = parse_obd_text_lines_with_limits(raw, cfg.max_display_lines, cfg.max_line_chars);
+    let cfg = OverlayConfig::default();
+    let lines =
+        parse_overlay_text_lines_with_limits(raw, cfg.max_display_lines, cfg.max_line_chars);
     (cfg, lines)
 }
 
 /// Sanitizes unescaped raw `\r` or `\n` control characters inside JSON string literals so
-/// multiline shell heredocs written to `/dev/shm/obd_overlay.json` still parse as valid JSON.
+/// multiline shell heredocs written to `/dev/shm/overlay.json` still parse as valid JSON.
 fn escape_raw_newlines_in_json_strings(input: &str) -> String {
     let mut out = String::with_capacity(input.len() + 16);
     let mut in_string = false;
@@ -1455,11 +1456,11 @@ fn escape_raw_newlines_in_json_strings(input: &str) -> String {
 /// - Windows CRLF (`\r\n` or `\\r\\n`)
 /// - Unix LF (`\n` or `\\n`)
 /// - Classic carriage return CR (`\r` or `\\r`)
-pub fn parse_obd_text_lines(raw: &str) -> Vec<String> {
+pub fn parse_overlay_text_lines(raw: &str) -> Vec<String> {
     if raw.trim_start().starts_with('{') {
-        return parse_obd_payload(raw).1;
+        return parse_overlay_payload(raw).1;
     }
-    parse_obd_text_lines_with_limits(raw, MAX_DISPLAY_LINES, MAX_LINE_CHARS)
+    parse_overlay_text_lines_with_limits(raw, MAX_DISPLAY_LINES, MAX_LINE_CHARS)
 }
 
 fn normalize_html_breaks(s: &str) -> String {
@@ -1519,7 +1520,7 @@ fn truncate_line_respecting_html(s: &str, max_visible_chars: usize) -> String {
     out
 }
 
-fn parse_obd_text_lines_with_limits(
+fn parse_overlay_text_lines_with_limits(
     raw: &str,
     max_display_lines: usize,
     max_line_chars: usize,
@@ -1614,7 +1615,7 @@ pub fn process_video_media_message(channel: u8, frame_data: Vec<u8>) -> (Vec<Vec
         return (vec![frame_data], false);
     }
 
-    let (cfg, lines) = get_cached_obd_config_and_lines();
+    let (cfg, lines) = get_cached_overlay_config_and_lines();
     process_video_data_frame_with_config(channel, frame_data, &lines, &cfg)
 }
 
@@ -1624,7 +1625,7 @@ pub fn process_video_codec_config_in_place(
     channel: u8,
     frame_data: Vec<u8>,
 ) -> (Vec<Vec<u8>>, bool) {
-    let (cfg, _) = get_cached_obd_config_and_lines();
+    let (cfg, _) = get_cached_overlay_config_and_lines();
     if let Ok(mut map) = VIDEO_ENCODERS.lock() {
         if let Some(state) = map.get_mut(&channel) {
             if let Some(sps_pps) = state.get_sps_pps(cfg.h264_encoder_qp) {
@@ -1643,8 +1644,8 @@ pub fn process_video_codec_config_in_place(
 
 /// Decodes a single H.264 access unit (`h264_au`) using the per-channel [`VIDEO_DECODERS`] state.
 ///
-/// Only locks [`VIDEO_DECODERS`], allowing Stage-1 decode (`obd-h264-dec`) and Stage-2 encode
-/// (`obd-h264-enc`) to execute simultaneously on separate CPU cores without lock contention.
+/// Only locks [`VIDEO_DECODERS`], allowing Stage-1 decode (`ovl-h264-dec`) and Stage-2 encode
+/// (`ovl-h264-enc`) to execute simultaneously on separate CPU cores without lock contention.
 fn decode_video_access_unit(channel: u8, h264_au: &[u8]) -> Option<(YuvFrame, Duration, bool)> {
     let mut map = VIDEO_DECODERS.lock().ok()?;
     let state = map.get_mut(&channel)?;
@@ -1656,7 +1657,7 @@ fn decode_video_access_unit(channel: u8, h264_au: &[u8]) -> Option<(YuvFrame, Du
             Ok(None) => return None,
             Err(e) => {
                 warn!(
-                    "obd_overlay: ch {:#04x} V4L2 decode error: {:?}, falling back to pure-Rust software decoder",
+                    "overlay: ch {:#04x} V4L2 decode error: {:?}, falling back to pure-Rust software decoder",
                     channel, e
                 );
                 let mut sw_dec = Decoder::new();
@@ -1681,7 +1682,7 @@ fn decode_video_access_unit(channel: u8, h264_au: &[u8]) -> Option<(YuvFrame, Du
                         yuv
                     } else {
                         debug!(
-                            "obd_overlay: ch {:#04x} H.264 decode error ({} bytes): {:?}",
+                            "overlay: ch {:#04x} H.264 decode error ({} bytes): {:?}",
                             channel,
                             h264_au.len(),
                             e
@@ -1690,7 +1691,7 @@ fn decode_video_access_unit(channel: u8, h264_au: &[u8]) -> Option<(YuvFrame, Du
                     }
                 } else {
                     debug!(
-                        "obd_overlay: ch {:#04x} H.264 decode error ({} bytes): {:?}",
+                        "overlay: ch {:#04x} H.264 decode error ({} bytes): {:?}",
                         channel,
                         h264_au.len(),
                         e
@@ -1705,7 +1706,7 @@ fn decode_video_access_unit(channel: u8, h264_au: &[u8]) -> Option<(YuvFrame, Du
     Some((decoded, dec_dur, incoming_has_idr))
 }
 
-/// Draws the OBD box onto `yuv` and encodes (or fast-skips) the frame using [`VIDEO_ENCODERS`].
+/// Draws the overlay box onto `yuv` and encodes (or fast-skips) the frame using [`VIDEO_ENCODERS`].
 #[allow(clippy::too_many_arguments)]
 fn encode_decoded_video_frame(
     channel: u8,
@@ -1715,7 +1716,7 @@ fn encode_decoded_video_frame(
     dec_dur: Duration,
     incoming_has_idr: bool,
     lines: &[String],
-    cfg: &ObdOverlayConfig,
+    cfg: &OverlayConfig,
     has_newer_frame_in_queue: bool,
     fallback_frame_data: Vec<u8>,
 ) -> (Vec<Vec<u8>>, bool) {
@@ -1755,12 +1756,12 @@ fn encode_decoded_video_frame(
     // The hardware encoder encodes in ~2ms on the VPU and MUST receive every frame
     // so its internal reference picture stays 100% in sync with the car Head Unit.
     let (draw_dur, fast_skip) = if is_v4l2 {
-        draw_obd_box_yuv420_with_config(&mut yuv, lines, cfg);
+        draw_overlay_box_yuv420_with_config(&mut yuv, lines, cfg);
         (t_draw_start.elapsed(), false)
     } else if !need_keyframe && !overlay_changed && has_newer_frame_in_queue {
         (Duration::ZERO, true)
     } else {
-        draw_obd_box_yuv420_with_config(&mut yuv, lines, cfg);
+        draw_overlay_box_yuv420_with_config(&mut yuv, lines, cfg);
         let d_dur = t_draw_start.elapsed();
         let unchanged = !need_keyframe
             && !overlay_changed
@@ -1807,14 +1808,14 @@ fn encode_decoded_video_frame(
                         // hardware encoder: drop this frame and keep going.
                         state.hw_enc_timeouts += 1;
                         debug!(
-                            "obd_overlay: ch {:#04x} V4L2 encode timeout ({}/{})",
+                            "overlay: ch {:#04x} V4L2 encode timeout ({}/{})",
                             channel, state.hw_enc_timeouts, V4L2_ENC_MAX_CONSECUTIVE_TIMEOUTS
                         );
                         return (Vec::new(), false);
                     }
                     Err(e) => {
                         warn!(
-                            "obd_overlay: ch {:#04x} V4L2 encode error: {:?}, falling back to pure-Rust software encoder",
+                            "overlay: ch {:#04x} V4L2 encode error: {:?}, falling back to pure-Rust software encoder",
                             channel, e
                         );
                         let mut sw_enc = match create_baseline_encoder(
@@ -1847,10 +1848,7 @@ fn encode_decoded_video_frame(
                 match sw_enc.try_encode(&yuv) {
                     Ok(bytes) => (bytes, false),
                     Err(e) => {
-                        warn!(
-                            "obd_overlay: ch {:#04x} H.264 encode error: {:?}",
-                            channel, e
-                        );
+                        warn!("overlay: ch {:#04x} H.264 encode error: {:?}", channel, e);
                         return (vec![fallback_frame_data], false);
                     }
                 }
@@ -1898,7 +1896,7 @@ fn encode_decoded_video_frame(
         let skipped = state.fast_skipped_in_window;
         state.fast_skipped_in_window = 0;
         debug!(
-            "obd_overlay: ch {:#04x} frame #{} ({}x{}, idr={}, fast_skip={}, skipped={}/60) in={}B out={}B | dec={:.2}ms draw={:.2}ms enc={:.2}ms total={:.2}ms",
+            "overlay: ch {:#04x} frame #{} ({}x{}, idr={}, fast_skip={}, skipped={}/60) in={}B out={}B | dec={:.2}ms draw={:.2}ms enc={:.2}ms total={:.2}ms",
             channel,
             state.frames_processed,
             frame_w,
@@ -1918,7 +1916,7 @@ fn encode_decoded_video_frame(
     let mut out_messages = Vec::with_capacity(2);
 
     // If `MEDIA_MESSAGE_CODEC_CONFIG` was not already rewritten in-place (for example, when
-    // `/dev/shm/obd_overlay.json` was created mid-session after initial connection), emit a synthetic
+    // `/dev/shm/overlay.json` was created mid-session after initial connection), emit a synthetic
     // `MEDIA_MESSAGE_CODEC_CONFIG` once before the first re-encoded IDR frame.
     if !state.emitted_encoder_codec_config {
         let sps_pps = match &state.encoder {
@@ -1952,7 +1950,7 @@ pub fn process_video_data_frame_with_config(
     channel: u8,
     frame_data: Vec<u8>,
     lines: &[String],
-    cfg: &ObdOverlayConfig,
+    cfg: &OverlayConfig,
 ) -> (Vec<Vec<u8>>, bool) {
     if frame_data.len() <= 10 {
         return (vec![frame_data], false);
@@ -1981,13 +1979,13 @@ pub fn process_video_data_frame_with_config(
     )
 }
 
-/// Core H.264 `MEDIA_MESSAGE_DATA` handler parameterized by `lines` using default [`ObdOverlayConfig`].
+/// Core H.264 `MEDIA_MESSAGE_DATA` handler parameterized by `lines` using default [`OverlayConfig`].
 pub fn process_video_data_frame_with_lines(
     channel: u8,
     frame_data: Vec<u8>,
     lines: &[String],
 ) -> (Vec<Vec<u8>>, bool) {
-    process_video_data_frame_with_config(channel, frame_data, lines, &ObdOverlayConfig::default())
+    process_video_data_frame_with_config(channel, frame_data, lines, &OverlayConfig::default())
 }
 
 /// Fast check for whether the post-overlay `yuv` frame is visually unchanged compared to
@@ -2605,7 +2603,7 @@ fn blend_channel(dst: u8, src: u8, alpha_255: u32) -> u8 {
 }
 
 // ============================================================================
-// HTML & CSS STYLING FOR OBD OVERLAY
+// HTML & CSS STYLING FOR OVERLAY TEXT
 // ============================================================================
 
 #[derive(Debug, Clone, PartialEq)]
@@ -3051,28 +3049,28 @@ fn draw_colored_rect(
 }
 
 /// Draws a translucent box with multi-line text near the bottom-right corner of `frame`
-/// using default [`ObdOverlayConfig`].
-pub fn draw_obd_box_yuv420(frame: &mut YuvFrame, lines: &[String]) {
-    draw_obd_box_yuv420_with_config(frame, lines, &ObdOverlayConfig::default());
+/// using default [`OverlayConfig`].
+pub fn draw_overlay_box_yuv420(frame: &mut YuvFrame, lines: &[String]) {
+    draw_overlay_box_yuv420_with_config(frame, lines, &OverlayConfig::default());
 }
 
-/// Draws a translucent box with multi-line text on `frame` parameterized by [`ObdOverlayConfig`].
-/// If a TTF font is loaded (via `obd_font_path`), it renders text using the TTF font with `text_scale`
+/// Draws a translucent box with multi-line text on `frame` parameterized by [`OverlayConfig`].
+/// If a TTF font is loaded (via `overlay_font_path`), it renders text using the TTF font with `text_scale`
 /// as the font size in points/pixels. If no TTF font is loaded, it falls back to the built-in 8x8 bitmap font.
-pub fn draw_obd_box_yuv420_with_config(
+pub fn draw_overlay_box_yuv420_with_config(
     frame: &mut YuvFrame,
     lines: &[String],
-    cfg: &ObdOverlayConfig,
+    cfg: &OverlayConfig,
 ) {
-    let font = get_cached_obd_font();
-    draw_obd_box_yuv420_with_config_and_font(frame, lines, cfg, font.as_deref());
+    let font = get_cached_overlay_font();
+    draw_overlay_box_yuv420_with_config_and_font(frame, lines, cfg, font.as_deref());
 }
 
 /// Draws a translucent box with multi-line text on `frame` with an explicit optional TTF font.
-pub fn draw_obd_box_yuv420_with_config_and_font(
+pub fn draw_overlay_box_yuv420_with_config_and_font(
     frame: &mut YuvFrame,
     lines: &[String],
-    cfg: &ObdOverlayConfig,
+    cfg: &OverlayConfig,
     font: Option<&fontdue::Font>,
 ) {
     if lines.is_empty() || frame.width < 32 || frame.height < 32 {
@@ -3541,7 +3539,7 @@ fn draw_scaled_glyph(
     }
 }
 
-/// Returns an 8x8 bitmap glyph (LSB = left-most pixel of row) for ASCII and common Spanish/OBD chars.
+/// Returns an 8x8 bitmap glyph (LSB = left-most pixel of row) for ASCII and common Spanish chars.
 fn glyph_for_char(ch: char) -> [u8; 8] {
     match ch {
         '°' | 'º' => [0x06, 0x09, 0x09, 0x06, 0x00, 0x00, 0x00, 0x00],
@@ -3666,29 +3664,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_obd_text_lines_carriage_returns_and_newlines() {
+    fn test_parse_overlay_text_lines_carriage_returns_and_newlines() {
         // Standalone carriage returns (\r), CRLF (\r\n), and LF (\n)
         let raw_cr = "RPM: 2450\rSpeed: 88 km/h\rCoolant: 91°C\r";
-        let lines_cr = parse_obd_text_lines(raw_cr);
+        let lines_cr = parse_overlay_text_lines(raw_cr);
         assert_eq!(
             lines_cr,
             vec!["RPM: 2450", "Speed: 88 km/h", "Coolant: 91°C"]
         );
 
         let raw_crlf = "\r\nSOC: 78%\r\nBatt Temp: 24°C\r\nPower: -12.4 kW\r\n";
-        let lines_crlf = parse_obd_text_lines(raw_crlf);
+        let lines_crlf = parse_overlay_text_lines(raw_crlf);
         assert_eq!(
             lines_crlf,
             vec!["SOC: 78%", "Batt Temp: 24°C", "Power: -12.4 kW"]
         );
 
-        assert!(parse_obd_text_lines("   \r\n  ").is_empty());
+        assert!(parse_overlay_text_lines("   \r\n  ").is_empty());
     }
 
     #[test]
-    fn test_parse_obd_json_payload_with_constants_and_newlines() {
+    fn test_parse_overlay_json_payload_with_constants_and_newlines() {
         let json_raw = r#"{
-            "obd_poll_interval_ms": 250,
+            "poll_interval_ms": 250,
             "box_opacity_percent": 35,
             "box_margin_right_px": 100,
             "box_margin_bottom_px": 9,
@@ -3711,7 +3709,7 @@ mod tests {
             "text": "RPM: 2450\r\nSpeed: 88 km/h\nCoolant: 91°C\rSOC: 82%"
         }"#;
 
-        let (cfg, lines) = parse_obd_payload(json_raw);
+        let (cfg, lines) = parse_overlay_payload(json_raw);
         assert_eq!(cfg.box_opacity_percent, 35);
         assert_eq!(cfg.box_margin_right_px, 100);
         assert_eq!(cfg.box_margin_bottom_px, 9);
@@ -3725,12 +3723,12 @@ mod tests {
 
         // Verify empty "text" disables the overlay
         let empty_json = r#"{"box_opacity_percent": 50, "text": "   \r\n  "}"#;
-        let (_, empty_lines) = parse_obd_payload(empty_json);
+        let (_, empty_lines) = parse_overlay_payload(empty_json);
         assert!(empty_lines.is_empty());
     }
 
     #[test]
-    fn test_draw_obd_box_yuv420_modifies_bottom_right_region() {
+    fn test_draw_overlay_box_yuv420_modifies_bottom_right_region() {
         let width = 320;
         let height = 240;
         let mut frame = YuvFrame {
@@ -3742,7 +3740,7 @@ mod tests {
         };
 
         let lines = vec!["RPM: 2500".to_string(), "SPEED: 90 km/h".to_string()];
-        draw_obd_box_yuv420(&mut frame, &lines);
+        draw_overlay_box_yuv420(&mut frame, &lines);
 
         // Top-left pixel should be untouched
         assert_eq!(frame.y[0], 200);
@@ -3754,19 +3752,19 @@ mod tests {
 
     #[test]
     fn test_example_json_is_valid_and_matches_defaults() {
-        let raw = include_str!("../examples/obd_overlay.json");
-        let (cfg, lines) = parse_obd_payload(raw);
+        let raw = include_str!("../examples/overlay.json");
+        let (cfg, lines) = parse_overlay_payload(raw);
         assert_eq!(
             lines,
             vec!["RPM: 2450".to_string(), "OIL: 90°C".to_string()]
         );
         assert_eq!(
-            ObdOverlayConfig {
+            OverlayConfig {
                 text: String::new(),
                 ..cfg
             },
-            ObdOverlayConfig::default(),
-            "examples/obd_overlay.json must list the built-in defaults"
+            OverlayConfig::default(),
+            "examples/overlay.json must list the built-in defaults"
         );
     }
 
@@ -3778,7 +3776,7 @@ mod tests {
 
     fn register_test_channel(ch: u8) {
         SESSION_ENABLED.store(true, Ordering::Release);
-        set_obd_text_path(Path::new(DEFAULT_OBD_TEXT_PATH));
+        set_overlay_text_path(Path::new(DEFAULT_OVERLAY_TEXT_PATH));
         CHANNEL_GATES.lock().unwrap().insert(
             ch,
             ChannelGateState {
@@ -3975,7 +3973,7 @@ mod tests {
         let mut full_encode_count = 0usize;
 
         // Run 22 frames (crossing the 4-bit frame_num wrap-around at 16) mixing static frames,
-        // screen motion frames, and OBD text change frames.
+        // screen motion frames, and overlay text change frames.
         for idx in 1..=22usize {
             if idx == 6 || idx == 14 || idx == 19 {
                 // Simulate a screen update (e.g. map motion / UI change)
@@ -3986,7 +3984,7 @@ mod tests {
                 }
             }
             if idx == 10 {
-                // Simulate an OBD text update on a static video background
+                // Simulate an overlay text update on a static video background
                 lines = vec!["RPM: 3200".to_string(), "SPEED: 125 km/h".to_string()];
             }
             if idx == 16 {
@@ -4033,40 +4031,40 @@ mod tests {
         use crate::mitm::protos::{MediaSinkService, Service, VideoConfiguration};
         let _guard = lock_test_state();
 
-        // 1. Empty obd_text_path resolves to DEFAULT_OBD_TEXT_PATH and takes default config values
+        // 1. Empty overlay_text_path resolves to DEFAULT_OVERLAY_TEXT_PATH and takes default config values
         assert_eq!(
-            resolve_obd_text_path(Path::new("")),
-            PathBuf::from(DEFAULT_OBD_TEXT_PATH)
+            resolve_overlay_text_path(Path::new("")),
+            PathBuf::from(DEFAULT_OVERLAY_TEXT_PATH)
         );
         assert_eq!(
-            resolve_obd_text_path(Path::new("   ")),
-            PathBuf::from(DEFAULT_OBD_TEXT_PATH)
+            resolve_overlay_text_path(Path::new("   ")),
+            PathBuf::from(DEFAULT_OVERLAY_TEXT_PATH)
         );
 
-        let (default_cfg, empty_lines) = parse_obd_payload("");
-        assert_eq!(default_cfg, ObdOverlayConfig::default());
+        let (default_cfg, empty_lines) = parse_overlay_payload("");
+        assert_eq!(default_cfg, OverlayConfig::default());
         assert!(empty_lines.is_empty());
 
         // 2. JSON with empty or null "text" preserves config values and does not fail
         let (json_empty_text_cfg, json_empty_lines) =
-            parse_obd_payload(r#"{"box_opacity_percent": 40, "text": ""}"#);
+            parse_overlay_payload(r#"{"box_opacity_percent": 40, "text": ""}"#);
         assert_eq!(json_empty_text_cfg.box_opacity_percent, 40);
         assert!(json_empty_lines.is_empty());
 
         let (json_null_text_cfg, json_null_lines) =
-            parse_obd_payload(r#"{"box_opacity_percent": 45, "text": null}"#);
+            parse_overlay_payload(r#"{"box_opacity_percent": 45, "text": null}"#);
         assert_eq!(json_null_text_cfg.box_opacity_percent, 45);
         assert!(json_null_lines.is_empty());
 
-        // 3. When obd_overlay_enabled = true and JSON has "text": "", SDR registration
+        // 3. When overlay_enabled = true and JSON has "text": "", SDR registration
         //    immediately starts the functionality (caps FPS to 30 and engages packet gate)
         let tmp_json = std::env::temp_dir().join(format!(
-            "aa_proxy_obd_empty_start_{}.json",
+            "aa_proxy_overlay_empty_start_{}.json",
             std::process::id()
         ));
         fs::write(
             &tmp_json,
-            r#"{"obd_poll_interval_ms": 20, "box_opacity_percent": 50, "text": ""}"#,
+            r#"{"poll_interval_ms": 20, "box_opacity_percent": 50, "text": ""}"#,
         )
         .expect("write initial empty-text JSON");
 
@@ -4088,11 +4086,11 @@ mod tests {
             true,
             &tmp_json,
             Path::new(""),
-            crate::config::ObdHwAccel::None,
+            crate::config::OverlayHwAccel::None,
             "",
             "",
         );
-        assert!(obd_overlay_enabled());
+        assert!(overlay_enabled());
         assert_eq!(
             sdr.services[0]
                 .media_sink_service
@@ -4146,10 +4144,10 @@ mod tests {
         // 5. Now add text to the JSON file mid-session and verify the next frame renders it
         fs::write(
             &tmp_json,
-            r#"{"obd_poll_interval_ms": 20, "box_opacity_percent": 80, "text": "RPM: 3000\nSOC: 85%"}"#,
+            r#"{"poll_interval_ms": 20, "box_opacity_percent": 80, "text": "RPM: 3000\nSOC: 85%"}"#,
         )
         .expect("write updated text JSON");
-        if let Ok(mut cache) = OBD_TEXT_CACHE.lock() {
+        if let Ok(mut cache) = OVERLAY_TEXT_CACHE.lock() {
             cache.last_check = None;
         }
 
@@ -4178,20 +4176,20 @@ mod tests {
     #[test]
     fn test_deserialize_text_scale_and_font_path() {
         let json_int = r#"{"text_scale": 24, "font_path": "/tmp/custom.ttf"}"#;
-        let (cfg_int, _) = parse_obd_payload(json_int);
+        let (cfg_int, _) = parse_overlay_payload(json_int);
         assert_eq!(cfg_int.text_scale, 24);
         assert_eq!(cfg_int.font_path, "/tmp/custom.ttf");
 
         let json_float = r#"{"text_scale": 28.4}"#;
-        let (cfg_float, _) = parse_obd_payload(json_float);
+        let (cfg_float, _) = parse_overlay_payload(json_float);
         assert_eq!(cfg_float.text_scale, 28);
 
         let json_str = r#"{"text_scale": "32"}"#;
-        let (cfg_str, _) = parse_obd_payload(json_str);
+        let (cfg_str, _) = parse_overlay_payload(json_str);
         assert_eq!(cfg_str.text_scale, 32);
 
         let json_default = r#"{}"#;
-        let (cfg_def, _) = parse_obd_payload(json_default);
+        let (cfg_def, _) = parse_overlay_payload(json_default);
         assert_eq!(cfg_def.text_scale, TEXT_SCALE);
         assert_eq!(cfg_def.font_path, "");
     }
@@ -4201,33 +4199,33 @@ mod tests {
         let _guard = lock_test_state();
 
         // 1. Empty font path returns None -> fallback to bitmap font
-        set_obd_font_path(Path::new(""));
-        assert!(get_cached_obd_font().is_none());
+        set_overlay_font_path(Path::new(""));
+        assert!(get_cached_overlay_font().is_none());
 
         // Verify drawing works with None font (bitmap mode)
         let mut frame_bitmap = YuvFrame::black(640, 480);
         let lines = vec!["SPEED: 100 KM/H".to_string(), "RPM: 3500".to_string()];
-        draw_obd_box_yuv420(&mut frame_bitmap, &lines);
+        draw_overlay_box_yuv420(&mut frame_bitmap, &lines);
         let non_zero_y_bitmap = frame_bitmap.y.iter().filter(|&&y| y > 16).count();
         assert!(non_zero_y_bitmap > 0, "Bitmap rendering must modify pixels");
 
         // 2. Nonexistent font path returns None -> fallback to bitmap font
-        set_obd_font_path(Path::new("/tmp/nonexistent_font_12345.ttf"));
-        assert!(get_cached_obd_font().is_none());
+        set_overlay_font_path(Path::new("/tmp/nonexistent_font_12345.ttf"));
+        assert!(get_cached_overlay_font().is_none());
 
         // 3. Empty font file (0 bytes) returns None -> fallback to bitmap font
         let tmp_empty = std::env::temp_dir().join(format!("empty_font_{}.ttf", std::process::id()));
         fs::write(&tmp_empty, b"").expect("write empty font file");
-        set_obd_font_path(&tmp_empty);
-        assert!(get_cached_obd_font().is_none());
+        set_overlay_font_path(&tmp_empty);
+        assert!(get_cached_overlay_font().is_none());
         let _ = fs::remove_file(&tmp_empty);
 
         // 4. Invalid / corrupt font file returns None -> fallback to bitmap font
         let tmp_corrupt =
             std::env::temp_dir().join(format!("corrupt_font_{}.ttf", std::process::id()));
         fs::write(&tmp_corrupt, b"this is not a valid ttf file").expect("write corrupt font file");
-        set_obd_font_path(&tmp_corrupt);
-        assert!(get_cached_obd_font().is_none());
+        set_overlay_font_path(&tmp_corrupt);
+        assert!(get_cached_overlay_font().is_none());
         let _ = fs::remove_file(&tmp_corrupt);
 
         // 5. If a real TTF font is available on the system, verify TTF rendering and text_scale
@@ -4238,18 +4236,18 @@ mod tests {
         ];
         let found_font = system_fonts.iter().copied().find(|p| p.exists());
         if let Some(system_font) = found_font {
-            set_obd_font_path(system_font);
-            let font = get_cached_obd_font();
+            set_overlay_font_path(system_font);
+            let font = get_cached_overlay_font();
             assert!(font.is_some(), "Valid TTF font should parse successfully");
 
-            let mut cfg_ttf = ObdOverlayConfig {
+            let mut cfg_ttf = OverlayConfig {
                 text_scale: 24, // Used as font size
                 box_opacity_percent: 50,
-                ..ObdOverlayConfig::default()
+                ..OverlayConfig::default()
             };
 
             let mut frame_ttf = YuvFrame::black(640, 480);
-            draw_obd_box_yuv420_with_config(&mut frame_ttf, &lines, &cfg_ttf);
+            draw_overlay_box_yuv420_with_config(&mut frame_ttf, &lines, &cfg_ttf);
             let non_zero_y_ttf = frame_ttf.y.iter().filter(|&&y| y > 16).count();
             assert!(
                 non_zero_y_ttf > 0,
@@ -4259,7 +4257,7 @@ mod tests {
             // Verify changing text_scale changes the rendered glyph size / layout
             cfg_ttf.text_scale = 36;
             let mut frame_ttf_larger = YuvFrame::black(640, 480);
-            draw_obd_box_yuv420_with_config(&mut frame_ttf_larger, &lines, &cfg_ttf);
+            draw_overlay_box_yuv420_with_config(&mut frame_ttf_larger, &lines, &cfg_ttf);
             let non_zero_y_larger = frame_ttf_larger.y.iter().filter(|&&y| y > 16).count();
             assert_ne!(
                 non_zero_y_ttf, non_zero_y_larger,
@@ -4268,7 +4266,7 @@ mod tests {
         }
 
         // Reset font path back to empty after test
-        set_obd_font_path(Path::new(""));
+        set_overlay_font_path(Path::new(""));
     }
 
     #[test]
@@ -4288,7 +4286,7 @@ mod tests {
     #[test]
     fn test_html_breaks_and_line_limits() {
         let raw = "<b>RPM:</b> 2500<br><b>Speed:</b> 80 km/h<br/><b>Coolant:</b> 90°C";
-        let lines = parse_obd_text_lines(raw);
+        let lines = parse_overlay_text_lines(raw);
         assert_eq!(lines.len(), 3);
         assert_eq!(lines[0], "<b>RPM:</b> 2500");
         assert_eq!(lines[1], "<b>Speed:</b> 80 km/h");
@@ -4297,7 +4295,7 @@ mod tests {
         // Verify that long HTML tags do not truncate the visible text prematurely
         let long_tag_line =
             r#"<span style="color: #ff0000; background-color: #000022">RPM: 3500</span>"#;
-        let parsed_long = parse_obd_text_lines(long_tag_line);
+        let parsed_long = parse_overlay_text_lines(long_tag_line);
         assert_eq!(parsed_long.len(), 1);
         assert!(parsed_long[0].contains("RPM: 3500"));
     }
@@ -4349,14 +4347,14 @@ mod tests {
         ];
         let found_font = system_fonts.iter().copied().find(|p| p.exists());
         if let Some(font_path) = found_font {
-            set_obd_font_path(font_path);
-            let font = get_cached_obd_font();
+            set_overlay_font_path(font_path);
+            let font = get_cached_overlay_font();
             assert!(font.is_some());
 
-            let cfg = ObdOverlayConfig {
+            let cfg = OverlayConfig {
                 text_scale: 24,
                 box_opacity_percent: 60,
-                ..ObdOverlayConfig::default()
+                ..OverlayConfig::default()
             };
 
             let lines = vec![
@@ -4366,7 +4364,7 @@ mod tests {
             ];
 
             let mut frame = YuvFrame::black(640, 480);
-            draw_obd_box_yuv420_with_config(&mut frame, &lines, &cfg);
+            draw_overlay_box_yuv420_with_config(&mut frame, &lines, &cfg);
 
             // Verify pixels were written to Y and chroma planes U/V
             let non_zero_y = frame.y.iter().filter(|&&y| y > 16).count();
@@ -4384,7 +4382,7 @@ mod tests {
             );
         }
 
-        set_obd_font_path(Path::new(""));
+        set_overlay_font_path(Path::new(""));
     }
 
     #[test]
@@ -4458,12 +4456,12 @@ mod tests {
             let _ = parse_css_color(&s);
             let _ = parse_html_line(&s, (255, 255, 255), 24.0);
             let _ = strip_html_tags(&s);
-            let lines = parse_obd_text_lines(&s);
+            let lines = parse_overlay_text_lines(&s);
             let mut frame = YuvFrame::black(160, 96);
-            draw_obd_box_yuv420_with_config_and_font(
+            draw_overlay_box_yuv420_with_config_and_font(
                 &mut frame,
                 &lines,
-                &ObdOverlayConfig::default(),
+                &OverlayConfig::default(),
                 None,
             );
         }
@@ -4481,54 +4479,59 @@ mod tests {
         assert_eq!(ttf_base_font_size(usize::MAX), MAX_TTF_FONT_PX);
 
         // The built-in font must not overflow or take forever with an absurd scale either.
-        let cfg = ObdOverlayConfig {
+        let cfg = OverlayConfig {
             text_scale: usize::MAX,
-            ..ObdOverlayConfig::default()
+            ..OverlayConfig::default()
         };
         let mut frame = YuvFrame::black(320, 192);
         let t = Instant::now();
-        draw_obd_box_yuv420_with_config_and_font(&mut frame, &["RPM 2450".to_string()], &cfg, None);
+        draw_overlay_box_yuv420_with_config_and_font(
+            &mut frame,
+            &["RPM 2450".to_string()],
+            &cfg,
+            None,
+        );
         assert!(t.elapsed() < Duration::from_secs(2));
     }
 
     #[test]
     fn test_json_font_path_takes_precedence_and_is_not_overwritten_by_config() {
         let _guard = lock_test_state();
-        let current = || OBD_FONT_CACHE.lock().unwrap().path.clone();
+        let current = || OVERLAY_FONT_CACHE.lock().unwrap().path.clone();
 
-        set_obd_font_path(Path::new("/cfg/a.ttf"));
+        set_overlay_font_path(Path::new("/cfg/a.ttf"));
         assert_eq!(current(), PathBuf::from("/cfg/a.ttf"));
 
-        set_obd_json_font_path("/json/b.ttf");
+        set_overlay_json_font_path("/json/b.ttf");
         assert_eq!(current(), PathBuf::from("/json/b.ttf"));
 
         // The packet hook re-applies the config path on every frame; it must not undo the JSON one.
         for _ in 0..3 {
-            set_obd_font_path(Path::new("/cfg/a.ttf"));
+            set_overlay_font_path(Path::new("/cfg/a.ttf"));
             assert_eq!(current(), PathBuf::from("/json/b.ttf"));
         }
 
         // Removing "font_path" from the JSON falls back to the config path.
-        set_obd_json_font_path("");
+        set_overlay_json_font_path("");
         assert_eq!(current(), PathBuf::from("/cfg/a.ttf"));
 
-        set_obd_font_path(Path::new(""));
+        set_overlay_font_path(Path::new(""));
         assert_eq!(current(), PathBuf::new());
     }
 
     #[test]
     fn test_invalid_font_is_parsed_once_per_file_version() {
         let _guard = lock_test_state();
-        let tmp = std::env::temp_dir().join(format!("obd_bad_font_{}.ttf", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("overlay_bad_font_{}.ttf", std::process::id()));
         fs::write(&tmp, b"definitely not a font").unwrap();
 
-        let force_check = || OBD_FONT_CACHE.lock().unwrap().last_check = None;
+        let force_check = || OVERLAY_FONT_CACHE.lock().unwrap().last_check = None;
         let before = FONT_LOAD_ATTEMPTS.load(Ordering::Relaxed);
 
-        set_obd_font_path(&tmp);
+        set_overlay_font_path(&tmp);
         for _ in 0..5 {
             force_check();
-            assert!(get_cached_obd_font().is_none());
+            assert!(get_cached_overlay_font().is_none());
         }
         assert_eq!(
             FONT_LOAD_ATTEMPTS.load(Ordering::Relaxed) - before,
@@ -4543,10 +4546,10 @@ mod tests {
             .unwrap();
         drop(f);
         force_check();
-        assert!(get_cached_obd_font().is_none());
+        assert!(get_cached_overlay_font().is_none());
         assert_eq!(FONT_LOAD_ATTEMPTS.load(Ordering::Relaxed) - before, 2);
 
-        set_obd_font_path(Path::new(""));
+        set_overlay_font_path(Path::new(""));
         let _ = fs::remove_file(&tmp);
     }
 
@@ -4563,7 +4566,7 @@ mod tests {
     }
 
     #[test]
-    fn test_obd_hw_accel_auto_fallback_to_software() {
+    fn test_overlay_hw_accel_auto_fallback_to_software() {
         let _guard = lock_test_state();
         let mut sdr = ServiceDiscoveryResponse::new();
         let mut svc = crate::mitm::protos::Service::new();
@@ -4577,13 +4580,13 @@ mod tests {
         register_video_channels_from_sdr(
             &mut sdr,
             true,
-            Path::new("/dev/shm/obd_test.json"),
+            Path::new("/dev/shm/overlay_test.json"),
             Path::new(""),
-            crate::config::ObdHwAccel::Auto,
+            crate::config::OverlayHwAccel::Auto,
             "",
             "",
         );
-        assert!(obd_overlay_enabled());
+        assert!(overlay_enabled());
         assert!(is_registered_video_channel(0x03));
 
         // Decoder and encoder states must be created and ready
@@ -4592,7 +4595,7 @@ mod tests {
     }
 
     #[test]
-    fn test_obd_hw_accel_v4l2_explicit_invalid_device_fallback() {
+    fn test_overlay_hw_accel_v4l2_explicit_invalid_device_fallback() {
         let _guard = lock_test_state();
         let mut sdr = ServiceDiscoveryResponse::new();
         let mut svc = crate::mitm::protos::Service::new();
@@ -4606,13 +4609,13 @@ mod tests {
         register_video_channels_from_sdr(
             &mut sdr,
             true,
-            Path::new("/dev/shm/obd_test.json"),
+            Path::new("/dev/shm/overlay_test.json"),
             Path::new(""),
-            crate::config::ObdHwAccel::V4l2,
+            crate::config::OverlayHwAccel::V4l2,
             "/dev/nonexistent_v4l2_dec",
             "/dev/nonexistent_v4l2_enc",
         );
-        assert!(obd_overlay_enabled());
+        assert!(overlay_enabled());
         assert!(is_registered_video_channel(0x05));
 
         // When invalid paths are passed, fallback to software ensures states exist and run

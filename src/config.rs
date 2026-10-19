@@ -34,7 +34,7 @@ pub const DEFAULT_SDR_UI_OVERRIDE_FILE: &str =
     concat!(base_config_dir!(), "/sdr-ui-overrides.toml");
 pub const DEFAULT_INJECT_DISPLAYS_FILE: &str = concat!(base_config_dir!(), "/inject-displays.toml");
 pub const DEFAULT_MAP_ALBUM_ART_FILE: &str = "/data/aa-proxy-rs/map-album-art.png";
-pub const DEFAULT_OBD_TEXT_PATH: &str = "/dev/shm/obd_overlay.json";
+pub const DEFAULT_OVERLAY_TEXT_PATH: &str = "/dev/shm/overlay.json";
 
 pub type SharedConfig = Arc<RwLock<AppConfig>>;
 pub type SharedConfigJson = Arc<RwLock<ConfigJson>>;
@@ -83,33 +83,33 @@ where
     }
 }
 
-fn default_obd_text_path() -> PathBuf {
-    PathBuf::from(DEFAULT_OBD_TEXT_PATH)
+fn default_overlay_text_path() -> PathBuf {
+    PathBuf::from(DEFAULT_OVERLAY_TEXT_PATH)
 }
 
-fn empty_string_as_default_obd_text_path<'de, D>(deserializer: D) -> Result<PathBuf, D::Error>
+fn empty_string_as_default_overlay_text_path<'de, D>(deserializer: D) -> Result<PathBuf, D::Error>
 where
     D: Deserializer<'de>,
 {
     let v: Option<String> = Option::deserialize(deserializer)?;
     match v {
         Some(s) if !s.trim().is_empty() => Ok(PathBuf::from(s.trim())),
-        _ => Ok(default_obd_text_path()),
+        _ => Ok(default_overlay_text_path()),
     }
 }
 
-fn default_obd_font_path() -> PathBuf {
+fn default_overlay_font_path() -> PathBuf {
     PathBuf::new()
 }
 
-fn empty_string_as_default_obd_font_path<'de, D>(deserializer: D) -> Result<PathBuf, D::Error>
+fn empty_string_as_default_overlay_font_path<'de, D>(deserializer: D) -> Result<PathBuf, D::Error>
 where
     D: Deserializer<'de>,
 {
     let v: Option<String> = Option::deserialize(deserializer)?;
     match v {
         Some(s) if !s.trim().is_empty() => Ok(PathBuf::from(s.trim())),
-        _ => Ok(default_obd_font_path()),
+        _ => Ok(default_overlay_font_path()),
     }
 }
 
@@ -247,19 +247,19 @@ impl Display for VideoInMotionLevel {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub enum ObdHwAccel {
+pub enum OverlayHwAccel {
     None,
     Auto,
     V4l2,
 }
 
-impl Default for ObdHwAccel {
+impl Default for OverlayHwAccel {
     fn default() -> Self {
         Self::None
     }
 }
 
-impl Display for ObdHwAccel {
+impl Display for OverlayHwAccel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::None => "none",
@@ -269,7 +269,7 @@ impl Display for ObdHwAccel {
     }
 }
 
-impl<'de> Deserialize<'de> for ObdHwAccel {
+impl<'de> Deserialize<'de> for OverlayHwAccel {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -280,7 +280,7 @@ impl<'de> Deserialize<'de> for ObdHwAccel {
             "v4l2" | "hardware" | "hw" => Ok(Self::V4l2),
             "none" | "software" | "sw" | "" => Ok(Self::None),
             other => Err(serde::de::Error::custom(format!(
-                "invalid obd_hw_accel: '{other}', expected 'none', 'auto', or 'v4l2'"
+                "invalid overlay_hw_accel: '{other}', expected 'none', 'auto', or 'v4l2'"
             ))),
         }
     }
@@ -624,40 +624,39 @@ pub struct AppConfig {
     pub sdr_ui_override_file: PathBuf,
     /// TOML file used to store injected display service profiles. Display IDs are assigned automatically from the current SDR.
     pub inject_displays_file: PathBuf,
-    /// Enable the H.264 OBD text overlay (decode -> draw -> re-encode of the phone video).
+    /// Enable the H.264 text overlay (decode -> draw -> re-encode of the phone video).
     /// Disabled by default; when false the video path is completely untouched.
     /// Evaluated per Android Auto session (at ServiceDiscoveryResponse), so a change applies on the next connection.
-    pub obd_overlay_enabled: bool,
-    /// Path to the live OBD JSON (or plain-text) overlay file in shared memory.
+    pub overlay_enabled: bool,
+    /// Path to the live overlay JSON (or plain-text) file in shared memory.
     #[serde(
-        default = "default_obd_text_path",
-        alias = "OBD_TEXT_PATH",
-        deserialize_with = "empty_string_as_default_obd_text_path"
+        default = "default_overlay_text_path",
+        alias = "OVERLAY_TEXT_PATH",
+        deserialize_with = "empty_string_as_default_overlay_text_path"
     )]
-    pub obd_text_path: PathBuf,
-    /// Optional path to a TTF font file for rendering the OBD overlay text.
+    pub overlay_text_path: PathBuf,
+    /// Optional path to a TTF font file for rendering the overlay text.
     /// If empty or if the file does not exist, the built-in bitmap font is used.
     /// When a TTF font is used, "text_scale" in the overlay JSON defines the font size.
     #[serde(
-        default = "default_obd_font_path",
-        alias = "OBD_FONT_PATH",
-        alias = "obd_font",
-        deserialize_with = "empty_string_as_default_obd_font_path"
+        default = "default_overlay_font_path",
+        alias = "OVERLAY_FONT_PATH",
+        deserialize_with = "empty_string_as_default_overlay_font_path"
     )]
-    pub obd_font_path: PathBuf,
-    /// Hardware acceleration backend for the OBD video overlay:
+    pub overlay_font_path: PathBuf,
+    /// Hardware acceleration backend for the video overlay:
     /// `none` (default, pure-Rust software), `auto` (auto-detect V4L2 M2M hardware codecs),
     /// or `v4l2` (force V4L2 M2M hardware codecs with software fallback).
     #[serde(default)]
-    pub obd_hw_accel: ObdHwAccel,
+    pub overlay_hw_accel: OverlayHwAccel,
     /// Explicit V4L2 M2M decoder device path (e.g. `/dev/video10`).
-    /// If empty, auto-detected when `obd_hw_accel` is `auto` or `v4l2`.
+    /// If empty, auto-detected when `overlay_hw_accel` is `auto` or `v4l2`.
     #[serde(default)]
-    pub obd_v4l2_decoder: String,
+    pub overlay_v4l2_decoder: String,
     /// Explicit V4L2 M2M encoder device path (e.g. `/dev/video11`).
-    /// If empty, auto-detected when `obd_hw_accel` is `auto` or `v4l2`.
+    /// If empty, auto-detected when `overlay_hw_accel` is `auto` or `v4l2`.
     #[serde(default)]
-    pub obd_v4l2_encoder: String,
+    pub overlay_v4l2_encoder: String,
     pub stats_interval: u16,
     #[serde(default, deserialize_with = "empty_string_as_none")]
     pub udc: Option<String>,
@@ -1123,12 +1122,12 @@ impl Default for AppConfig {
             sdr_ui_override_autocreate_profiles: true,
             sdr_ui_override_file: DEFAULT_SDR_UI_OVERRIDE_FILE.into(),
             inject_displays_file: DEFAULT_INJECT_DISPLAYS_FILE.into(),
-            obd_overlay_enabled: false,
-            obd_text_path: DEFAULT_OBD_TEXT_PATH.into(),
-            obd_font_path: default_obd_font_path(),
-            obd_hw_accel: ObdHwAccel::None,
-            obd_v4l2_decoder: String::new(),
-            obd_v4l2_encoder: String::new(),
+            overlay_enabled: false,
+            overlay_text_path: DEFAULT_OVERLAY_TEXT_PATH.into(),
+            overlay_font_path: default_overlay_font_path(),
+            overlay_hw_accel: OverlayHwAccel::None,
+            overlay_v4l2_decoder: String::new(),
+            overlay_v4l2_encoder: String::new(),
             stats_interval: 0,
             udc: None,
             usb_stick: None,
@@ -1475,18 +1474,18 @@ impl AppConfig {
             value(self.sdr_ui_override_autocreate_profiles);
         doc["sdr_ui_override_file"] = value(self.sdr_ui_override_file.display().to_string());
         doc["inject_displays_file"] = value(self.inject_displays_file.display().to_string());
-        doc["obd_overlay_enabled"] = value(self.obd_overlay_enabled);
-        let obd_text_path_str = self.obd_text_path.display().to_string();
-        doc["obd_text_path"] = value(if obd_text_path_str.trim().is_empty() {
-            DEFAULT_OBD_TEXT_PATH.to_string()
+        doc["overlay_enabled"] = value(self.overlay_enabled);
+        let overlay_text_path_str = self.overlay_text_path.display().to_string();
+        doc["overlay_text_path"] = value(if overlay_text_path_str.trim().is_empty() {
+            DEFAULT_OVERLAY_TEXT_PATH.to_string()
         } else {
-            obd_text_path_str
+            overlay_text_path_str
         });
-        let obd_font_path_str = self.obd_font_path.display().to_string();
-        doc["obd_font_path"] = value(obd_font_path_str.trim().to_string());
-        doc["obd_hw_accel"] = value(self.obd_hw_accel.to_string());
-        doc["obd_v4l2_decoder"] = value(self.obd_v4l2_decoder.trim().to_string());
-        doc["obd_v4l2_encoder"] = value(self.obd_v4l2_encoder.trim().to_string());
+        let overlay_font_path_str = self.overlay_font_path.display().to_string();
+        doc["overlay_font_path"] = value(overlay_font_path_str.trim().to_string());
+        doc["overlay_hw_accel"] = value(self.overlay_hw_accel.to_string());
+        doc["overlay_v4l2_decoder"] = value(self.overlay_v4l2_decoder.trim().to_string());
+        doc["overlay_v4l2_encoder"] = value(self.overlay_v4l2_encoder.trim().to_string());
         doc["stats_interval"] = value(self.stats_interval as i64);
         if let Some(udc) = &self.udc {
             doc["udc"] = value(udc);

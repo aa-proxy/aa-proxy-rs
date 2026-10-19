@@ -36,7 +36,7 @@ The project initially focused on supporting the Raspberry Pi, but has since grow
   - **Injected display support** – define auxiliary/cluster displays with custom FPS, DPI, touchscreen support, and startup actions
   - **Media tap registry & reverse bridge** – dynamically expose media streams to [companion app](https://aa-proxy.github.io/docs/companion-app) via reverse TCP bridge
   - **Album art injection** – override album artwork from static images, uploads, or live injected display frames
-  - **[OBD video overlay](#obd-video-overlay)** – draw live text (OBD values, board temperature, alerts) on top of the Android Auto video; opt-in via `obd_overlay_enabled`
+  - **[Video overlay](#video-overlay)** – draw any live text (e.g. OBD values, board temperature, alerts) on top of the Android Auto video; opt-in via `overlay_enabled`
   - **Event injection** – key event injection via `/inject_event` and rotary controller support via `/inject_rotary`
   - **WASM scripting** – write hooks that modify AA packets on the fly via `wasmtime`
     - Persistent script state and lifecycle hooks
@@ -203,44 +203,44 @@ Example with Google Maps, where a `Report` button is available after changing th
 |---|---|
 |![](images/160dpi.png)|![](images/130dpi.png)
 
-### OBD video overlay
-aa-proxy-rs can draw a small text box (e.g. OBD values, board temperature and load, alerts) directly on the main Android Auto video.
+### Video overlay
+aa-proxy-rs can draw a small text box with any text you provide directly on the main Android Auto video. The data source is up to you: OBD values from a dongle are one example, others are board temperature and load, sensor readings or alerts.
 The phone video is decoded, the text is rendered and the stream is re-encoded to H.264 Constrained Baseline, using either a pure-Rust software codec
 (no external programs, system libraries or kernel configuration needed) or hardware acceleration via Linux V4L2 M2M on supported boards (e.g. Raspberry Pi 3/4/Zero 2 W with `bcm2835-codec`; the Raspberry Pi 5 is **not** supported, it has no hardware H.264 encoder).
 
-![](images/obd-overlay.png)
+![](images/overlay.png)
 
 **It is disabled by default** and does not touch the video path unless you enable it in `config.toml` (it requires `mitm = true`):
 ```toml
-obd_overlay_enabled = true
+overlay_enabled = true
 # optional, these are the defaults:
-obd_text_path = "/dev/shm/obd_overlay.json"
-obd_font_path = ""   # path to a .ttf font, empty = built-in bitmap font (see below)
-obd_hw_accel = "none" # "none" (default pure-Rust software), "auto" (detect V4L2 M2M codecs), or "v4l2"
-obd_v4l2_decoder = "" # optional explicit V4L2 decoder device (e.g. "/dev/video10" on Raspberry Pi)
-obd_v4l2_encoder = "" # optional explicit V4L2 encoder device (e.g. "/dev/video11" on Raspberry Pi)
+overlay_text_path = "/dev/shm/overlay.json"
+overlay_font_path = ""   # path to a .ttf font, empty = built-in bitmap font (see below)
+overlay_hw_accel = "none" # "none" (default pure-Rust software), "auto" (detect V4L2 M2M codecs), or "v4l2"
+overlay_v4l2_decoder = "" # optional explicit V4L2 decoder device (e.g. "/dev/video10" on Raspberry Pi)
+overlay_v4l2_encoder = "" # optional explicit V4L2 encoder device (e.g. "/dev/video11" on Raspberry Pi)
 ```
 The option is evaluated when an Android Auto session starts, so a change applies on the next connection. While enabled, every frame of the main display
 goes through the decode/render/encode pipeline (even with empty text), and `VIDEO_FPS_60` is capped to 30 (see `cap_video_fps_to_30`).
 
-On supported boards like **Raspberry Pi 3/4/Zero 2 W** (excluding Raspberry Pi 5) with h264 hw acceleration, setting `obd_hw_accel = "auto"` offloads H.264 decoding and encoding to the hardware VideoCore VPU (`/dev/video10` and `/dev/video11`), dropping CPU usage by ~85%, significantly lowering latency and keeping temperatures 15-25°C cooler inside enclosed vehicle cabins. If hardware devices are unavailable or fail to open, it automatically falls back to software. (Ensure `/boot/firmware/config.txt` has `gpu_mem=128`). The hardware encoder uses a fixed bitrate (4 Mbps) and does not use `h264_encoder_qp`; a single slow hardware frame is dropped, and the software codec takes over only after repeated or fatal hardware errors.
+On supported boards like **Raspberry Pi 3/4/Zero 2 W** (excluding Raspberry Pi 5) with h264 hw acceleration, setting `overlay_hw_accel = "auto"` offloads H.264 decoding and encoding to the hardware VideoCore VPU (`/dev/video10` and `/dev/video11`), dropping CPU usage by ~85%, significantly lowering latency and keeping temperatures 15-25°C cooler inside enclosed vehicle cabins. If hardware devices are unavailable or fail to open, it automatically falls back to software. (Ensure `/boot/firmware/config.txt` has `gpu_mem=128`). The hardware encoder uses a fixed bitrate (4 Mbps) and does not use `h264_encoder_qp`; a single slow hardware frame is dropped, and the software codec takes over only after repeated or fatal hardware errors.
 
-The content and look are controlled live by a JSON file (an [example with all keys and defaults](examples/obd_overlay.json)).
-It is re-read at most every `obd_poll_interval_ms`, so any change, including setting `"text"` to `""`, is applied on the next video frame without reconnecting.
+The content and look are controlled live by a JSON file (an [example with all keys and defaults](examples/overlay.json)).
+It is re-read at most every `poll_interval_ms`, so any change, including setting `"text"` to `""`, is applied on the next video frame without reconnecting.
 All keys are optional; a missing file or key falls back to the defaults. A file that does not start with `{` is treated as plain text to display.
 Feed it from any script or program, for example:
 ```sh
 # write to a temporary file and rename it, so the overlay never reads a half-written file
 printf '{"text": "TEMP: %s C\\r\\nLOAD: %s"}' "$(( $(cat /sys/class/thermal/thermal_zone0/temp) / 1000 ))" "$(cut -d' ' -f1 /proc/loadavg)" \
-  > /dev/shm/obd_overlay.json.tmp && mv /dev/shm/obd_overlay.json.tmp /dev/shm/obd_overlay.json
+  > /dev/shm/overlay.json.tmp && mv /dev/shm/overlay.json.tmp /dev/shm/overlay.json
 ```
 Note: an incomplete or invalid JSON is not an error, but the overlay then falls back to the defaults with no text until the next valid read, hence the atomic write above.
 
 | Key | Default | Description |
 |---|---|---|
 | `text` | `""` | Text to show; `\r\n`, `\n` and `\r` start a new line. Empty/`null`/missing shows nothing. May contain [HTML styling](#ttf-fonts-and-html-styling). With the built-in font, characters outside ASCII are shown as `?` (except `°`, `ñ` and basic Latin accents) |
-| `font_path` | `""` | Path to a `.ttf` font; when set it takes precedence over `obd_font_path` from `config.toml` |
-| `obd_poll_interval_ms` | `250` | Minimum interval between reads of the file (min. 20) |
+| `font_path` | `""` | Path to a `.ttf` font; when set it takes precedence over `overlay_font_path` from `config.toml` |
+| `poll_interval_ms` | `250` | Minimum interval between reads of the file (min. 20) |
 | `box_margin_right_px`, `box_margin_bottom_px` | `100`, `9` | Distance of the box from the right/bottom edge of the video |
 | `box_padding_x_px`, `box_padding_y_px` | `12`, `9` | Padding between box border and text |
 | `box_border_px` | `0` | Border thickness (`0` = none) |
@@ -256,12 +256,12 @@ Note: an incomplete or invalid JSON is not an error, but the overlay then falls 
 | `cap_video_fps_to_30` | `true` | Cap `VIDEO_FPS_60` to 30 in the `ServiceDiscoveryResponse` while the overlay is enabled |
 
 #### TTF fonts and HTML styling
-By default the text is drawn with the built-in 8x8 bitmap font (ASCII only). Set `obd_font_path` in `config.toml` (or `"font_path"` in the JSON file,
+By default the text is drawn with the built-in 8x8 bitmap font (ASCII only). Set `overlay_font_path` in `config.toml` (or `"font_path"` in the JSON file,
 which takes precedence) to a TrueType (`.ttf`) file to get anti-aliased, proportional text with every character the font contains (e.g. Polish letters).
 A missing, empty or unparsable file silently falls back to the built-in font, and a changed file is picked up again without a restart.
 
 A font that matches the Android Auto look is [Google Sans](https://github.com/googlefonts/googlesans), published under the SIL Open Font License.
-It is not bundled with aa-proxy-rs: download the Regular `.ttf` and point `obd_font_path` to it (e.g. `/etc/aa-proxy-rs/GoogleSans-Regular.ttf`).
+It is not bundled with aa-proxy-rs: download the Regular `.ttf` and point `overlay_font_path` to it (e.g. `/etc/aa-proxy-rs/GoogleSans-Regular.ttf`).
 Keep in mind that a font with thousands of glyphs needs a noticeable amount of RAM once loaded (about 45 MB for Google Sans) and that rendering
 a lot of TTF text costs more CPU than the built-in font, so on small boards prefer a lighter font and a few short lines.
 
