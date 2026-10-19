@@ -205,8 +205,8 @@ Example with Google Maps, where a `Report` button is available after changing th
 
 ### OBD video overlay
 aa-proxy-rs can draw a small text box (e.g. OBD values, board temperature and load, alerts) directly on the main Android Auto video.
-The phone video is decoded, the text is rendered and the stream is re-encoded to H.264 Constrained Baseline, using a pure-Rust codec
-(no external programs, system libraries or kernel configuration needed).
+The phone video is decoded, the text is rendered and the stream is re-encoded to H.264 Constrained Baseline, using either a pure-Rust software codec
+(no external programs, system libraries or kernel configuration needed) or hardware acceleration via Linux V4L2 M2M on supported boards (e.g. Raspberry Pi 3/4/Zero 2 W with `bcm2835-codec`; the Raspberry Pi 5 is **not** supported, it has no hardware H.264 encoder).
 
 ![](images/obd-overlay.png)
 
@@ -216,9 +216,14 @@ obd_overlay_enabled = true
 # optional, these are the defaults:
 obd_text_path = "/dev/shm/obd_overlay.json"
 obd_font_path = ""   # path to a .ttf font, empty = built-in bitmap font (see below)
+obd_hw_accel = "none" # "none" (default pure-Rust software), "auto" (detect V4L2 M2M codecs), or "v4l2"
+obd_v4l2_decoder = "" # optional explicit V4L2 decoder device (e.g. "/dev/video10" on Raspberry Pi)
+obd_v4l2_encoder = "" # optional explicit V4L2 encoder device (e.g. "/dev/video11" on Raspberry Pi)
 ```
 The option is evaluated when an Android Auto session starts, so a change applies on the next connection. While enabled, every frame of the main display
-goes through the decode/render/encode pipeline (even with empty text), and `VIDEO_FPS_60` is capped to 30 (see `cap_video_fps_to_30`), which means extra CPU load.
+goes through the decode/render/encode pipeline (even with empty text), and `VIDEO_FPS_60` is capped to 30 (see `cap_video_fps_to_30`).
+
+On supported boards like **Raspberry Pi 3/4/Zero 2 W** (excluding Raspberry Pi 5) with h264 hw acceleration, setting `obd_hw_accel = "auto"` offloads H.264 decoding and encoding to the hardware VideoCore VPU (`/dev/video10` and `/dev/video11`), dropping CPU usage by ~85%, significantly lowering latency and keeping temperatures 15-25°C cooler inside enclosed vehicle cabins. If hardware devices are unavailable or fail to open, it automatically falls back to software. (Ensure `/boot/firmware/config.txt` has `gpu_mem=128`). The hardware encoder uses a fixed bitrate (4 Mbps) and does not use `h264_encoder_qp`; a single slow hardware frame is dropped, and the software codec takes over only after repeated or fatal hardware errors.
 
 The content and look are controlled live by a JSON file (an [example with all keys and defaults](examples/obd_overlay.json)).
 It is re-read at most every `obd_poll_interval_ms`, so any change, including setting `"text"` to `""`, is applied on the next video frame without reconnecting.

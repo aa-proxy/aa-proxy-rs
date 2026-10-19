@@ -467,29 +467,86 @@ struct ChannelGateState {
     pipeline_engaged: bool,
 }
 
+static SESSION_HW_ACCEL: Mutex<crate::config::ObdHwAccel> =
+    Mutex::new(crate::config::ObdHwAccel::None);
+static SESSION_V4L2_DEVICES: Mutex<Option<crate::v4l2_m2m::V4l2CodecDevices>> = Mutex::new(None);
+
+pub enum DecoderBackend {
+    Software(Decoder),
+    V4l2(crate::v4l2_m2m::V4l2M2mDecoder),
+}
+
+pub enum EncoderBackend {
+    Software(Encoder),
+    V4l2(crate::v4l2_m2m::V4l2M2mEncoder),
+}
+
+/// Returns true if the channel currently decodes with the V4L2 hardware decoder.
+fn channel_uses_v4l2_decoder(channel: u8) -> bool {
+    VIDEO_DECODERS
+        .lock()
+        .map(|map| {
+            map.get(&channel)
+                .map(|st| matches!(st.backend, DecoderBackend::V4l2(_)))
+                .unwrap_or(false)
+        })
+        .unwrap_or(false)
+}
+
+/// Number of consecutive V4L2 encoder timeouts tolerated before falling back to software.
+const V4L2_ENC_MAX_CONSECUTIVE_TIMEOUTS: u32 = 10;
+
 /// Per-channel H.264 decoder state owned by the Stage-1 decoder worker (`obd-h264-dec`, Core 2).
 struct ChannelDecoderState {
-    decoder: Decoder,
+    backend: DecoderBackend,
     phone_codec_config: Option<Vec<u8>>,
 }
 
 impl ChannelDecoderState {
-    fn new() -> Self {
+    fn new(channel: u8) -> Self {
+        let backend = if let Ok(guard) = SESSION_V4L2_DEVICES.lock() {
+            if let Some(devs) = guard.as_ref() {
+                match crate::v4l2_m2m::V4l2M2mDecoder::new(&devs.decoder_path) {
+                    Ok(dec) => {
+                        info!(
+                            "obd_overlay: ch {:#04x} initialized V4L2 M2M hardware decoder {}",
+                            channel,
+                            devs.decoder_path.display()
+                        );
+                        DecoderBackend::V4l2(dec)
+                    }
+                    Err(e) => {
+                        warn!(
+                            "obd_overlay: ch {:#04x} failed to initialize V4L2 decoder ({}): {:?}, using pure-Rust software decoder",
+                            channel,
+                            devs.decoder_path.display(),
+                            e
+                        );
+                        DecoderBackend::Software(Decoder::new())
+                    }
+                }
+            } else {
+                DecoderBackend::Software(Decoder::new())
+            }
+        } else {
+            DecoderBackend::Software(Decoder::new())
+        };
+
         Self {
-            decoder: Decoder::new(),
+            backend,
             phone_codec_config: None,
         }
     }
 
-    fn reset_decoder(&mut self) {
-        self.decoder = Decoder::new();
+    fn reset_decoder(&mut self, channel: u8) {
+        *self = Self::new(channel);
     }
 }
 
 /// Per-channel H.264 encoder state owned by the Stage-2 encoder worker (`obd-h264-enc`, Core 3).
 struct ChannelEncoderState {
     display_type: DisplayType,
-    encoder: Option<Encoder>,
+    encoder: Option<EncoderBackend>,
     encoder_dims: Option<(usize, usize)>,
     encoder_qp_gop: Option<(u8, u32)>,
     emitted_encoder_codec_config: bool,
@@ -501,6 +558,7 @@ struct ChannelEncoderState {
     last_encoded_yuv: Option<YuvFrame>,
     last_encoded_lines: Vec<String>,
     last_encoded_cfg: Option<ObdOverlayConfig>,
+    hw_enc_timeouts: u32,
 }
 
 impl ChannelEncoderState {
@@ -519,6 +577,7 @@ impl ChannelEncoderState {
             last_encoded_yuv: None,
             last_encoded_lines: Vec::new(),
             last_encoded_cfg: None,
+            hw_enc_timeouts: 0,
         }
     }
 
@@ -549,36 +608,86 @@ impl ChannelEncoderState {
             || self.encoder_dims != Some(dims)
             || self.encoder_qp_gop != Some(qp_gop)
         {
-            match create_baseline_encoder(width, height, qp_gop.0, qp_gop.1) {
-                Ok(enc) => {
-                    let dims_changed = self.encoder_dims != Some(dims);
-                    self.encoder = Some(enc);
-                    self.encoder_dims = Some(dims);
-                    self.encoder_qp_gop = Some(qp_gop);
-                    if dims_changed {
-                        self.emitted_encoder_codec_config = false;
+            let mut enc_backend = None;
+            if let Ok(devices) = SESSION_V4L2_DEVICES.lock() {
+                if let Some(devs) = devices.as_ref() {
+                    match crate::v4l2_m2m::V4l2M2mEncoder::new(
+                        &devs.encoder_path,
+                        width,
+                        height,
+                        qp_gop.0,
+                        qp_gop.1,
+                    ) {
+                        Ok(v4l2_enc) => {
+                            info!(
+                                "obd_overlay: ch {:#04x} ({:?}) initialized V4L2 M2M hardware encoder {} ({}x{}, GOP={})",
+                                channel, self.display_type, devs.encoder_path.display(), width, height, qp_gop.1
+                            );
+                            enc_backend = Some(EncoderBackend::V4l2(v4l2_enc));
+                        }
+                        Err(e) => {
+                            warn!(
+                                "obd_overlay: ch {:#04x} failed to initialize V4L2 encoder ({}): {:?}, falling back to pure-Rust software encoder",
+                                channel, devs.encoder_path.display(), e
+                            );
+                        }
                     }
-                    self.force_next_keyframe = true;
-                    self.out_frame_num = 0;
-                    self.out_poc_lsb = 0;
-                    self.last_encoded_yuv = None;
-                    self.last_encoded_lines.clear();
-                    self.last_encoded_cfg = None;
-                    debug!(
-                        "obd_overlay: ch {:#04x} ({:?}) initialized pure-Rust H.264 Constrained Baseline encoder {}x{} (qp={}, gop={}, weightp=false, zero-latency VUI)",
-                        channel, self.display_type, width, height, qp_gop.0, qp_gop.1
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        "obd_overlay: ch {:#04x} failed to initialize H.264 encoder {}x{}: {:?}",
-                        channel, width, height, e
-                    );
-                    return false;
                 }
             }
+
+            if enc_backend.is_none() {
+                match create_baseline_encoder(width, height, qp_gop.0, qp_gop.1) {
+                    Ok(enc) => {
+                        debug!(
+                            "obd_overlay: ch {:#04x} ({:?}) initialized pure-Rust H.264 Constrained Baseline encoder {}x{} (qp={}, gop={}, weightp=false, zero-latency VUI)",
+                            channel, self.display_type, width, height, qp_gop.0, qp_gop.1
+                        );
+                        enc_backend = Some(EncoderBackend::Software(enc));
+                    }
+                    Err(e) => {
+                        warn!(
+                            "obd_overlay: ch {:#04x} failed to initialize H.264 software encoder {}x{}: {:?}",
+                            channel, width, height, e
+                        );
+                        return false;
+                    }
+                }
+            }
+
+            let dims_changed = self.encoder_dims != Some(dims);
+            self.encoder = enc_backend;
+            self.encoder_dims = Some(dims);
+            self.encoder_qp_gop = Some(qp_gop);
+            if dims_changed {
+                self.emitted_encoder_codec_config = false;
+            }
+            self.force_next_keyframe = true;
+            self.out_frame_num = 0;
+            self.out_poc_lsb = 0;
+            self.last_encoded_yuv = None;
+            self.last_encoded_lines.clear();
+            self.last_encoded_cfg = None;
         }
         true
+    }
+
+    pub fn get_sps_pps(&self, qp: u8) -> Option<Vec<u8>> {
+        let (w, h) = self.encoder_dims?;
+        match &self.encoder {
+            Some(EncoderBackend::V4l2(v4l2_enc)) => {
+                let hdr = v4l2_enc.header_bytes();
+                if !hdr.is_empty() {
+                    Some(hdr.to_vec())
+                } else {
+                    // Never pair a software-built SPS/PPS with a hardware-encoded stream; the
+                    // real headers are taken from the first hardware IDR access unit instead.
+                    None
+                }
+            }
+            Some(EncoderBackend::Software(_)) | None => {
+                Some(build_car_hu_sps_pps_annex_b(w, h, qp.clamp(0, 51)))
+            }
+        }
     }
 }
 
@@ -816,6 +925,7 @@ fn stage1_decoder_worker_loop(
         let h264_au = &job.frame_data[10..];
         let in_len = h264_au.len();
 
+        let hw_decoder = channel_uses_v4l2_decoder(job.channel);
         match decode_video_access_unit(job.channel, h264_au) {
             Some((yuv, dec_dur, incoming_has_idr)) => {
                 stage2.push(Stage2Job::DecodedData {
@@ -829,6 +939,11 @@ fn stage1_decoder_worker_loop(
                     fallback_frame_data: job.frame_data,
                     out_tx: job.out_tx,
                 });
+            }
+            None if hw_decoder => {
+                // The V4L2 decoder is pipelined: no frame ready yet. Forwarding the phone's
+                // original access unit would mix two different H.264 streams, so drop it.
+                PIPELINE_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
             }
             None => {
                 stage2.push(Stage2Job::PassThrough {
@@ -973,8 +1088,37 @@ pub fn register_video_channels_from_sdr(
     enabled: bool,
     obd_text_path: &Path,
     obd_font_path: &Path,
+    hw_accel: crate::config::ObdHwAccel,
+    v4l2_decoder: &str,
+    v4l2_encoder: &str,
 ) {
     SESSION_ENABLED.store(enabled, Ordering::Release);
+    if let Ok(mut lock) = SESSION_HW_ACCEL.lock() {
+        *lock = hw_accel;
+    }
+    if enabled && hw_accel != crate::config::ObdHwAccel::None {
+        let probed =
+            crate::v4l2_m2m::probe_v4l2_codec_devices(Some(v4l2_decoder), Some(v4l2_encoder));
+        if let Some(devs) = &probed {
+            info!(
+                "obd_overlay: V4L2 M2M hardware acceleration enabled (decoder: {}, encoder: {})",
+                devs.decoder_path.display(),
+                devs.encoder_path.display()
+            );
+        } else {
+            info!(
+                "obd_overlay: V4L2 M2M hardware codecs not found or not accessible, using pure-Rust software pipeline"
+            );
+        }
+        if let Ok(mut lock) = SESSION_V4L2_DEVICES.lock() {
+            *lock = probed;
+        }
+    } else {
+        if let Ok(mut lock) = SESSION_V4L2_DEVICES.lock() {
+            *lock = None;
+        }
+    }
+
     if !enabled {
         set_obd_font_path(Path::new(""));
         set_obd_json_font_path("");
@@ -1062,7 +1206,7 @@ pub fn register_video_channels_from_sdr(
                 pipeline_engaged: true,
             },
         );
-        decoders.insert(ch, ChannelDecoderState::new());
+        decoders.insert(ch, ChannelDecoderState::new(ch));
         encoders.insert(ch, ChannelEncoderState::new(display_type));
     }
 }
@@ -1143,15 +1287,22 @@ pub fn is_active_for_packet(
 fn observe_codec_config_decoder_only(channel: u8, annex_b: &[u8]) {
     if let Ok(mut map) = VIDEO_DECODERS.lock() {
         if let Some(state) = map.get_mut(&channel) {
-            state.reset_decoder();
+            state.reset_decoder(channel);
             state.phone_codec_config = Some(annex_b.to_vec());
-            if let Err(e) = state.decoder.decode(annex_b) {
-                warn!(
-                    "obd_overlay: ch {:#04x} failed to decode CODEC_CONFIG ({} bytes): {:?}",
-                    channel,
-                    annex_b.len(),
-                    e
-                );
+            match &mut state.backend {
+                DecoderBackend::V4l2(v4l2_dec) => {
+                    let _ = v4l2_dec.decode(annex_b);
+                }
+                DecoderBackend::Software(sw_dec) => {
+                    if let Err(e) = sw_dec.decode(annex_b) {
+                        warn!(
+                            "obd_overlay: ch {:#04x} failed to decode CODEC_CONFIG ({} bytes): {:?}",
+                            channel,
+                            annex_b.len(),
+                            e
+                        );
+                    }
+                }
             }
         }
     }
@@ -1476,8 +1627,7 @@ pub fn process_video_codec_config_in_place(
     let (cfg, _) = get_cached_obd_config_and_lines();
     if let Ok(mut map) = VIDEO_ENCODERS.lock() {
         if let Some(state) = map.get_mut(&channel) {
-            if let Some((w, h)) = state.encoder_dims {
-                let sps_pps = build_car_hu_sps_pps_annex_b(w, h, cfg.h264_encoder_qp.clamp(0, 51));
+            if let Some(sps_pps) = state.get_sps_pps(cfg.h264_encoder_qp) {
                 let codec_cfg_id =
                     (MediaMessageId::MEDIA_MESSAGE_CODEC_CONFIG as u16).to_be_bytes();
                 let mut codec_msg = Vec::with_capacity(2 + sps_pps.len());
@@ -1500,14 +1650,44 @@ fn decode_video_access_unit(channel: u8, h264_au: &[u8]) -> Option<(YuvFrame, Du
     let state = map.get_mut(&channel)?;
 
     let t_start = Instant::now();
-    let decoded = match state.decoder.decode(h264_au) {
-        Ok(Some(yuv)) => yuv,
-        Ok(None) => return None,
-        Err(e) => {
-            if let Some(cfg_bytes) = state.phone_codec_config.clone() {
-                let _ = state.decoder.decode(&cfg_bytes);
-                if let Ok(Some(yuv)) = state.decoder.decode(h264_au) {
-                    yuv
+    let decoded = match &mut state.backend {
+        DecoderBackend::V4l2(v4l2_dec) => match v4l2_dec.decode(h264_au) {
+            Ok(Some(yuv)) => yuv,
+            Ok(None) => return None,
+            Err(e) => {
+                warn!(
+                    "obd_overlay: ch {:#04x} V4L2 decode error: {:?}, falling back to pure-Rust software decoder",
+                    channel, e
+                );
+                let mut sw_dec = Decoder::new();
+                if let Some(cfg_bytes) = state.phone_codec_config.clone() {
+                    let _ = sw_dec.decode(&cfg_bytes);
+                }
+                let fallback_res = match sw_dec.decode(h264_au) {
+                    Ok(Some(yuv)) => Some(yuv),
+                    _ => None,
+                };
+                state.backend = DecoderBackend::Software(sw_dec);
+                fallback_res?
+            }
+        },
+        DecoderBackend::Software(sw_dec) => match sw_dec.decode(h264_au) {
+            Ok(Some(yuv)) => yuv,
+            Ok(None) => return None,
+            Err(e) => {
+                if let Some(cfg_bytes) = state.phone_codec_config.clone() {
+                    let _ = sw_dec.decode(&cfg_bytes);
+                    if let Ok(Some(yuv)) = sw_dec.decode(h264_au) {
+                        yuv
+                    } else {
+                        debug!(
+                            "obd_overlay: ch {:#04x} H.264 decode error ({} bytes): {:?}",
+                            channel,
+                            h264_au.len(),
+                            e
+                        );
+                        return None;
+                    }
                 } else {
                     debug!(
                         "obd_overlay: ch {:#04x} H.264 decode error ({} bytes): {:?}",
@@ -1517,16 +1697,8 @@ fn decode_video_access_unit(channel: u8, h264_au: &[u8]) -> Option<(YuvFrame, Du
                     );
                     return None;
                 }
-            } else {
-                debug!(
-                    "obd_overlay: ch {:#04x} H.264 decode error ({} bytes): {:?}",
-                    channel,
-                    h264_au.len(),
-                    e
-                );
-                return None;
             }
-        }
+        },
     };
     let dec_dur = t_start.elapsed();
     let incoming_has_idr = annex_b_contains_idr(h264_au);
@@ -1576,12 +1748,16 @@ fn encode_decoded_video_frame(
     let overlay_changed = state.last_encoded_lines.as_slice() != lines
         || state.last_encoded_cfg.as_ref() != Some(cfg);
 
+    let is_v4l2 = matches!(state.encoder, Some(EncoderBackend::V4l2(_)));
+
     let t_draw_start = Instant::now();
-    // If another decoded frame for this channel is already waiting behind us in Stage 2
-    // (e.g. right after a heavy scene-change frame) and neither a keyframe nor an OBD text/config
-    // update is pending, emit an 11-byte all-skip P-slice in 0.01ms so the encoder immediately
-    // catches up and encodes the newest waiting frame in full!
-    let (draw_dur, fast_skip) = if !need_keyframe && !overlay_changed && has_newer_frame_in_queue {
+    // For V4L2 hardware encoder, NEVER use fast_skip!
+    // The hardware encoder encodes in ~2ms on the VPU and MUST receive every frame
+    // so its internal reference picture stays 100% in sync with the car Head Unit.
+    let (draw_dur, fast_skip) = if is_v4l2 {
+        draw_obd_box_yuv420_with_config(&mut yuv, lines, cfg);
+        (t_draw_start.elapsed(), false)
+    } else if !need_keyframe && !overlay_changed && has_newer_frame_in_queue {
         (Duration::ZERO, true)
     } else {
         draw_obd_box_yuv420_with_config(&mut yuv, lines, cfg);
@@ -1606,25 +1782,92 @@ fn encode_decoded_video_frame(
         state.fast_skipped_in_window = state.fast_skipped_in_window.saturating_add(1);
         skip_au
     } else {
-        let enc = state.encoder.as_mut().expect("encoder initialized above");
-        if need_keyframe {
-            enc.request_keyframe();
-            state.force_next_keyframe = false;
-        }
+        let mut fell_back_to_sw = None;
+        let (raw_encoded_au, emitted_by_v4l2) = match state
+            .encoder
+            .as_mut()
+            .expect("encoder initialized above")
+        {
+            EncoderBackend::V4l2(v4l2_enc) => {
+                if need_keyframe {
+                    v4l2_enc.request_keyframe();
+                    state.force_next_keyframe = false;
+                }
+                match v4l2_enc.encode(&yuv) {
+                    Ok(bytes) if !bytes.is_empty() => {
+                        state.hw_enc_timeouts = 0;
+                        (bytes, true)
+                    }
+                    Ok(_) => return (Vec::new(), false),
+                    Err(e)
+                        if e.kind() == std::io::ErrorKind::TimedOut
+                            && state.hw_enc_timeouts + 1 < V4L2_ENC_MAX_CONSECUTIVE_TIMEOUTS =>
+                    {
+                        // A single slow hardware frame is not a reason to give up on the
+                        // hardware encoder: drop this frame and keep going.
+                        state.hw_enc_timeouts += 1;
+                        debug!(
+                            "obd_overlay: ch {:#04x} V4L2 encode timeout ({}/{})",
+                            channel, state.hw_enc_timeouts, V4L2_ENC_MAX_CONSECUTIVE_TIMEOUTS
+                        );
+                        return (Vec::new(), false);
+                    }
+                    Err(e) => {
+                        warn!(
+                            "obd_overlay: ch {:#04x} V4L2 encode error: {:?}, falling back to pure-Rust software encoder",
+                            channel, e
+                        );
+                        let mut sw_enc = match create_baseline_encoder(
+                            frame_w,
+                            frame_h,
+                            cfg.h264_encoder_qp,
+                            cfg.h264_encoder_gop,
+                        ) {
+                            Ok(sw) => sw,
+                            Err(_) => return (Vec::new(), false),
+                        };
+                        // The car HU has so far seen the hardware stream: start the software
+                        // stream with an IDR and re-send SPS/PPS.
+                        sw_enc.request_keyframe();
+                        let res = match sw_enc.try_encode(&yuv) {
+                            Ok(b) => b,
+                            Err(_) => return (Vec::new(), false),
+                        };
+                        fell_back_to_sw = Some(sw_enc);
+                        (res, false)
+                    }
+                }
+            }
+            EncoderBackend::Software(sw_enc) => {
+                if need_keyframe {
+                    sw_enc.request_keyframe();
+                    state.force_next_keyframe = false;
+                }
 
-        let raw_encoded_au = match enc.try_encode(&yuv) {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                warn!(
-                    "obd_overlay: ch {:#04x} H.264 encode error: {:?}",
-                    channel, e
-                );
-                return (vec![fallback_frame_data], false);
+                match sw_enc.try_encode(&yuv) {
+                    Ok(bytes) => (bytes, false),
+                    Err(e) => {
+                        warn!(
+                            "obd_overlay: ch {:#04x} H.264 encode error: {:?}",
+                            channel, e
+                        );
+                        return (vec![fallback_frame_data], false);
+                    }
+                }
             }
         };
 
+        if let Some(sw_enc) = fell_back_to_sw {
+            state.encoder = Some(EncoderBackend::Software(sw_enc));
+            state.hw_enc_timeouts = 0;
+            state.force_next_keyframe = false;
+            state.emitted_encoder_codec_config = false;
+        }
+
         let emitted_idr = annex_b_contains_idr(&raw_encoded_au);
-        let patched_au = if emitted_idr {
+        let patched_au = if emitted_by_v4l2 {
+            raw_encoded_au
+        } else if emitted_idr {
             state.out_frame_num = 1;
             state.out_poc_lsb = 2;
             patch_annex_b_for_car_hu(raw_encoded_au)
@@ -1678,7 +1921,12 @@ fn encode_decoded_video_frame(
     // `/dev/shm/obd_overlay.json` was created mid-session after initial connection), emit a synthetic
     // `MEDIA_MESSAGE_CODEC_CONFIG` once before the first re-encoded IDR frame.
     if !state.emitted_encoder_codec_config {
-        let sps_pps = extract_sps_pps_annex_b(&encoded_au);
+        let sps_pps = match &state.encoder {
+            Some(EncoderBackend::V4l2(v4l2_enc)) if !v4l2_enc.header_bytes().is_empty() => {
+                v4l2_enc.header_bytes().to_vec()
+            }
+            _ => extract_sps_pps_annex_b(&encoded_au),
+        };
         if !sps_pps.is_empty() {
             let codec_cfg_id = (MediaMessageId::MEDIA_MESSAGE_CODEC_CONFIG as u16).to_be_bytes();
             let mut codec_msg = Vec::with_capacity(2 + sps_pps.len());
@@ -3541,7 +3789,7 @@ mod tests {
         VIDEO_DECODERS
             .lock()
             .unwrap()
-            .insert(ch, ChannelDecoderState::new());
+            .insert(ch, ChannelDecoderState::new(ch));
         VIDEO_ENCODERS
             .lock()
             .unwrap()
@@ -3835,7 +4083,15 @@ mod tests {
         svc.media_sink_service = protobuf::MessageField::some(sink);
         sdr.services.push(svc);
 
-        register_video_channels_from_sdr(&mut sdr, true, &tmp_json, Path::new(""));
+        register_video_channels_from_sdr(
+            &mut sdr,
+            true,
+            &tmp_json,
+            Path::new(""),
+            crate::config::ObdHwAccel::None,
+            "",
+            "",
+        );
         assert!(obd_overlay_enabled());
         assert_eq!(
             sdr.services[0]
@@ -4304,5 +4560,63 @@ mod tests {
         assert_eq!(styled.spans[0].fg_color, (0, 255, 0));
         assert_eq!(styled.spans[1].fg_color, (255, 0, 0));
         assert_eq!(styled.spans[1].bg_color, Some((0, 0, 51)));
+    }
+
+    #[test]
+    fn test_obd_hw_accel_auto_fallback_to_software() {
+        let _guard = lock_test_state();
+        let mut sdr = ServiceDiscoveryResponse::new();
+        let mut svc = crate::mitm::protos::Service::new();
+        svc.set_id(0x03);
+        let mut sink = crate::mitm::protos::MediaSinkService::new();
+        sink.set_available_type(MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP);
+        sink.set_display_type(DisplayType::DISPLAY_TYPE_MAIN);
+        svc.media_sink_service = protobuf::MessageField::some(sink);
+        sdr.services.push(svc);
+
+        register_video_channels_from_sdr(
+            &mut sdr,
+            true,
+            Path::new("/dev/shm/obd_test.json"),
+            Path::new(""),
+            crate::config::ObdHwAccel::Auto,
+            "",
+            "",
+        );
+        assert!(obd_overlay_enabled());
+        assert!(is_registered_video_channel(0x03));
+
+        // Decoder and encoder states must be created and ready
+        assert!(VIDEO_DECODERS.lock().unwrap().contains_key(&0x03));
+        assert!(VIDEO_ENCODERS.lock().unwrap().contains_key(&0x03));
+    }
+
+    #[test]
+    fn test_obd_hw_accel_v4l2_explicit_invalid_device_fallback() {
+        let _guard = lock_test_state();
+        let mut sdr = ServiceDiscoveryResponse::new();
+        let mut svc = crate::mitm::protos::Service::new();
+        svc.set_id(0x05);
+        let mut sink = crate::mitm::protos::MediaSinkService::new();
+        sink.set_available_type(MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP);
+        sink.set_display_type(DisplayType::DISPLAY_TYPE_MAIN);
+        svc.media_sink_service = protobuf::MessageField::some(sink);
+        sdr.services.push(svc);
+
+        register_video_channels_from_sdr(
+            &mut sdr,
+            true,
+            Path::new("/dev/shm/obd_test.json"),
+            Path::new(""),
+            crate::config::ObdHwAccel::V4l2,
+            "/dev/nonexistent_v4l2_dec",
+            "/dev/nonexistent_v4l2_enc",
+        );
+        assert!(obd_overlay_enabled());
+        assert!(is_registered_video_channel(0x05));
+
+        // When invalid paths are passed, fallback to software ensures states exist and run
+        assert!(VIDEO_DECODERS.lock().unwrap().contains_key(&0x05));
+        assert!(VIDEO_ENCODERS.lock().unwrap().contains_key(&0x05));
     }
 }

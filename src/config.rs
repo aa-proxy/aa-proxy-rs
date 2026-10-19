@@ -245,6 +245,47 @@ impl Display for VideoInMotionLevel {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ObdHwAccel {
+    None,
+    Auto,
+    V4l2,
+}
+
+impl Default for ObdHwAccel {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+impl Display for ObdHwAccel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::None => "none",
+            Self::Auto => "auto",
+            Self::V4l2 => "v4l2",
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for ObdHwAccel {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "v4l2" | "hardware" | "hw" => Ok(Self::V4l2),
+            "none" | "software" | "sw" | "" => Ok(Self::None),
+            other => Err(serde::de::Error::custom(format!(
+                "invalid obd_hw_accel: '{other}', expected 'none', 'auto', or 'v4l2'"
+            ))),
+        }
+    }
+}
+
 fn webserver_default_bind() -> Option<String> {
     Some("0.0.0.0:80".into())
 }
@@ -604,6 +645,19 @@ pub struct AppConfig {
         deserialize_with = "empty_string_as_default_obd_font_path"
     )]
     pub obd_font_path: PathBuf,
+    /// Hardware acceleration backend for the OBD video overlay:
+    /// `none` (default, pure-Rust software), `auto` (auto-detect V4L2 M2M hardware codecs),
+    /// or `v4l2` (force V4L2 M2M hardware codecs with software fallback).
+    #[serde(default)]
+    pub obd_hw_accel: ObdHwAccel,
+    /// Explicit V4L2 M2M decoder device path (e.g. `/dev/video10`).
+    /// If empty, auto-detected when `obd_hw_accel` is `auto` or `v4l2`.
+    #[serde(default)]
+    pub obd_v4l2_decoder: String,
+    /// Explicit V4L2 M2M encoder device path (e.g. `/dev/video11`).
+    /// If empty, auto-detected when `obd_hw_accel` is `auto` or `v4l2`.
+    #[serde(default)]
+    pub obd_v4l2_encoder: String,
     pub stats_interval: u16,
     #[serde(default, deserialize_with = "empty_string_as_none")]
     pub udc: Option<String>,
@@ -1072,6 +1126,9 @@ impl Default for AppConfig {
             obd_overlay_enabled: false,
             obd_text_path: DEFAULT_OBD_TEXT_PATH.into(),
             obd_font_path: default_obd_font_path(),
+            obd_hw_accel: ObdHwAccel::None,
+            obd_v4l2_decoder: String::new(),
+            obd_v4l2_encoder: String::new(),
             stats_interval: 0,
             udc: None,
             usb_stick: None,
@@ -1427,6 +1484,9 @@ impl AppConfig {
         });
         let obd_font_path_str = self.obd_font_path.display().to_string();
         doc["obd_font_path"] = value(obd_font_path_str.trim().to_string());
+        doc["obd_hw_accel"] = value(self.obd_hw_accel.to_string());
+        doc["obd_v4l2_decoder"] = value(self.obd_v4l2_decoder.trim().to_string());
+        doc["obd_v4l2_encoder"] = value(self.obd_v4l2_encoder.trim().to_string());
         doc["stats_interval"] = value(self.stats_interval as i64);
         if let Some(udc) = &self.udc {
             doc["udc"] = value(udc);

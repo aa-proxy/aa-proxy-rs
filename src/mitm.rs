@@ -3600,6 +3600,9 @@ pub async fn pkt_modify_hook(
                 cfg.obd_overlay_enabled,
                 &cfg.obd_text_path,
                 &cfg.obd_font_path,
+                cfg.obd_hw_accel,
+                &cfg.obd_v4l2_decoder,
+                &cfg.obd_v4l2_encoder,
             );
 
             // Populate media tap channels from the final rewritten SDR. Ports are opened

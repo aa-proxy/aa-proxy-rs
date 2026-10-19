@@ -44,6 +44,7 @@ pub mod ssl_openssl;
 pub mod ssl_rustls;
 pub mod usb_functionfs;
 pub mod usb_stream;
+pub mod v4l2_m2m;
 pub mod vendor_ext;
 #[cfg(feature = "wasm-scripting")]
 pub mod wasm_config;

@@ -651,6 +651,22 @@
               "typ": "string",
               "description": "Optional path to a TTF font file for rendering the OBD overlay text (anti-aliased, national characters, HTML styling such as <b>, <i>, <u>, <font color>). If empty, missing or not a valid font, the built-in bitmap font is used. With a TTF font \"text_scale\" in the overlay JSON is the font size (1-4 = 12/24/36/48 px, larger = pixels). A font with many glyphs can use tens of MB of RAM. A non-empty \"font_path\" in the overlay JSON takes precedence. Default: empty.",
               "requires": "obd_overlay_enabled"
+            },
+            "obd_hw_accel": {
+              "typ": "string",
+              "description": "Hardware acceleration backend for OBD video overlay: `none` (pure-Rust software with rusty_h264, default), `auto` (auto-detect V4L2 M2M H.264 decoder and encoder on /dev/video*, with automatic software fallback), or `v4l2` (force V4L2 M2M hardware codec with software fallback).",
+              "values": ["none", "auto", "v4l2"],
+              "requires": "obd_overlay_enabled"
+            },
+            "obd_v4l2_decoder": {
+              "typ": "string",
+              "description": "Optional explicit device path for V4L2 M2M H.264 hardware decoder (e.g. `/dev/video10` on Raspberry Pi with h264 hw acceleration). If empty, auto-detected when `obd_hw_accel` is `auto` or `v4l2`. Default: empty.",
+              "requires": "obd_overlay_enabled"
+            },
+            "obd_v4l2_encoder": {
+              "typ": "string",
+              "description": "Optional explicit device path for V4L2 M2M H.264 hardware encoder (e.g. `/dev/video11` on Raspberry Pi with h264 hw acceleration). If empty, auto-detected when `obd_hw_accel` is `auto` or `v4l2`. Default: empty.",
+              "requires": "obd_overlay_enabled"
             }
           }
         },
