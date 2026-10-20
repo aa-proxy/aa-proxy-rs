@@ -654,7 +654,7 @@
             },
             "overlay_hw_accel": {
               "typ": "string",
-              "description": "Hardware acceleration backend for the video overlay: `none` (pure-Rust software with rusty_h264, default), `auto` (auto-detect V4L2 M2M H.264 decoder and encoder on /dev/video*, with automatic software fallback), or `v4l2` (force V4L2 M2M hardware codec with software fallback).",
+              "description": "Hardware acceleration backend for the video overlay: `none` (pure-Rust software with rusty_h264, default), `auto` (auto-detect V4L2 M2M H.264 decoder and encoder on /dev/video*, with automatic software fallback), or `v4l2` (force V4L2 M2M hardware codec with software fallback). The official image does not include the V4L2 codec drivers: a custom Buildroot image is needed on Raspberry Pi, see https://aa-proxy.github.io/docs/config-options#video-overlay-hardware-acceleration . Default: none.",
               "values": ["none", "auto", "v4l2"],
               "requires": "overlay_enabled"
             },
