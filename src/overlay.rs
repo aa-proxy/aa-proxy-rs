@@ -1356,7 +1356,13 @@ pub fn get_cached_overlay_config_and_lines() -> (OverlayConfig, Vec<String>) {
         cache.last_check = Some(now);
         match fs::read_to_string(&cache.path) {
             Ok(raw) => {
-                let (cfg, lines) = parse_overlay_payload(&raw);
+                // Templates (`{{name}}`) are expanded on every poll, also when the file itself did
+                // not change, because the live data behind them does.
+                let (cfg, lines) = if raw.contains("{{") {
+                    parse_overlay_payload_with(&raw, Some(&crate::overlay_vars::expand_current))
+                } else {
+                    parse_overlay_payload(&raw)
+                };
                 cache.config = cfg;
                 cache.lines = lines;
             }
@@ -1380,6 +1386,21 @@ pub fn get_cached_overlay_lines() -> Vec<String> {
 /// ([`OverlayConfig`], with fallback to plain text if not JSON) and splits the `"text"`
 /// field on `\r\n`, `\n`, or `\r` into display lines.
 pub fn parse_overlay_payload(raw: &str) -> (OverlayConfig, Vec<String>) {
+    parse_overlay_payload_with(raw, None)
+}
+
+/// Same as [`parse_overlay_payload`], with an optional template expander applied to the text
+/// before it is split into lines (see `overlay_vars`).
+pub fn parse_overlay_payload_with(
+    raw: &str,
+    expand: Option<&dyn Fn(&str) -> String>,
+) -> (OverlayConfig, Vec<String>) {
+    let expand_text = |t: &str| -> String {
+        match expand {
+            Some(f) => f(t),
+            None => t.to_string(),
+        }
+    };
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return (OverlayConfig::default(), Vec::new());
@@ -1393,7 +1414,7 @@ pub fn parse_overlay_payload(raw: &str) -> (OverlayConfig, Vec<String>) {
         match parsed_json {
             Ok(cfg) => {
                 let lines = parse_overlay_text_lines_with_limits(
-                    &cfg.text,
+                    &expand_text(&cfg.text),
                     cfg.max_display_lines,
                     cfg.max_line_chars,
                 );
@@ -1407,8 +1428,11 @@ pub fn parse_overlay_payload(raw: &str) -> (OverlayConfig, Vec<String>) {
     }
 
     let cfg = OverlayConfig::default();
-    let lines =
-        parse_overlay_text_lines_with_limits(raw, cfg.max_display_lines, cfg.max_line_chars);
+    let lines = parse_overlay_text_lines_with_limits(
+        &expand_text(raw),
+        cfg.max_display_lines,
+        cfg.max_line_chars,
+    );
     (cfg, lines)
 }
 

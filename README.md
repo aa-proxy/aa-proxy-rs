@@ -257,6 +257,25 @@ Note: an incomplete or invalid JSON is not an error, but the overlay then falls 
 | `only_main_display` | `true` | Apply only to the main display, not to cluster/auxiliary ones |
 | `cap_video_fps_to_30` | `true` | Cap `VIDEO_FPS_60` to 30 in the `ServiceDiscoveryResponse` while the overlay is enabled |
 
+#### Live data templates
+`"text"` may contain `{{name}}` placeholders that `aa-proxy-rs` replaces with live data on every poll, e.g.
+`{"text": "SoC: {{battery_level_percentage:0}}%\r\n{{speed_kmh:0}} km/h"}`.
+
+Syntax: `{{name}}`, `{{name:N}}` (N = 0-6 decimals) and `{{name | fallback}}` (shown when the value is not available; without it an empty string is used). A malformed placeholder is left as is.
+Data is collected only while the overlay is enabled, and a file without `{{` is not processed at all.
+
+| Name | Source | Unit |
+|---|---|---|
+| `battery_level_percentage` (derived from Wh values if not sent), `battery_level_wh`, `battery_capacity_wh`, `reference_air_density`, `external_temp_celsius` | `POST /battery` and head unit fuel data | %, Wh, Wh, kg/m³, °C |
+| `speed_kmh`, `speed_mph`, `speed_ms` | vehicle speed (unavailable if older than 5 s) | |
+| `odometer_km`, `trip_km` | odometer | km |
+| `tire_pressure_{fl,fr,rl,rr}_{kpa,bar,psi}` | TPMS | |
+| `range_km` | EV range estimate (`vehicle_energy_forecast`) | km |
+| `time`, `time_sec`, `date` | device local time | `HH:MM`, `HH:MM:SS`, `YYYY-MM-DD` |
+| `ws.<topic>` or `ws.<topic>.<json.path>` | latest payload of **any** websocket topic (companion app, scripts, `POST /raw-topic-data`); JSON objects/arrays are addressed by key/index, e.g. `{{ws.engine.coolant.0}}` | as sent |
+
+Text values from `ws.*` are HTML-escaped, so external data cannot inject styling. At most 64 distinct topics are remembered, payloads over 4 KiB are ignored and the expanded text is capped at 8 KiB.
+
 #### TTF fonts and HTML styling
 By default the text is drawn with the built-in 8x8 bitmap font (ASCII only). Set `overlay_font_path` in `config.toml` (or `"font_path"` in the JSON file,
 which takes precedence) to a TrueType (`.ttf`) file to get anti-aliased, proportional text with every character the font contains (e.g. Polish letters).

@@ -1628,6 +1628,12 @@ fn main() -> Result<()> {
         .build()
         .unwrap();
 
+    // feeds the live data used by overlay text templates ({{name}})
+    {
+        let _guard = runtime.enter();
+        aa_proxy_rs::overlay_vars::spawn_ws_collector(ws_event_tx.subscribe());
+    }
+
     // heartbeat updated by scheduler_probe[0], watched by a plain OS thread
     let heartbeat = Arc::new(AtomicU64::new(0));
     spawn_stall_watchdog(heartbeat.clone());

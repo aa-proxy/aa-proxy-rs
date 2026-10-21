@@ -124,6 +124,9 @@ pub async fn send_ev_data(
     tx.send(pkt).await?;
     info!("{} injecting ENERGY_MODEL_DATA packet...", NAME);
 
+    // let the overlay templates use the battery values
+    crate::overlay_vars::update_battery(&batt);
+
     // save last battery state
     *last_battery.write().await = Some(batt);
 
