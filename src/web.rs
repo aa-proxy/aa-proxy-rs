@@ -2367,6 +2367,15 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     loop {
         tokio::select! {
             incoming = receiver.next() => {
+                // some clients (e.g. curl) send their messages as binary frames:
+                // handle valid UTF-8 ones like text, ignore the rest
+                let incoming = match incoming {
+                    Some(Ok(Message::Binary(bin))) => match String::from_utf8(bin) {
+                        Ok(text) => Some(Ok(Message::Text(text))),
+                        Err(_) => continue,
+                    },
+                    other => other,
+                };
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
                         info!("[ws] incoming ws message {}", &text);
@@ -2424,7 +2433,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                             }
                         }
                     }
-                    Some(Ok(Message::Binary(_))) => {}
+                    Some(Ok(Message::Binary(_))) => {} // already handled above
                     Some(Ok(Message::Ping(payload))) => {
                         if sender.send(Message::Pong(payload)).await.is_err() {
                             break;
