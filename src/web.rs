@@ -121,9 +121,17 @@ pub struct ServerEvent {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClientWsMessage {
-    Subscribe { topic: String },
-    Unsubscribe { topic: String },
-    ScriptEvent { topic: String, payload: String },
+    Subscribe {
+        topic: String,
+    },
+    Unsubscribe {
+        topic: String,
+    },
+    #[serde(alias = "script-event")]
+    ScriptEvent {
+        topic: String,
+        payload: String,
+    },
 }
 
 #[derive(Debug, Serialize)]
