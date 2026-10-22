@@ -2304,7 +2304,7 @@ async fn run_wasm_ws_hooks(
     _topic: String,
     _payload: String,
     _state: Arc<AppState>,
-) -> Result<Option<bool>> {
+) -> Result<Option<String>> {
     Ok(None)
 }
 
@@ -2313,7 +2313,7 @@ async fn run_wasm_ws_hooks(
     topic: String,
     payload: String,
     state: Arc<AppState>,
-) -> Result<Option<bool>> {
+) -> Result<Option<String>> {
     let Some(registry) = state.script_registry.clone() else {
         return Ok(None);
     };
@@ -2331,12 +2331,7 @@ async fn run_wasm_ws_hooks(
         {
             Ok((result_payload, _effects)) => {
                 if !result_payload.is_empty() {
-                    let _ = state.ws_event_tx.send(ServerEvent {
-                        topic: topic.clone(),
-                        payload: result_payload,
-                    });
-
-                    return Ok(Some(true));
+                    return Ok(Some(result_payload));
                 }
             }
             Err(err) => {
@@ -2348,7 +2343,7 @@ async fn run_wasm_ws_hooks(
         }
     }
 
-    Ok(Some(false))
+    Ok(None)
 }
 
 async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
@@ -2392,10 +2387,17 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                             }
                             Ok(ClientWsMessage::ScriptEvent { topic, payload }) => {
                                 match run_wasm_ws_hooks(topic.clone(), payload.clone(), state.clone()).await {
-                                    Ok(Some(true)) => {
-                                        // wasm handled it and already emitted replacement event
+                                    Ok(Some(response_payload)) => {
+                                        // wasm handled it: answer directly to the requesting client
+                                        let msg = ServerWsMessage::Event {
+                                            topic,
+                                            payload: response_payload,
+                                        };
+                                        if sender.send(Message::Text(serde_json::to_string(&msg).unwrap())).await.is_err() {
+                                            break;
+                                        }
                                     }
-                                    Ok(Some(false)) | Ok(None) => {
+                                    Ok(None) => {
                                         // wasm did not handle it, forward original event
                                         let _ = state.ws_event_tx.send(ServerEvent {
                                             topic,
@@ -2441,10 +2443,14 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                         info!("Received event {}, payload {}", &ev.topic, &ev.payload);
                         if subscriptions.contains(&ev.topic) {
                             match run_wasm_ws_hooks(ev.topic.clone(), ev.payload.clone(), state.clone()).await {
-                                Ok(Some(true)) => {
-                                    // wasm handled it and already emitted replacement event
+                                Ok(Some(replacement)) => {
+                                    // wasm handled it: emit the replacement event
+                                    let _ = state.ws_event_tx.send(ServerEvent {
+                                        topic: ev.topic,
+                                        payload: replacement,
+                                    });
                                 }
-                                Ok(Some(false)) | Ok(None) => {
+                                Ok(None) => {
                                     // wasm did not handle it, forward original event
                                     let msg = ServerWsMessage::Event {
                                         topic: ev.topic,
