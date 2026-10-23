@@ -209,9 +209,7 @@ aa-proxy-rs can draw a small text box with any text you provide directly on the 
 The phone video is decoded, the text is rendered and the stream is re-encoded to H.264 Constrained Baseline, using either a pure-Rust software codec
 (no external programs, system libraries or kernel configuration needed) or hardware acceleration via Linux V4L2 M2M on supported boards (e.g. Raspberry Pi 3/4/Zero 2 W with `bcm2835-codec`; the Raspberry Pi 5 is **not** supported, it has no hardware H.264 encoder).
 
-![](images/overlay1.png)
-![](images/overlay2.png)
-![](images/overlay3.png)
+<img src="images/overlay1.png" width="33%"> <img src="images/overlay2.png" width="33%"> <img src="images/overlay3.png" width="33%">
 
 **It is disabled by default** and does not touch the video path unless you enable it in `config.toml` (it requires `mitm = true`):
 ```toml
