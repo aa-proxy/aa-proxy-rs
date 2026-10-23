@@ -830,6 +830,9 @@ pub struct AppConfig {
     #[serde(default = "default_true")]
     pub vehicle_energy_forecast_keep_last_on_null: bool,
     pub collect_speed: bool,
+    /// Publish GPS location reported by the head unit (SensorBatch.location_data)
+    /// to the websocket: topic `location` and the dedicated `/ws/location` endpoint.
+    pub collect_location: bool,
     pub disable_driving_status: bool,
     /// Optional shell command invoked on HU media-key long press.
     ///
@@ -1228,6 +1231,7 @@ impl Default for AppConfig {
             map_album_art_ev_prefix_max_age_ms: 0,
             vehicle_energy_forecast_keep_last_on_null: true,
             collect_speed: false,
+            collect_location: false,
             disable_driving_status: false,
             hu_button_handler: None,
             bt_sco: false,
@@ -1592,6 +1596,7 @@ impl AppConfig {
         doc["vehicle_energy_forecast_keep_last_on_null"] =
             value(self.vehicle_energy_forecast_keep_last_on_null);
         doc["collect_speed"] = value(self.collect_speed);
+        doc["collect_location"] = value(self.collect_location);
         doc["disable_driving_status"] = value(self.disable_driving_status);
         if let Some(cmd) = &self.hu_button_handler {
             doc["hu_button_handler"] = value(cmd);

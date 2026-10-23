@@ -458,6 +458,10 @@
             "tire_pressure": {
               "typ": "boolean",
               "description": "Enable tire pressure sensor reporting (for head units that don't provide this data). When active, readings for up to 4 tires can be pushed via POST /tire-pressure (kPa, order: FL, FR, RL, RR)."
+            },
+            "collect_location": {
+              "typ": "boolean",
+              "description": "Publish the GPS location reported by the head unit to the websocket. Clients can connect to the dedicated `/ws/location` endpoint (live JSON stream) or subscribe to the `location` topic on `/ws`. Requires the head unit to provide a location sensor."
             }
           }
         },

@@ -241,6 +241,7 @@ pub fn app(state: Arc<AppState>) -> Router {
         )
         .route("/version", get(version_handler))
         .route("/ws", get(ws_handler))
+        .route("/ws/location", get(ws_location_handler))
         .route("/raw-topic-data", post(raw_topic_data_handler))
         .route("/bt/devices", get(bt_helper::bt_devices_handler))
         .route(
@@ -2297,6 +2298,52 @@ pub async fn raw_topic_data_handler(
 async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> impl IntoResponse {
     debug!("WS Handler called");
     ws.on_upgrade(move |socket| handle_socket(socket, state))
+}
+
+/// Dedicated live GPS stream: no subscribe handshake needed, every text frame is one
+/// location JSON object (see `location_to_json` in mitm.rs). Requires `collect_location`.
+async fn ws_location_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    debug!("WS location handler called");
+    ws.on_upgrade(move |socket| handle_location_socket(socket, state))
+}
+
+async fn handle_location_socket(socket: WebSocket, state: Arc<AppState>) {
+    let (mut sender, mut receiver) = socket.split();
+    let mut ws_event_rx = state.ws_event_tx.subscribe();
+
+    loop {
+        tokio::select! {
+            incoming = receiver.next() => {
+                match incoming {
+                    Some(Ok(Message::Ping(payload))) => {
+                        if sender.send(Message::Pong(payload)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                    // clients have nothing to tell us on this endpoint
+                    Some(Ok(_)) => {}
+                }
+            }
+
+            event = ws_event_rx.recv() => {
+                match event {
+                    Ok(ev) if ev.topic == "location" => {
+                        if sender.send(Message::Text(ev.payload)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(_) => {}
+                    // shared bus: some events were skipped, just keep streaming
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }
+    }
 }
 
 #[cfg(not(feature = "wasm-scripting"))]

@@ -2115,6 +2115,25 @@ async fn maybe_update_album_art_ev_prefix_from_nav(
     }
 }
 
+/// Converts a `LocationData` sensor sample to the JSON published on the `location` topic.
+/// Units: degrees, meters, m/s, degrees (bearing); missing optional fields are `null`.
+/// `ts_ms` is the proxy wall-clock time (the protocol timestamp is deprecated).
+fn location_to_json(loc: &protos::LocationData) -> serde_json::Value {
+    let ts_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    serde_json::json!({
+        "lat": loc.latitude_e7() as f64 / 1e7,
+        "lon": loc.longitude_e7() as f64 / 1e7,
+        "accuracy_m": loc.accuracy_e3.map(|v| v as f64 / 1e3),
+        "altitude_m": loc.altitude_e2.map(|v| v as f64 / 1e2),
+        "speed_mps": loc.speed_e3.map(|v| v as f64 / 1e3),
+        "bearing_deg": loc.bearing_e6.map(|v| v as f64 / 1e6),
+        "ts_ms": ts_ms,
+    })
+}
+
 /// packet modification hook
 pub async fn pkt_modify_hook(
     proxy_type: ProxyType,
@@ -2283,6 +2302,21 @@ pub async fn pkt_modify_hook(
                 }
                 SENSOR_MESSAGE_BATCH => {
                     if let Ok(mut msg) = SensorBatch::parse_from_bytes(data) {
+                        // Publish the real GPS location. This must happen before the
+                        // video_in_motion spoofing below (it zeroes speed/bearing), and only
+                        // on the HU side as the same batch is also seen by the MD proxy.
+                        if cfg.collect_location
+                            && proxy_type == ProxyType::HeadUnit
+                            && flow == PacketFlow::FromEndpoint
+                        {
+                            for loc in msg.location_data.iter() {
+                                let _ = ws_event_tx.send(ServerEvent {
+                                    topic: "location".to_string(),
+                                    payload: location_to_json(loc).to_string(),
+                                });
+                            }
+                        }
+
                         if cfg.video_in_motion || cfg.disable_driving_status {
                             // === DRIVING STATUS: must be UNRESTRICTED (0) ===
                             // This is the primary flag AA checks. Value is a bitmask:
@@ -3259,6 +3293,7 @@ pub async fn pkt_modify_hook(
                 || cfg.video_in_motion
                 || cfg.odometer
                 || cfg.collect_speed
+                || cfg.collect_location
                 || cfg.tire_pressure
             {
                 if let Some(svc) = msg
@@ -3277,6 +3312,25 @@ pub async fn pkt_modify_hook(
                         get_name(proxy_type),
                         svc.id() as u8
                     );
+
+                    if cfg.collect_location && proxy_type == ProxyType::HeadUnit {
+                        let has_location = svc
+                            .sensor_source_service
+                            .sensors
+                            .iter()
+                            .any(|s| s.sensor_type() == SensorType::SENSOR_LOCATION);
+                        if has_location {
+                            info!(
+                                "{} collect_location: HU advertises a LOCATION sensor",
+                                get_name(proxy_type)
+                            );
+                        } else {
+                            warn!(
+                                "{} collect_location is enabled but the HU does not advertise a LOCATION sensor, no location data will be published",
+                                get_name(proxy_type)
+                            );
+                        }
+                    }
                 }
             }
 
