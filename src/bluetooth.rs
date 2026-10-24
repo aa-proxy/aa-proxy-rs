@@ -43,6 +43,9 @@ use WifiInfoResponse::SecurityMode;
 const HEADER_LEN: usize = 4;
 const STAGES: u8 = 5;
 const ATTEMPTS: usize = 3;
+/// Our own limit for Device1.ConnectProfile (a normal page timeout is ~10s;
+/// bluer's built-in D-Bus timeout is 120s).
+const CONNECT_PROFILE_TIMEOUT: Duration = Duration::from_secs(20);
 
 // module name for logging engine
 const NAME: &str = "<i><bright-black> bluetooth: </>";
@@ -6208,16 +6211,63 @@ impl Bluetooth {
                     NAME, addr, dev_name, j, ATTEMPTS
                 );
                 if let Ok(true) = device.is_paired().await {
-                    match device.connect_profile(&HSP_AG_UUID).await {
-                        Ok(_) => {
+                    // bluer's own D-Bus call timeout is 120s, and dropping/timing out the
+                    // call does not cancel the pending connect inside BlueZ. Use our own
+                    // shorter timeout and explicitly Disconnect() to clear the stale
+                    // pending connect (otherwise subsequent calls may return
+                    // InProgress / br-connection-busy forever).
+                    let started = Instant::now();
+                    match timeout(
+                        CONNECT_PROFILE_TIMEOUT,
+                        device.connect_profile(&HSP_AG_UUID),
+                    )
+                    .await
+                    {
+                        Ok(Ok(_)) => {
                             info!(
                                 "{} 🔗 Successfully connected to device: {}{}",
                                 NAME, addr, dev_name
                             );
                             return Ok((*idx + 1) % n);
                         }
-                        Err(e) => {
-                            warn!("{} 🔇 {}{}: Error connecting: {}", NAME, addr, dev_name, e)
+                        Ok(Err(e)) => {
+                            warn!(
+                                "{} 🔇 {}{}: Error connecting: {} (after {:?})",
+                                NAME,
+                                addr,
+                                dev_name,
+                                e,
+                                started.elapsed()
+                            );
+                            if matches!(e.kind, bluer::ErrorKind::InProgress) {
+                                warn!(
+                                    "{} 🔇 {}{}: connect already in progress, sending Disconnect() to clear it",
+                                    NAME, addr, dev_name
+                                );
+                                if let Err(de) = device.disconnect().await {
+                                    warn!(
+                                        "{} 🔇 {}{}: Disconnect() failed: {}",
+                                        NAME, addr, dev_name, de
+                                    );
+                                }
+                                tokio::time::sleep(Duration::from_millis(500)).await;
+                            }
+                        }
+                        Err(_) => {
+                            warn!(
+                                "{} 🔇 {}{}: connect_profile() timed out after {:?}, sending Disconnect()",
+                                NAME,
+                                addr,
+                                dev_name,
+                                started.elapsed()
+                            );
+                            if let Err(de) = device.disconnect().await {
+                                warn!(
+                                    "{} 🔇 {}{}: Disconnect() failed: {}",
+                                    NAME, addr, dev_name, de
+                                );
+                            }
+                            tokio::time::sleep(Duration::from_millis(500)).await;
                         }
                     }
                 } else {
