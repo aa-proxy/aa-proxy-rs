@@ -191,6 +191,8 @@ pub struct ModifyContext {
     pub(crate) injected_service_ids: HashSet<i32>,
     /// Channels corresponding to injected services that must never be forwarded to HU.
     pub(crate) injected_channels: HashSet<u8>,
+    /// Channel of the synthetic navigation_status_service (inject_navigation_status).
+    pub(crate) injected_nav_channel: Option<u8>,
     /// Synthetic Bluetooth passthrough service/channel, if advertised by aa-proxy-rs.
     pub(crate) injected_bluetooth_channel: Option<u8>,
     /// Whether the synthetic real-HU Bluetooth passthrough channel has been
@@ -3376,6 +3378,36 @@ pub async fn pkt_modify_hook(
                 );
             }
 
+            // Synthetic navigation_status_service for HUs that do not advertise one (e.g. the
+            // GAC Aion head unit): without it the phone never sends VehicleEnergyForecast.
+            if cfg.inject_navigation_status
+                && !msg
+                    .services
+                    .iter()
+                    .any(|svc| svc.navigation_status_service.is_some())
+            {
+                let service_id = msg.services.iter().map(|svc| svc.id()).max().unwrap_or(0) + 1;
+                let mut nav = NavigationStatusService::new();
+                nav.set_minimum_interval_ms(500);
+                nav.set_type(navigation_status_service::InstrumentClusterType::ENUM);
+                let mut service = Service::new();
+                service.set_id(service_id);
+                service.navigation_status_service = Some(nav).into();
+                msg.services.push(service);
+
+                ctx.injected_service_ids.insert(service_id);
+                ctx.injected_channels.insert(service_id as u8);
+                ctx.injected_nav_channel = Some(service_id as u8);
+                ctx.nav_channel = Some(service_id as u8);
+
+                info!(
+                    "{} <yellow>{:?}</>: injected <blue>navigation_status_service</> id=<b>{:#04x}</> (HU has none)",
+                    get_name(proxy_type),
+                    control.unwrap(),
+                    service_id as u8
+                );
+            }
+
             // Save navigation channel in context when any feature needs to inspect it.
             // Protocol-version-induced VehicleEnergyForecast dropping is always armed
             // when protocol override is enabled, but it only actually drops if the
@@ -4523,6 +4555,7 @@ pub async fn proxy<D: IoDeviceTrait>(
         hu_service_ids: HashSet::new(),
         injected_service_ids: HashSet::new(),
         injected_channels: HashSet::new(),
+        injected_nav_channel: None,
         injected_bluetooth_channel: None,
         bt_real_hu_passthrough_channel_open: false,
         injected_media_display: HashMap::new(),
@@ -4654,6 +4687,37 @@ pub async fn proxy<D: IoDeviceTrait>(
 
                         continue;
                     }
+                }
+
+                // Synthetic navigation channel: let pkt_modify_hook see whole messages
+                // (VehicleEnergyForecast -> websocket, WASM navigation hooks), then drop.
+                if ctx.injected_nav_channel == Some(pkt.channel) {
+                    if pkt.flags & FRAME_TYPE_MASK == FRAME_TYPE_MASK {
+                        let _ = pkt_modify_hook(
+                            proxy_type,
+                            PacketFlow::ToEndpoint,
+                            &mut pkt,
+                            &mut ctx,
+                            false,
+                            sensor_channel.clone(),
+                            input_channel.clone(),
+                            last_battery.clone(),
+                            last_speed.clone(),
+                            last_service_discovery_response.clone(),
+                            &cfg,
+                            &mut config,
+                            script_registry.clone(),
+                            ws_event_tx.clone()
+                        )
+                        .await?;
+                    } else {
+                        debug!(
+                            "{} injected navigation channel: skipping fragmented frame flags={:#04x}",
+                            get_name(proxy_type),
+                            pkt.flags
+                        );
+                    }
+                    continue;
                 }
 
                 let msg_id = raw_msg_id
@@ -4965,6 +5029,7 @@ mod tests {
             hu_service_ids: HashSet::new(),
             injected_service_ids: HashSet::new(),
             injected_channels: HashSet::new(),
+            injected_nav_channel: None,
             injected_bluetooth_channel: None,
             bt_real_hu_passthrough_channel_open: false,
             injected_media_display: HashMap::new(),

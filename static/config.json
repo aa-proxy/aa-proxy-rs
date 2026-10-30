@@ -521,6 +521,11 @@
               "description": "Substitute ROUNDABOUT_ENTER_AND_EXIT_CW/CCW maneuvers with their _WITH_ANGLE counterparts, synthesizing an exit angle from the exit number (not real map data). Works around head units that render exit-number roundabout icons badly. Improves rendering only for some head units/car configurations. Independent of waze_lht_workaround. Default: false.",
               "advanced": true
             },
+            "inject_navigation_status": {
+              "typ": "boolean",
+              "description": "Inject a synthetic navigation status service when the head unit does not advertise one. Lets the phone send VehicleEnergyForecast (published on the `vehicle_energy_forecast` websocket topic) and navigation state (visible to WASM hooks). The channel is answered locally and hidden from the head unit. Default: false.",
+              "advanced": true
+            },
             "stop_on_disconnect": {
               "typ": "boolean",
               "description": "Stop automatic reconnection after manually selecting `Disconnect` in Android Auto on the phone. aa-proxy will not attempt to reconnect until the next restart or until a Bluetooth connection is initiated manually from the phone."

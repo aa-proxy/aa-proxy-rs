@@ -768,6 +768,13 @@ pub struct AppConfig {
     /// units/car configurations. Independent of waze_lht_workaround. Default: false.
     #[serde(default)]
     pub roundabout_angle_synthesis_enabled: bool,
+    /// Inject a synthetic navigation_status_service into the ServiceDiscoveryResponse when the
+    /// HU does not advertise one. The phone then sends navigation state and VehicleEnergyForecast
+    /// (0x8008) on it; the channel is answered and consumed locally (never reaches the HU), so the
+    /// forecast is still published on the `vehicle_energy_forecast` websocket topic and WASM hooks
+    /// see the navigation messages. Default: false.
+    #[serde(default)]
+    pub inject_navigation_status: bool,
     #[serde(default, deserialize_with = "empty_string_as_none")]
     pub ev_battery_logger: Option<String>,
     pub ev_connector_types: EvConnectorTypes,
@@ -1201,6 +1208,7 @@ impl Default for AppConfig {
             stop_on_disconnect: false,
             waze_lht_workaround: false,
             roundabout_angle_synthesis_enabled: false,
+            inject_navigation_status: false,
             ev_battery_logger: None,
             action_requested: None,
             ev_connector_types: EvConnectorTypes::default(),
@@ -1569,6 +1577,7 @@ impl AppConfig {
         doc["stop_on_disconnect"] = value(self.stop_on_disconnect);
         doc["waze_lht_workaround"] = value(self.waze_lht_workaround);
         doc["roundabout_angle_synthesis_enabled"] = value(self.roundabout_angle_synthesis_enabled);
+        doc["inject_navigation_status"] = value(self.inject_navigation_status);
         if let Some(path) = &self.ev_battery_logger {
             doc["ev_battery_logger"] = value(path);
         }
