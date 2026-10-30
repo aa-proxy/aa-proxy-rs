@@ -385,6 +385,12 @@
           "description": "Base TCP port for raw decrypted media stream dumping/debugging. Requires `mitm = true`.\n\nOne TCP listener is created per media sink using fixed offsets:\n+0 main video,\n+1 cluster video,\n+2 auxiliary video,\n+3 guidance/TTS audio,\n+4 system audio,\n+5 media audio,\n+6 telephony audio.\n\nExample: `12345` exposes main video on `tcp://127.0.0.1:12345`.\nUseful for ffplay/VLC debugging and stream inspection.\n\nSet to 0 or leave unset to disable.",
           "requires": "mitm",
           "advanced": true
+        },
+        "media_tap_keyframe_toggle": {
+          "typ": "boolean",
+          "description": "Experimental. When a media tap client connects to a real head-unit video channel (main/cluster/aux), request a fresh keyframe from the phone by sending an unsolicited VIDEO_FOCUS_NOTIFICATION native→projected toggle. Without it a new tap client may wait ~60 s for the phone's next natural IDR. The head unit shows the same stream, so it may briefly flicker or show a black frame on each new tap connection (rate-limited, skipped while the HU holds native focus). Tested on a single head unit only. Default: false.",
+          "requires": "mitm",
+          "advanced": true
         }
       },
       "subsections": [

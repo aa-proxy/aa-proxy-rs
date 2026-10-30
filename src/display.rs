@@ -17,6 +17,7 @@ use crate::mitm::{ENCRYPTED, FRAME_TYPE_FIRST, FRAME_TYPE_LAST, FRAME_TYPE_MASK}
 use protobuf::Enum;
 use protobuf::Message;
 use simplelog::*;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc::Sender;
 
 // Just a generic Result type to ease error handling for us. Errors in multithreaded
@@ -433,6 +434,198 @@ fn ensure_map_album_art_h264_virtual_tap(
     }
 }
 
+/// Minimum gap between two keyframe-request focus toggles on the same real video
+/// channel. Each toggle restarts the phone's encoder and is visible on the real HU,
+/// so a flapping tap client must not turn into a stream of restarts.
+const REAL_VIDEO_KEYFRAME_COOLDOWN: Duration = Duration::from_secs(5);
+
+/// Parse a plain (decrypted, single-frame) VIDEO_FOCUS_NOTIFICATION payload
+/// (2-byte message id + protobuf) and return its focus mode.
+fn parse_video_focus_notification(payload: &[u8]) -> Option<VideoFocusMode> {
+    let id = u16::from_be_bytes([*payload.first()?, *payload.get(1)?]);
+    if id != MEDIA_MESSAGE_VIDEO_FOCUS_NOTIFICATION as u16 {
+        return None;
+    }
+    VideoFocusNotification::parse_from_bytes(&payload[2..])
+        .ok()
+        .map(|n| n.focus())
+}
+
+/// Record the focus the real HU reports on a real (non-injected) video channel.
+/// Called for HU -> phone packets only.
+pub fn observe_real_video_focus(pkt: &Packet, ctx: &mut ModifyContext) {
+    if !ctx.real_video_channels.contains_key(&pkt.channel)
+        || (pkt.flags & FRAME_TYPE_MASK) != (FRAME_TYPE_FIRST | FRAME_TYPE_LAST)
+    {
+        return;
+    }
+    if let Some(focus) = parse_video_focus_notification(&pkt.payload) {
+        ctx.real_video_hu_focus.insert(pkt.channel, focus);
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum KeyframeToggleDecision {
+    /// Toggle NATIVE -> `restore` (the focus the HU currently holds).
+    Toggle { restore: VideoFocusMode },
+    /// The HU itself is not projecting this channel; do not force it.
+    SkipHuNotProjected,
+    /// A toggle ran too recently; try again later.
+    SkipCooldown,
+}
+
+fn keyframe_toggle_decision(
+    hu_focus: Option<VideoFocusMode>,
+    last_toggle: Option<Instant>,
+    now: Instant,
+) -> KeyframeToggleDecision {
+    // Unknown focus (HU has not reported any yet) while the phone is already
+    // streaming means projected; fall back to plain PROJECTED.
+    let restore = match hu_focus {
+        None => VideoFocusMode::VIDEO_FOCUS_PROJECTED,
+        Some(
+            f @ (VideoFocusMode::VIDEO_FOCUS_PROJECTED
+            | VideoFocusMode::VIDEO_FOCUS_PROJECTED_NO_INPUT_FOCUS),
+        ) => f,
+        Some(_) => return KeyframeToggleDecision::SkipHuNotProjected,
+    };
+    match last_toggle {
+        Some(t) if now.duration_since(t) < REAL_VIDEO_KEYFRAME_COOLDOWN => {
+            KeyframeToggleDecision::SkipCooldown
+        }
+        _ => KeyframeToggleDecision::Toggle { restore },
+    }
+}
+
+/// On a fresh media tap client for a real (HU-advertised) video channel (main,
+/// cluster or aux), ask the phone for a new IDR by sending an unsolicited
+/// VIDEO_FOCUS_NOTIFICATION native→projected toggle -- the same toggle used for
+/// injected displays on tap connect. Without it the tap waits for the phone's
+/// next natural keyframe, which on the main channel was observed at ~65 s.
+///
+/// Unlike injected displays the real HU shows this stream too, so:
+/// - nothing is sent while the HU itself holds NATIVE focus on the channel;
+/// - the focus restored afterwards is the one the HU last reported;
+/// - toggles are rate-limited per channel (a client that connected during the
+///   cooldown is kept pending and served once it expires);
+/// - both packets are queued atomically (reserved together) or not at all, so
+///   the phone is never left stuck in NATIVE.
+///
+/// The first sighting of a channel (new session) only records the current
+/// connect generation: a session start already produces an IDR by itself.
+fn maybe_request_real_video_keyframe(
+    proxy_type: ProxyType,
+    ctx: &mut ModifyContext,
+    cfg: &AppConfig,
+    tx: &Sender<Packet>,
+) -> Result<()> {
+    if proxy_type != ProxyType::HeadUnit
+        || !cfg.media_tap_keyframe_toggle
+        || ctx.real_video_channels.is_empty()
+    {
+        return Ok(());
+    }
+
+    let now = Instant::now();
+    let mut candidates: Vec<(u8, DisplayType, u64)> = Vec::new();
+    for (&channel, &display_type) in &ctx.real_video_channels {
+        let Some(sink) = ctx.media_channels.get(&channel) else {
+            continue;
+        };
+        let connect_gen = sink.client_connect_generation();
+        let has_tap_client = sink.has_subscribers();
+        match ctx.real_video_connect_gen.get(&channel).copied() {
+            // First sighting this session: only record.
+            None => {
+                ctx.real_video_connect_gen.insert(channel, connect_gen);
+            }
+            Some(seen) if connect_gen > seen => {
+                if has_tap_client {
+                    candidates.push((channel, display_type, connect_gen));
+                } else {
+                    // Client already gone again; nothing to serve.
+                    ctx.real_video_connect_gen.insert(channel, connect_gen);
+                }
+            }
+            Some(_) => {}
+        }
+    }
+
+    for (channel, display_type, connect_gen) in candidates {
+        let restore = match keyframe_toggle_decision(
+            ctx.real_video_hu_focus.get(&channel).copied(),
+            ctx.real_video_last_toggle.get(&channel).copied(),
+            now,
+        ) {
+            KeyframeToggleDecision::Toggle { restore } => restore,
+            KeyframeToggleDecision::SkipHuNotProjected => {
+                debug!(
+                    "{} media tap keyframe request: HU focus on channel <b>{:#04x}</> is not projected; skipped",
+                    get_name(proxy_type),
+                    channel
+                );
+                ctx.real_video_connect_gen.insert(channel, connect_gen);
+                continue;
+            }
+            // Generation left unconsumed: retried once the cooldown has passed.
+            KeyframeToggleDecision::SkipCooldown => continue,
+        };
+
+        let flags = ENCRYPTED | FRAME_TYPE_FIRST | FRAME_TYPE_LAST;
+        let mut native_pkt = Packet {
+            channel,
+            flags,
+            final_length: None,
+            payload: Vec::new(),
+        };
+        rewrite_video_focus_notification(
+            &mut native_pkt,
+            VideoFocusMode::VIDEO_FOCUS_NATIVE,
+            true,
+        )?;
+        let mut restore_pkt = Packet {
+            channel,
+            flags,
+            final_length: None,
+            payload: Vec::new(),
+        };
+        rewrite_video_focus_notification(&mut restore_pkt, restore, true)?;
+
+        // Reserve both slots up front: both packets go out or neither does.
+        let permits = match tx.try_reserve_many(2) {
+            Ok(permits) => permits,
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                // Generation left unconsumed: retried on the next call.
+                debug!(
+                    "{} media tap keyframe request: queue busy on channel <b>{:#04x}</>; will retry",
+                    get_name(proxy_type),
+                    channel
+                );
+                continue;
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                return Err("media tap keyframe request queue closed".into());
+            }
+        };
+
+        info!(
+            "{} <blue>media tap:</> new tap client on real video channel <b>{:#04x}</> ({:?}); requesting keyframe via VIDEO_FOCUS_NOTIFICATION native→{:?}",
+            get_name(proxy_type),
+            channel,
+            display_type,
+            restore
+        );
+
+        for (permit, pkt) in permits.zip([native_pkt, restore_pkt]) {
+            permit.send(pkt);
+        }
+        ctx.real_video_connect_gen.insert(channel, connect_gen);
+        ctx.real_video_last_toggle.insert(channel, now);
+    }
+
+    Ok(())
+}
+
 pub fn maybe_emit_pending_injected_focus(
     proxy_type: ProxyType,
     ctx: &mut ModifyContext,
@@ -440,6 +633,7 @@ pub fn maybe_emit_pending_injected_focus(
     tx: &Sender<Packet>,
 ) -> Result<()> {
     ensure_map_album_art_h264_virtual_tap(proxy_type, ctx, cfg);
+    maybe_request_real_video_keyframe(proxy_type, ctx, cfg, tx)?;
 
     let mut ready_channels: Vec<(u8, u8, bool, DisplayType)> = Vec::new();
     let mut toggle_channels: Vec<(u8, u8, DisplayType)> = Vec::new();
@@ -905,5 +1099,86 @@ pub fn emulate_injected_media_packet(
             );
             Ok(false)
         }
+    }
+}
+
+#[cfg(test)]
+mod keyframe_toggle_tests {
+    use super::*;
+
+    fn notification_payload(focus: VideoFocusMode) -> Vec<u8> {
+        let mut pkt = Packet {
+            channel: 3,
+            flags: ENCRYPTED | FRAME_TYPE_FIRST | FRAME_TYPE_LAST,
+            final_length: None,
+            payload: Vec::new(),
+        };
+        rewrite_video_focus_notification(&mut pkt, focus, false).unwrap();
+        pkt.payload
+    }
+
+    #[test]
+    fn parses_focus_notification() {
+        for focus in [
+            VideoFocusMode::VIDEO_FOCUS_NATIVE,
+            VideoFocusMode::VIDEO_FOCUS_PROJECTED,
+            VideoFocusMode::VIDEO_FOCUS_PROJECTED_NO_INPUT_FOCUS,
+        ] {
+            assert_eq!(
+                parse_video_focus_notification(&notification_payload(focus)),
+                Some(focus)
+            );
+        }
+        assert_eq!(parse_video_focus_notification(&[]), None);
+        assert_eq!(parse_video_focus_notification(&[0x80]), None);
+        assert_eq!(
+            parse_video_focus_notification(&[0x00, 0x00, 0x08, 0x01]),
+            None
+        );
+    }
+
+    #[test]
+    fn decision_unknown_focus_toggles_to_projected() {
+        assert_eq!(
+            keyframe_toggle_decision(None, None, Instant::now()),
+            KeyframeToggleDecision::Toggle {
+                restore: VideoFocusMode::VIDEO_FOCUS_PROJECTED
+            }
+        );
+    }
+
+    #[test]
+    fn decision_restores_hu_focus() {
+        let f = VideoFocusMode::VIDEO_FOCUS_PROJECTED_NO_INPUT_FOCUS;
+        assert_eq!(
+            keyframe_toggle_decision(Some(f), None, Instant::now()),
+            KeyframeToggleDecision::Toggle { restore: f }
+        );
+    }
+
+    #[test]
+    fn decision_skips_when_hu_native() {
+        assert_eq!(
+            keyframe_toggle_decision(
+                Some(VideoFocusMode::VIDEO_FOCUS_NATIVE),
+                None,
+                Instant::now()
+            ),
+            KeyframeToggleDecision::SkipHuNotProjected
+        );
+    }
+
+    #[test]
+    fn decision_cooldown() {
+        let now = Instant::now();
+        assert_eq!(
+            keyframe_toggle_decision(None, Some(now), now),
+            KeyframeToggleDecision::SkipCooldown
+        );
+        let later = now + REAL_VIDEO_KEYFRAME_COOLDOWN;
+        assert!(matches!(
+            keyframe_toggle_decision(None, Some(now), later),
+            KeyframeToggleDecision::Toggle { .. }
+        ));
     }
 }
