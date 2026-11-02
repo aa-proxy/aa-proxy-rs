@@ -251,6 +251,8 @@ pub enum OverlayHwAccel {
     None,
     Auto,
     V4l2,
+    /// Sophgo SG2000/SG2002 (Milk-V Duo S) hardware codec through the vendor cvi_mpi libraries.
+    Cvi,
 }
 
 impl Default for OverlayHwAccel {
@@ -265,6 +267,7 @@ impl Display for OverlayHwAccel {
             Self::None => "none",
             Self::Auto => "auto",
             Self::V4l2 => "v4l2",
+            Self::Cvi => "cvi",
         })
     }
 }
@@ -278,9 +281,10 @@ impl<'de> Deserialize<'de> for OverlayHwAccel {
         match s.trim().to_ascii_lowercase().as_str() {
             "auto" => Ok(Self::Auto),
             "v4l2" | "hardware" | "hw" => Ok(Self::V4l2),
+            "cvi" => Ok(Self::Cvi),
             "none" | "software" | "sw" | "" => Ok(Self::None),
             other => Err(serde::de::Error::custom(format!(
-                "invalid overlay_hw_accel: '{other}', expected 'none', 'auto', or 'v4l2'"
+                "invalid overlay_hw_accel: '{other}', expected 'none', 'auto', 'v4l2', or 'cvi'"
             ))),
         }
     }
@@ -645,8 +649,9 @@ pub struct AppConfig {
     )]
     pub overlay_font_path: PathBuf,
     /// Hardware acceleration backend for the video overlay:
-    /// `none` (default, pure-Rust software), `auto` (auto-detect V4L2 M2M hardware codecs),
-    /// or `v4l2` (force V4L2 M2M hardware codecs with software fallback).
+    /// `none` (default, pure-Rust software), `auto` (auto-detect V4L2 M2M hardware codecs, then
+    /// the Sophgo CVI codec), `v4l2` (force V4L2 M2M hardware codecs with software fallback)
+    /// or `cvi` (force the Sophgo SG2000/SG2002 hardware codec with software fallback).
     #[serde(default)]
     pub overlay_hw_accel: OverlayHwAccel,
     /// Explicit V4L2 M2M decoder device path (e.g. `/dev/video10`).

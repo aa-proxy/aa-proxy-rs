@@ -13,6 +13,7 @@ pub mod companion_protocol;
 pub mod config;
 pub mod config_types;
 pub mod crash;
+pub mod cvi_codec;
 pub mod device_info;
 pub mod display;
 pub mod ev;

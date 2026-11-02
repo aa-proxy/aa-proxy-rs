@@ -217,7 +217,7 @@ overlay_enabled = true
 # optional, these are the defaults:
 overlay_text_path = "/dev/shm/overlay.json"
 overlay_font_path = ""   # path to a .ttf font, empty = built-in bitmap font (see below)
-overlay_hw_accel = "none" # "none" (default pure-Rust software), "auto" (detect V4L2 M2M codecs), or "v4l2"
+overlay_hw_accel = "none" # "none" (default pure-Rust software), "auto" (detect V4L2 M2M codecs, then Sophgo CVI), "v4l2", or "cvi"
 overlay_v4l2_decoder = "" # optional explicit V4L2 decoder device (e.g. "/dev/video10" on Raspberry Pi)
 overlay_v4l2_encoder = "" # optional explicit V4L2 encoder device (e.g. "/dev/video11" on Raspberry Pi)
 ```
@@ -225,6 +225,8 @@ The option is evaluated when an Android Auto session starts, so a change applies
 goes through the decode/render/encode pipeline (even with empty text), and `VIDEO_FPS_60` is capped to 30 (see `cap_video_fps_to_30`).
 
 On supported boards like **Raspberry Pi 3/4/Zero 2 W** (excluding Raspberry Pi 5) with h264 hw acceleration, setting `overlay_hw_accel = "auto"` offloads H.264 decoding and encoding to the hardware VideoCore VPU (`/dev/video10` and `/dev/video11`), dropping CPU usage by ~85%, significantly lowering latency and keeping temperatures 15-25°C cooler inside enclosed vehicle cabins. If hardware devices are unavailable or fail to open, it automatically falls back to software. (Ensure `/boot/firmware/config.txt` has `gpu_mem=128`).
+
+On the **Milk-V Duo S** (Sophgo SG2000/SG2002) the hardware H.264 codec is not a V4L2 device: it is reached through the vendor `cvi_mpi` libraries (`libsys`, `libvenc`, `libvdec`). Use `overlay_hw_accel = "cvi"` (or `"auto"`, which tries V4L2 first and then CVI) with a binary built with the `cvi` cargo feature: `CVI_MPI_INC=<cvi_mpi headers> CVI_MPI_LIB=<target libs> cargo build --release --features cvi` (for musl targets also `RUSTFLAGS="-C target-feature=-crt-static"`, the libraries are shared). The target needs the `cvi_vc_driver` kernel modules (`/dev/cvi_vc_enc0`, `/dev/cvi_vc_dec0`), the VPU firmware in `/usr/share/fw_vcodec` and `libatomic`; the Buildroot image for `milkv-duos` provides all of it. Without the feature, or if the devices are missing, aa-proxy-rs falls back to software. Optional tuning through environment variables: `AA_PROXY_CVI_MAX_W`/`AA_PROXY_CVI_MAX_H` (largest video, default 1920x1088), `AA_PROXY_CVI_VB_BLOCKS` (default 12), `AA_PROXY_CVI_BITRATE_KBPS` (default 4000), `AA_PROXY_CVI_DISPLAY_FRAMES` (decoder display queue, default 2, lower means less latency), `AA_PROXY_CVI_PROFILE` (0 baseline, default).
 
 **The official image is general purpose and does not include the V4L2 codec drivers.** If you want to use the hardware encoder/decoder on a Raspberry Pi, you have to build your own Buildroot image with the required kernel options, packages and `modprobe`; see [the documentation](https://aa-proxy.github.io/docs/config-options#video-overlay-hardware-acceleration) for the details. The hardware encoder uses a fixed bitrate (4 Mbps) and does not use `h264_encoder_qp`; a single slow hardware frame is dropped, and the software codec takes over only after repeated or fatal hardware errors.
 

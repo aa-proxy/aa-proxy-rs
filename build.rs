@@ -61,4 +61,64 @@ fn main() {
         // Specify output directory relative to Cargo output directory.
         .cargo_out_dir("protos")
         .run_from_script();
+
+    #[cfg(feature = "cvi")]
+    build_cvi();
+}
+
+/// Builds the C layer for the Sophgo SG2000/SG2002 hardware codec (`cvi` feature) and links the
+/// vendor libraries.
+///
+/// Environment:
+/// - `CVI_MPI_INC`: directory with the cvi_mpi headers (`cvi_sys.h`, `cvi_venc.h`, `cvi_vdec.h`
+///   and the `linux/` subdirectory). In a Buildroot build: `$(STAGING_DIR)/usr/include/cvi_mpi`.
+/// - `CVI_MPI_LIB`: directory with `libsys`, `libvenc`, `libvdec` (and `libatomic`) for the target.
+///   In a Buildroot build: `$(STAGING_DIR)/usr/lib`.
+///
+/// - `CVI_MPI_LINK`: `dylib` (default) or `static`.
+///
+/// Note: musl targets link statically by default (crt-static), which cannot use the shared
+/// libraries: build with `RUSTFLAGS="-C target-feature=-crt-static"`, or set `CVI_MPI_LINK=static`.
+#[cfg(feature = "cvi")]
+fn build_cvi() {
+    println!("cargo:rerun-if-changed=src/cvi/aap_cvi.c");
+    println!("cargo:rerun-if-changed=src/cvi/aap_cvi.h");
+    println!("cargo:rerun-if-env-changed=CVI_MPI_INC");
+    println!("cargo:rerun-if-env-changed=CVI_MPI_LIB");
+
+    let inc = env::var("CVI_MPI_INC").unwrap_or_else(|_| {
+        panic!(
+            "the `cvi` feature needs CVI_MPI_INC (directory with the cvi_mpi headers: cvi_sys.h, \
+             cvi_venc.h, cvi_vdec.h, linux/cvi_*.h)"
+        )
+    });
+    let lib = env::var("CVI_MPI_LIB").unwrap_or_else(|_| {
+        panic!(
+            "the `cvi` feature needs CVI_MPI_LIB (directory with libsys/libvenc/libvdec for the target)"
+        )
+    });
+
+    cc::Build::new()
+        .file("src/cvi/aap_cvi.c")
+        .include("src/cvi")
+        .include(&inc)
+        // SG2000/SG2002 are CV181x (the vendor header defaults to CV180x)
+        .define("__CV181X__", None)
+        .flag_if_supported("-std=gnu11")
+        .warnings(true)
+        .compile("aap_cvi");
+
+    // `dylib` (default) or `static` (uses libsys.a/libvenc.a/libvdec.a, handy for crt-static musl)
+    println!("cargo:rerun-if-env-changed=CVI_MPI_LINK");
+    let kind = match env::var("CVI_MPI_LINK").as_deref() {
+        Ok("static") => "static",
+        _ => "dylib",
+    };
+
+    println!("cargo:rustc-link-search=native={lib}");
+    // libvenc/libvdec depend on libsys; libsys needs libatomic (atomic_bool on RISC-V)
+    println!("cargo:rustc-link-lib={kind}=venc");
+    println!("cargo:rustc-link-lib={kind}=vdec");
+    println!("cargo:rustc-link-lib={kind}=sys");
+    println!("cargo:rustc-link-lib={kind}=atomic");
 }

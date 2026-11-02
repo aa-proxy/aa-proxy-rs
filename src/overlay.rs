@@ -470,31 +470,35 @@ struct ChannelGateState {
 static SESSION_HW_ACCEL: Mutex<crate::config::OverlayHwAccel> =
     Mutex::new(crate::config::OverlayHwAccel::None);
 static SESSION_V4L2_DEVICES: Mutex<Option<crate::v4l2_m2m::V4l2CodecDevices>> = Mutex::new(None);
+/// Set for the session when the Sophgo CVI hardware codec was requested and found.
+static SESSION_CVI_ENABLED: AtomicBool = AtomicBool::new(false);
 
 pub enum DecoderBackend {
     Software(Decoder),
     V4l2(crate::v4l2_m2m::V4l2M2mDecoder),
+    Cvi(crate::cvi_codec::CviDecoder),
 }
 
 pub enum EncoderBackend {
     Software(Encoder),
     V4l2(crate::v4l2_m2m::V4l2M2mEncoder),
+    Cvi(crate::cvi_codec::CviEncoder),
 }
 
-/// Returns true if the channel currently decodes with the V4L2 hardware decoder.
-fn channel_uses_v4l2_decoder(channel: u8) -> bool {
+/// Returns true if the channel currently decodes with a hardware decoder (V4L2 M2M or CVI).
+fn channel_uses_hw_decoder(channel: u8) -> bool {
     VIDEO_DECODERS
         .lock()
         .map(|map| {
             map.get(&channel)
-                .map(|st| matches!(st.backend, DecoderBackend::V4l2(_)))
+                .map(|st| matches!(st.backend, DecoderBackend::V4l2(_) | DecoderBackend::Cvi(_)))
                 .unwrap_or(false)
         })
         .unwrap_or(false)
 }
 
-/// Number of consecutive V4L2 encoder timeouts tolerated before falling back to software.
-const V4L2_ENC_MAX_CONSECUTIVE_TIMEOUTS: u32 = 10;
+/// Number of consecutive hardware encoder timeouts tolerated before falling back to software.
+const HW_ENC_MAX_CONSECUTIVE_TIMEOUTS: u32 = 10;
 
 /// Per-channel H.264 decoder state owned by the Stage-1 decoder worker (`ovl-h264-dec`, Core 2).
 struct ChannelDecoderState {
@@ -504,7 +508,9 @@ struct ChannelDecoderState {
 
 impl ChannelDecoderState {
     fn new(channel: u8) -> Self {
-        let backend = if let Ok(guard) = SESSION_V4L2_DEVICES.lock() {
+        let mut backend: Option<DecoderBackend> = None;
+
+        if let Ok(guard) = SESSION_V4L2_DEVICES.lock() {
             if let Some(devs) = guard.as_ref() {
                 match crate::v4l2_m2m::V4l2M2mDecoder::new(&devs.decoder_path) {
                     Ok(dec) => {
@@ -513,7 +519,7 @@ impl ChannelDecoderState {
                             channel,
                             devs.decoder_path.display()
                         );
-                        DecoderBackend::V4l2(dec)
+                        backend = Some(DecoderBackend::V4l2(dec));
                     }
                     Err(e) => {
                         warn!(
@@ -522,18 +528,31 @@ impl ChannelDecoderState {
                             devs.decoder_path.display(),
                             e
                         );
-                        DecoderBackend::Software(Decoder::new())
                     }
                 }
-            } else {
-                DecoderBackend::Software(Decoder::new())
             }
-        } else {
-            DecoderBackend::Software(Decoder::new())
-        };
+        }
+
+        if backend.is_none() && SESSION_CVI_ENABLED.load(Ordering::Acquire) {
+            match crate::cvi_codec::CviDecoder::new() {
+                Ok(dec) => {
+                    info!(
+                        "overlay: ch {:#04x} initialized Sophgo CVI hardware decoder",
+                        channel
+                    );
+                    backend = Some(DecoderBackend::Cvi(dec));
+                }
+                Err(e) => {
+                    warn!(
+                        "overlay: ch {:#04x} failed to initialize CVI decoder: {}, using pure-Rust software decoder",
+                        channel, e
+                    );
+                }
+            }
+        }
 
         Self {
-            backend,
+            backend: backend.unwrap_or_else(|| DecoderBackend::Software(Decoder::new())),
             phone_codec_config: None,
         }
     }
@@ -608,6 +627,10 @@ impl ChannelEncoderState {
             || self.encoder_dims != Some(dims)
             || self.encoder_qp_gop != Some(qp_gop)
         {
+            // Release the previous encoder first: hardware codecs have a limited number of
+            // channels (e.g. one on the Sophgo CVI with the default `MaxVencChnNum=1`), so the
+            // new one must not be created while the old one still holds its channel.
+            self.encoder = None;
             let mut enc_backend = None;
             if let Ok(devices) = SESSION_V4L2_DEVICES.lock() {
                 if let Some(devs) = devices.as_ref() {
@@ -631,6 +654,24 @@ impl ChannelEncoderState {
                                 channel, devs.encoder_path.display(), e
                             );
                         }
+                    }
+                }
+            }
+
+            if enc_backend.is_none() && SESSION_CVI_ENABLED.load(Ordering::Acquire) {
+                match crate::cvi_codec::CviEncoder::new(width, height, qp_gop.0, qp_gop.1) {
+                    Ok(cvi_enc) => {
+                        info!(
+                            "overlay: ch {:#04x} ({:?}) initialized Sophgo CVI hardware encoder ({}x{}, GOP={})",
+                            channel, self.display_type, width, height, qp_gop.1
+                        );
+                        enc_backend = Some(EncoderBackend::Cvi(cvi_enc));
+                    }
+                    Err(e) => {
+                        warn!(
+                            "overlay: ch {:#04x} failed to initialize CVI encoder: {}, falling back to pure-Rust software encoder",
+                            channel, e
+                        );
                     }
                 }
             }
@@ -674,8 +715,12 @@ impl ChannelEncoderState {
     pub fn get_sps_pps(&self, qp: u8) -> Option<Vec<u8>> {
         let (w, h) = self.encoder_dims?;
         match &self.encoder {
-            Some(EncoderBackend::V4l2(v4l2_enc)) => {
-                let hdr = v4l2_enc.header_bytes();
+            Some(EncoderBackend::V4l2(_)) | Some(EncoderBackend::Cvi(_)) => {
+                let hdr = match &self.encoder {
+                    Some(EncoderBackend::V4l2(v4l2_enc)) => v4l2_enc.header_bytes(),
+                    Some(EncoderBackend::Cvi(cvi_enc)) => cvi_enc.header_bytes(),
+                    _ => &[],
+                };
                 if !hdr.is_empty() {
                     Some(hdr.to_vec())
                 } else {
@@ -925,7 +970,7 @@ fn stage1_decoder_worker_loop(
         let h264_au = &job.frame_data[10..];
         let in_len = h264_au.len();
 
-        let hw_decoder = channel_uses_v4l2_decoder(job.channel);
+        let hw_decoder = channel_uses_hw_decoder(job.channel);
         match decode_video_access_unit(job.channel, h264_au) {
             Some((yuv, dec_dur, incoming_has_idr)) => {
                 stage2.push(Stage2Job::DecodedData {
@@ -941,7 +986,7 @@ fn stage1_decoder_worker_loop(
                 });
             }
             None if hw_decoder => {
-                // The V4L2 decoder is pipelined: no frame ready yet. Forwarding the phone's
+                // The hardware decoder is pipelined: no frame ready yet. Forwarding the phone's
                 // original access unit would mix two different H.264 streams, so drop it.
                 PIPELINE_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
             }
@@ -1096,18 +1141,38 @@ pub fn register_video_channels_from_sdr(
     if let Ok(mut lock) = SESSION_HW_ACCEL.lock() {
         *lock = hw_accel;
     }
-    if enabled && hw_accel != crate::config::OverlayHwAccel::None {
-        let probed =
-            crate::v4l2_m2m::probe_v4l2_codec_devices(Some(v4l2_decoder), Some(v4l2_encoder));
+    use crate::config::OverlayHwAccel;
+    let mut cvi_found = false;
+    if enabled && hw_accel != OverlayHwAccel::None {
+        // V4L2 M2M (Raspberry Pi & co): `auto` and `v4l2`
+        let probed = if matches!(hw_accel, OverlayHwAccel::Auto | OverlayHwAccel::V4l2) {
+            crate::v4l2_m2m::probe_v4l2_codec_devices(Some(v4l2_decoder), Some(v4l2_encoder))
+        } else {
+            None
+        };
         if let Some(devs) = &probed {
             info!(
                 "overlay: V4L2 M2M hardware acceleration enabled (decoder: {}, encoder: {})",
                 devs.decoder_path.display(),
                 devs.encoder_path.display()
             );
-        } else {
+        }
+        // Sophgo CVI codec (Milk-V Duo S): `cvi`, or `auto` when no V4L2 codec was found
+        if hw_accel == OverlayHwAccel::Cvi || (hw_accel == OverlayHwAccel::Auto && probed.is_none())
+        {
+            if crate::cvi_codec::probe() {
+                cvi_found = true;
+                info!("overlay: Sophgo CVI hardware acceleration enabled");
+            } else if hw_accel == OverlayHwAccel::Cvi {
+                warn!(
+                    "overlay: overlay_hw_accel = \"cvi\" but the CVI codec is not available \
+                     (built without the `cvi` feature, or /dev/cvi_vc_enc0 and /dev/cvi_vc_dec0 missing)"
+                );
+            }
+        }
+        if probed.is_none() && !cvi_found {
             info!(
-                "overlay: V4L2 M2M hardware codecs not found or not accessible, using pure-Rust software pipeline"
+                "overlay: hardware codecs not found or not accessible, using pure-Rust software pipeline"
             );
         }
         if let Ok(mut lock) = SESSION_V4L2_DEVICES.lock() {
@@ -1118,6 +1183,7 @@ pub fn register_video_channels_from_sdr(
             *lock = None;
         }
     }
+    SESSION_CVI_ENABLED.store(cvi_found, Ordering::Release);
 
     if !enabled {
         set_overlay_font_path(Path::new(""));
@@ -1292,6 +1358,9 @@ fn observe_codec_config_decoder_only(channel: u8, annex_b: &[u8]) {
             match &mut state.backend {
                 DecoderBackend::V4l2(v4l2_dec) => {
                     let _ = v4l2_dec.decode(annex_b);
+                }
+                DecoderBackend::Cvi(cvi_dec) => {
+                    let _ = cvi_dec.decode(annex_b);
                 }
                 DecoderBackend::Software(sw_dec) => {
                     if let Err(e) = sw_dec.decode(annex_b) {
@@ -1675,35 +1744,50 @@ fn decode_video_access_unit(channel: u8, h264_au: &[u8]) -> Option<(YuvFrame, Du
     let state = map.get_mut(&channel)?;
 
     let t_start = Instant::now();
-    let decoded = match &mut state.backend {
-        DecoderBackend::V4l2(v4l2_dec) => match v4l2_dec.decode(h264_au) {
-            Ok(Some(yuv)) => yuv,
-            Ok(None) => return None,
-            Err(e) => {
-                warn!(
-                    "overlay: ch {:#04x} V4L2 decode error: {:?}, falling back to pure-Rust software decoder",
-                    channel, e
-                );
-                let mut sw_dec = Decoder::new();
-                if let Some(cfg_bytes) = state.phone_codec_config.clone() {
-                    let _ = sw_dec.decode(&cfg_bytes);
-                }
-                let fallback_res = match sw_dec.decode(h264_au) {
-                    Ok(Some(yuv)) => Some(yuv),
-                    _ => None,
-                };
-                state.backend = DecoderBackend::Software(sw_dec);
-                fallback_res?
+    // Hardware backends (V4L2 M2M, Sophgo CVI) share the same error handling: on a hard error
+    // the channel switches to the pure-Rust software decoder.
+    let hw_result: Option<std::io::Result<Option<YuvFrame>>> = match &mut state.backend {
+        DecoderBackend::V4l2(v4l2_dec) => Some(v4l2_dec.decode(h264_au)),
+        DecoderBackend::Cvi(cvi_dec) => Some(cvi_dec.decode(h264_au)),
+        DecoderBackend::Software(_) => None,
+    };
+    let decoded = match hw_result {
+        Some(Ok(Some(yuv))) => yuv,
+        Some(Ok(None)) => return None,
+        Some(Err(e)) => {
+            warn!(
+                "overlay: ch {:#04x} hardware decode error: {:?}, falling back to pure-Rust software decoder",
+                channel, e
+            );
+            let mut sw_dec = Decoder::new();
+            if let Some(cfg_bytes) = state.phone_codec_config.clone() {
+                let _ = sw_dec.decode(&cfg_bytes);
             }
-        },
-        DecoderBackend::Software(sw_dec) => match sw_dec.decode(h264_au) {
-            Ok(Some(yuv)) => yuv,
-            Ok(None) => return None,
-            Err(e) => {
-                if let Some(cfg_bytes) = state.phone_codec_config.clone() {
-                    let _ = sw_dec.decode(&cfg_bytes);
-                    if let Ok(Some(yuv)) = sw_dec.decode(h264_au) {
-                        yuv
+            let fallback_res = match sw_dec.decode(h264_au) {
+                Ok(Some(yuv)) => Some(yuv),
+                _ => None,
+            };
+            state.backend = DecoderBackend::Software(sw_dec);
+            fallback_res?
+        }
+        None => match &mut state.backend {
+            DecoderBackend::Software(sw_dec) => match sw_dec.decode(h264_au) {
+                Ok(Some(yuv)) => yuv,
+                Ok(None) => return None,
+                Err(e) => {
+                    if let Some(cfg_bytes) = state.phone_codec_config.clone() {
+                        let _ = sw_dec.decode(&cfg_bytes);
+                        if let Ok(Some(yuv)) = sw_dec.decode(h264_au) {
+                            yuv
+                        } else {
+                            debug!(
+                                "overlay: ch {:#04x} H.264 decode error ({} bytes): {:?}",
+                                channel,
+                                h264_au.len(),
+                                e
+                            );
+                            return None;
+                        }
                     } else {
                         debug!(
                             "overlay: ch {:#04x} H.264 decode error ({} bytes): {:?}",
@@ -1713,16 +1797,9 @@ fn decode_video_access_unit(channel: u8, h264_au: &[u8]) -> Option<(YuvFrame, Du
                         );
                         return None;
                     }
-                } else {
-                    debug!(
-                        "overlay: ch {:#04x} H.264 decode error ({} bytes): {:?}",
-                        channel,
-                        h264_au.len(),
-                        e
-                    );
-                    return None;
                 }
-            }
+            },
+            _ => return None,
         },
     };
     let dec_dur = t_start.elapsed();
@@ -1773,13 +1850,16 @@ fn encode_decoded_video_frame(
     let overlay_changed = state.last_encoded_lines.as_slice() != lines
         || state.last_encoded_cfg.as_ref() != Some(cfg);
 
-    let is_v4l2 = matches!(state.encoder, Some(EncoderBackend::V4l2(_)));
+    let is_hw = matches!(
+        state.encoder,
+        Some(EncoderBackend::V4l2(_)) | Some(EncoderBackend::Cvi(_))
+    );
 
     let t_draw_start = Instant::now();
-    // For V4L2 hardware encoder, NEVER use fast_skip!
-    // The hardware encoder encodes in ~2ms on the VPU and MUST receive every frame
+    // For a hardware encoder (V4L2 M2M, CVI), NEVER use fast_skip!
+    // The hardware encoder encodes in a few ms on the VPU and MUST receive every frame
     // so its internal reference picture stays 100% in sync with the car Head Unit.
-    let (draw_dur, fast_skip) = if is_v4l2 {
+    let (draw_dur, fast_skip) = if is_hw {
         draw_overlay_box_yuv420_with_config(&mut yuv, lines, cfg);
         (t_draw_start.elapsed(), false)
     } else if !need_keyframe && !overlay_changed && has_newer_frame_in_queue {
@@ -1808,74 +1888,88 @@ fn encode_decoded_video_frame(
         skip_au
     } else {
         let mut fell_back_to_sw = None;
-        let (raw_encoded_au, emitted_by_v4l2) = match state
-            .encoder
-            .as_mut()
-            .expect("encoder initialized above")
-        {
-            EncoderBackend::V4l2(v4l2_enc) => {
-                if need_keyframe {
-                    v4l2_enc.request_keyframe();
-                    state.force_next_keyframe = false;
+        // Hardware backends (V4L2 M2M, Sophgo CVI) are driven the same way; the software
+        // encoder is handled below.
+        let hw_encode_result: Option<std::io::Result<Vec<u8>>> =
+            match state.encoder.as_mut().expect("encoder initialized above") {
+                EncoderBackend::V4l2(v4l2_enc) => {
+                    if need_keyframe {
+                        v4l2_enc.request_keyframe();
+                        state.force_next_keyframe = false;
+                    }
+                    Some(v4l2_enc.encode(&yuv))
                 }
-                match v4l2_enc.encode(&yuv) {
-                    Ok(bytes) if !bytes.is_empty() => {
-                        state.hw_enc_timeouts = 0;
-                        (bytes, true)
+                EncoderBackend::Cvi(cvi_enc) => {
+                    if need_keyframe {
+                        cvi_enc.request_keyframe();
+                        state.force_next_keyframe = false;
                     }
-                    Ok(_) => return (Vec::new(), false),
-                    Err(e)
-                        if e.kind() == std::io::ErrorKind::TimedOut
-                            && state.hw_enc_timeouts + 1 < V4L2_ENC_MAX_CONSECUTIVE_TIMEOUTS =>
-                    {
-                        // A single slow hardware frame is not a reason to give up on the
-                        // hardware encoder: drop this frame and keep going.
-                        state.hw_enc_timeouts += 1;
-                        debug!(
-                            "overlay: ch {:#04x} V4L2 encode timeout ({}/{})",
-                            channel, state.hw_enc_timeouts, V4L2_ENC_MAX_CONSECUTIVE_TIMEOUTS
-                        );
-                        return (Vec::new(), false);
-                    }
-                    Err(e) => {
-                        warn!(
-                            "overlay: ch {:#04x} V4L2 encode error: {:?}, falling back to pure-Rust software encoder",
-                            channel, e
-                        );
-                        let mut sw_enc = match create_baseline_encoder(
-                            frame_w,
-                            frame_h,
-                            cfg.h264_encoder_qp,
-                            cfg.h264_encoder_gop,
-                        ) {
-                            Ok(sw) => sw,
-                            Err(_) => return (Vec::new(), false),
-                        };
-                        // The car HU has so far seen the hardware stream: start the software
-                        // stream with an IDR and re-send SPS/PPS.
-                        sw_enc.request_keyframe();
-                        let res = match sw_enc.try_encode(&yuv) {
-                            Ok(b) => b,
-                            Err(_) => return (Vec::new(), false),
-                        };
-                        fell_back_to_sw = Some(sw_enc);
-                        (res, false)
-                    }
+                    Some(cvi_enc.encode(&yuv))
+                }
+                EncoderBackend::Software(_) => None,
+            };
+        let (raw_encoded_au, emitted_by_hw) = if let Some(hw_result) = hw_encode_result {
+            match hw_result {
+                Ok(bytes) if !bytes.is_empty() => {
+                    state.hw_enc_timeouts = 0;
+                    (bytes, true)
+                }
+                Ok(_) => return (Vec::new(), false),
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::TimedOut
+                        && state.hw_enc_timeouts + 1 < HW_ENC_MAX_CONSECUTIVE_TIMEOUTS =>
+                {
+                    // A single slow hardware frame is not a reason to give up on the
+                    // hardware encoder: drop this frame and keep going.
+                    state.hw_enc_timeouts += 1;
+                    debug!(
+                        "overlay: ch {:#04x} hardware encode timeout ({}/{})",
+                        channel, state.hw_enc_timeouts, HW_ENC_MAX_CONSECUTIVE_TIMEOUTS
+                    );
+                    return (Vec::new(), false);
+                }
+                Err(e) => {
+                    warn!(
+                        "overlay: ch {:#04x} hardware encode error: {:?}, falling back to pure-Rust software encoder",
+                        channel, e
+                    );
+                    let mut sw_enc = match create_baseline_encoder(
+                        frame_w,
+                        frame_h,
+                        cfg.h264_encoder_qp,
+                        cfg.h264_encoder_gop,
+                    ) {
+                        Ok(sw) => sw,
+                        Err(_) => return (Vec::new(), false),
+                    };
+                    // The car HU has so far seen the hardware stream: start the software
+                    // stream with an IDR and re-send SPS/PPS.
+                    sw_enc.request_keyframe();
+                    let res = match sw_enc.try_encode(&yuv) {
+                        Ok(b) => b,
+                        Err(_) => return (Vec::new(), false),
+                    };
+                    fell_back_to_sw = Some(sw_enc);
+                    (res, false)
                 }
             }
-            EncoderBackend::Software(sw_enc) => {
-                if need_keyframe {
-                    sw_enc.request_keyframe();
-                    state.force_next_keyframe = false;
-                }
+        } else {
+            match state.encoder.as_mut().expect("encoder initialized above") {
+                EncoderBackend::Software(sw_enc) => {
+                    if need_keyframe {
+                        sw_enc.request_keyframe();
+                        state.force_next_keyframe = false;
+                    }
 
-                match sw_enc.try_encode(&yuv) {
-                    Ok(bytes) => (bytes, false),
-                    Err(e) => {
-                        warn!("overlay: ch {:#04x} H.264 encode error: {:?}", channel, e);
-                        return (vec![fallback_frame_data], false);
+                    match sw_enc.try_encode(&yuv) {
+                        Ok(bytes) => (bytes, false),
+                        Err(e) => {
+                            warn!("overlay: ch {:#04x} H.264 encode error: {:?}", channel, e);
+                            return (vec![fallback_frame_data], false);
+                        }
                     }
                 }
+                _ => return (Vec::new(), false),
             }
         };
 
@@ -1887,7 +1981,7 @@ fn encode_decoded_video_frame(
         }
 
         let emitted_idr = annex_b_contains_idr(&raw_encoded_au);
-        let patched_au = if emitted_by_v4l2 {
+        let patched_au = if emitted_by_hw {
             raw_encoded_au
         } else if emitted_idr {
             state.out_frame_num = 1;
@@ -1946,6 +2040,9 @@ fn encode_decoded_video_frame(
         let sps_pps = match &state.encoder {
             Some(EncoderBackend::V4l2(v4l2_enc)) if !v4l2_enc.header_bytes().is_empty() => {
                 v4l2_enc.header_bytes().to_vec()
+            }
+            Some(EncoderBackend::Cvi(cvi_enc)) if !cvi_enc.header_bytes().is_empty() => {
+                cvi_enc.header_bytes().to_vec()
             }
             _ => extract_sps_pps_annex_b(&encoded_au),
         };
@@ -2308,7 +2405,7 @@ fn write_zero_latency_vui(w: &mut SimpleBitWriter) {
 }
 
 /// Parses displayed `(width, height)` from the first SPS (`nal_unit_type == 7`) in an Annex-B buffer.
-fn parse_sps_dimensions_annex_b(annex_b: &[u8]) -> Option<(usize, usize)> {
+pub(crate) fn parse_sps_dimensions_annex_b(annex_b: &[u8]) -> Option<(usize, usize)> {
     for nal in split_annex_b_nals(annex_b) {
         if nal.first().map(|&b| b & 0x1F) == Some(7) && nal.len() > 4 {
             let rbsp = rbsp_unescape(&nal[1..]);

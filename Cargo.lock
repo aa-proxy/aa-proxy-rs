@@ -14,6 +14,7 @@ dependencies = [
  "byteorder",
  "bytes",
  "bytesize",
+ "cc",
  "chrono",
  "clap",
  "config",
