@@ -888,6 +888,10 @@ pub struct AppConfig {
     /// (instead of dropping it), so Android treats aa-proxy-rs as a headset and routes call audio
     /// to the SCO listener. Needs `bt_sco`; read at startup. Default: false.
     pub bt_sco_hsp_responder: bool,
+    /// With `bt_sco_media_bridge_start_on_first_audio`, start the media bridge anyway after the
+    /// start timeout even if the SCO downlink is still silent. Turn off to keep voice recording
+    /// (SCO with no far-end audio) from touching the media channel. Default: true.
+    pub bt_sco_media_bridge_start_on_timeout: bool,
     /// Experimental downlink bridge: SCO call audio -> AA PCM media sink.
     /// Disabled by default. Requires `mitm = true`.
     pub bt_sco_media_bridge: bool,
@@ -1270,6 +1274,7 @@ impl Default for AppConfig {
             bt_sco: false,
             bt_sco_keep_bluetooth_alive: true,
             bt_sco_hsp_responder: false,
+            bt_sco_media_bridge_start_on_timeout: true,
             bt_sco_media_bridge: false,
             bt_sco_media_bridge_audio_type: BtScoMediaBridgeAudioType::Media,
             bt_sco_media_bridge_gain_percent: 300,
@@ -1641,6 +1646,8 @@ impl AppConfig {
         doc["bt_sco"] = value(self.bt_sco);
         doc["bt_sco_keep_bluetooth_alive"] = value(self.bt_sco_keep_bluetooth_alive);
         doc["bt_sco_hsp_responder"] = value(self.bt_sco_hsp_responder);
+        doc["bt_sco_media_bridge_start_on_timeout"] =
+            value(self.bt_sco_media_bridge_start_on_timeout);
         doc["bt_sco_media_bridge"] = value(self.bt_sco_media_bridge);
         doc["bt_sco_media_bridge_audio_type"] =
             value(self.bt_sco_media_bridge_audio_type.to_string());

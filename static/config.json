@@ -732,6 +732,11 @@
               "description": "When `bt_sco` is enabled, keep the Android Auto Bluetooth profile / RFCOMM connection alive after Wi-Fi bootstrap so the phone continues routing call audio to aa-proxy-rs.",
               "requires": "bt_sco"
             },
+            "bt_sco_media_bridge_start_on_timeout": {
+              "typ": "boolean",
+              "description": "With start_on_first_audio, start the media bridge anyway after the start timeout even if the SCO downlink is still silent. Turn off so voice recording (SCO without far-end audio) does not touch the media channel. Default: true.",
+              "requires": "bt_sco_media_bridge"
+            },
             "bt_sco_hsp_responder": {
               "typ": "boolean",
               "description": "Keep the HSP control stream from the phone open and answer its AT commands with OK, so Android treats aa-proxy-rs as a headset and routes call audio to the SCO listener. Needs `bt_sco`; applied at startup.",
