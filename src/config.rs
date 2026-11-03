@@ -884,6 +884,10 @@ pub struct AppConfig {
     /// should keep routing call audio to aa-proxy-rs instead of dropping BT after
     /// the AA Wi-Fi setup phase.
     pub bt_sco_keep_bluetooth_alive: bool,
+    /// Keep the HSP control stream from the phone open and answer its AT commands with `OK`
+    /// (instead of dropping it), so Android treats aa-proxy-rs as a headset and routes call audio
+    /// to the SCO listener. Needs `bt_sco`; read at startup. Default: false.
+    pub bt_sco_hsp_responder: bool,
     /// Experimental downlink bridge: SCO call audio -> AA PCM media sink.
     /// Disabled by default. Requires `mitm = true`.
     pub bt_sco_media_bridge: bool,
@@ -1265,6 +1269,7 @@ impl Default for AppConfig {
             hu_button_handler: None,
             bt_sco: false,
             bt_sco_keep_bluetooth_alive: true,
+            bt_sco_hsp_responder: false,
             bt_sco_media_bridge: false,
             bt_sco_media_bridge_audio_type: BtScoMediaBridgeAudioType::Media,
             bt_sco_media_bridge_gain_percent: 300,
@@ -1635,6 +1640,7 @@ impl AppConfig {
         }
         doc["bt_sco"] = value(self.bt_sco);
         doc["bt_sco_keep_bluetooth_alive"] = value(self.bt_sco_keep_bluetooth_alive);
+        doc["bt_sco_hsp_responder"] = value(self.bt_sco_hsp_responder);
         doc["bt_sco_media_bridge"] = value(self.bt_sco_media_bridge);
         doc["bt_sco_media_bridge_audio_type"] =
             value(self.bt_sco_media_bridge_audio_type.to_string());
