@@ -403,6 +403,11 @@ const SDP_MESSAGE_ACCESS_SERVER_UUID: Uuid = Uuid::from_u128(0x00001132000010008
 const SDP_PNP_INFORMATION_UUID: Uuid = Uuid::from_u128(0x0000120000001000800000805f9b34fb);
 pub const KNOWN_DEVICES_FILE: &str = concat!(crate::base_config_dir!(), "/known_devices");
 
+/// bt_connect_max_delay_secs: longest wait between rounds of "connect to the known phone" attempts
+/// (backoff starts at 1 s and doubles up to this). Set once at startup from the config.
+pub static BT_CONNECT_MAX_DELAY_SECS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(15);
+
 #[derive(Debug, Clone, PartialEq)]
 #[repr(u16)]
 #[allow(unused)]
@@ -5796,7 +5801,11 @@ impl Bluetooth {
 
                         let retry_policy = ExponentialBuilder::default()
                             .with_min_delay(Duration::from_secs(1))
-                            .with_max_delay(Duration::from_secs(15))
+                            .with_max_delay(Duration::from_secs(
+                                BT_CONNECT_MAX_DELAY_SECS
+                                    .load(std::sync::atomic::Ordering::Relaxed)
+                                    .clamp(1, 60),
+                            ))
                             .without_max_times();
 
                         self.current_index = try_connect_bluetooth_addresses_retry
@@ -5976,7 +5985,11 @@ impl Bluetooth {
 
                         let retry_policy = ExponentialBuilder::default()
                             .with_min_delay(Duration::from_secs(1))
-                            .with_max_delay(Duration::from_secs(15))
+                            .with_max_delay(Duration::from_secs(
+                                BT_CONNECT_MAX_DELAY_SECS
+                                    .load(std::sync::atomic::Ordering::Relaxed)
+                                    .clamp(1, 60),
+                            ))
                             .without_max_times();
 
                         self.current_index = try_connect_bluetooth_addresses_retry

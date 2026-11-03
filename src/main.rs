@@ -828,6 +828,10 @@ async fn tokio_main(
         );
     }
 
+    aa_proxy_rs::bluetooth::BT_CONNECT_MAX_DELAY_SECS.store(
+        cfg.bt_connect_max_delay_secs as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
     if cfg.bt_sco && !web_only {
         match bt_sco::spawn(BtScoOptions {
             bridge_aa_media_pcm: cfg.bt_sco_media_bridge,

@@ -89,6 +89,11 @@
           "description": "Bluetooth handshake timeout [seconds], for rare cases when the phone stops responding (prevents the bluetooth handshake deadlock with infinite waiting and not restarting connection again)",
           "advanced": true
         },
+        "bt_connect_max_delay_secs": {
+          "typ": "integer",
+          "description": "Longest wait [seconds] between rounds of Bluetooth connection attempts to the known phone. The wait doubles from 1 s up to this value; lower = the Pi insists more often (1-60, default 15).",
+          "advanced": true
+        },
         "bt_poweroff": {
           "typ": "boolean",
           "description": "Powers off the Bluetooth adapter after the handshake. Intended for use only in specific configurations.",
