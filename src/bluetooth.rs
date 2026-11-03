@@ -383,6 +383,54 @@ async fn discover_rfcomm_channel_via_internal_sdp(hu_addr: Address) -> Result<u8
 
 pub const AAWG_PROFILE_UUID: Uuid = Uuid::from_u128(0x4de17a0052cb11e6bdf40800200c9a66);
 const HSP_HS_UUID: Uuid = Uuid::from_u128(0x0000110800001000800000805f9b34fb);
+
+/// bt_sco_hsp_responder: when true (and bt_sco is on), the HSP control RFCOMM stream accepted from
+/// the phone is kept open and answered by `hsp_respond` instead of being dropped. Set once at startup.
+/// bt_connect_max_delay_secs: longest wait between rounds of "connect to the known phone" attempts
+/// (backoff starts at 1 s and doubles up to this). Set once at startup from the config.
+pub static BT_CONNECT_MAX_DELAY_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(15);
+
+pub static BT_SCO_HSP_RESPONDER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Minimal Headset-role AT responder. Android only routes call audio to a headset whose control
+/// channel stays open and answers; the SCO audio link itself is accepted by the `bt_sco` listener.
+/// Every command gets `OK` (AT+BRSF also gets a zero feature set so a phone that talks HFP does not
+/// stall). Runs until the phone closes the stream.
+async fn hsp_respond(mut stream: bluer::rfcomm::Stream, device: String) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    info!("{} 🎧 HSP responder: holding control stream with <b>{}</>", NAME, device);
+    let mut buf = [0u8; 256];
+    let mut pending: Vec<u8> = Vec::new();
+    loop {
+        let n = match stream.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) => {
+                warn!("{} 🎧 HSP responder: read error from {}: {}", NAME, device, e);
+                break;
+            }
+        };
+        pending.extend_from_slice(&buf[..n]);
+        while let Some(pos) = pending.iter().position(|&b| b == b'\r') {
+            let line: Vec<u8> = pending.drain(..=pos).collect();
+            let cmd = String::from_utf8_lossy(&line).trim().to_string();
+            if cmd.is_empty() {
+                continue;
+            }
+            info!("{} 🎧 HSP responder: <- {:?}", NAME, cmd);
+            let reply: &[u8] = if cmd.to_ascii_uppercase().starts_with("AT+BRSF") {
+                b"\r\n+BRSF: 0\r\n\r\nOK\r\n"
+            } else {
+                b"\r\nOK\r\n"
+            };
+            if let Err(e) = stream.write_all(reply).await {
+                warn!("{} 🎧 HSP responder: write error to {}: {}", NAME, device, e);
+                return;
+            }
+        }
+    }
+    info!("{} 🎧 HSP responder: control stream with {} closed", NAME, device);
+}
 const HSP_AG_UUID: Uuid = Uuid::from_u128(0x0000111200001000800000805f9b34fb);
 
 // Phone-like SDP UUIDs used only as optional, dummy local service records while
@@ -5796,7 +5844,11 @@ impl Bluetooth {
 
                         let retry_policy = ExponentialBuilder::default()
                             .with_min_delay(Duration::from_secs(1))
-                            .with_max_delay(Duration::from_secs(15))
+                            .with_max_delay(Duration::from_secs(
+                                BT_CONNECT_MAX_DELAY_SECS
+                                    .load(std::sync::atomic::Ordering::Relaxed)
+                                    .clamp(1, 60),
+                            ))
                             .without_max_times();
 
                         self.current_index = try_connect_bluetooth_addresses_retry
@@ -5976,7 +6028,11 @@ impl Bluetooth {
 
                         let retry_policy = ExponentialBuilder::default()
                             .with_min_delay(Duration::from_secs(1))
-                            .with_max_delay(Duration::from_secs(15))
+                            .with_max_delay(Duration::from_secs(
+                                BT_CONNECT_MAX_DELAY_SECS
+                                    .load(std::sync::atomic::Ordering::Relaxed)
+                                    .clamp(1, 60),
+                            ))
                             .without_max_times();
 
                         self.current_index = try_connect_bluetooth_addresses_retry
@@ -6387,7 +6443,11 @@ impl Bluetooth {
                                         NAME, device
                                     );
                                 }
-                                drop(stream);
+                                if BT_SCO_HSP_RESPONDER.load(std::sync::atomic::Ordering::Relaxed) {
+                                    tokio::spawn(hsp_respond(stream, device.to_string()));
+                                } else {
+                                    drop(stream);
+                                }
                             }
                             Err(e) => {
                                 warn!(
@@ -7828,7 +7888,11 @@ impl Bluetooth {
                                             device
                                         );
                                     }
-                                    drop(stream);
+                                    if BT_SCO_HSP_RESPONDER.load(std::sync::atomic::Ordering::Relaxed) {
+                                        tokio::spawn(hsp_respond(stream, device.to_string()));
+                                    } else {
+                                        drop(stream);
+                                    }
                                 }
                                 Err(e) => {
                                     warn!(

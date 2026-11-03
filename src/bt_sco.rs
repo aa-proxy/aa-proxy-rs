@@ -867,6 +867,146 @@ pub const AA_MEDIA_PCM_BITS_PER_SAMPLE: u16 = 16;
 #[derive(Debug, Default)]
 pub struct DownlinkResamplerState {
     last_sample: Option<i16>,
+    enhanced: Option<EnhancedVoice>,
+}
+
+/// Direct-form biquad (coefficients normalised by a0).
+#[derive(Debug, Clone)]
+struct Biquad {
+    b0: f32,
+    b1: f32,
+    b2: f32,
+    a1: f32,
+    a2: f32,
+    x1: f32,
+    x2: f32,
+    y1: f32,
+    y2: f32,
+}
+
+impl Biquad {
+    fn new(b0: f64, b1: f64, b2: f64, a0: f64, a1: f64, a2: f64) -> Self {
+        Self {
+            b0: (b0 / a0) as f32,
+            b1: (b1 / a0) as f32,
+            b2: (b2 / a0) as f32,
+            a1: (a1 / a0) as f32,
+            a2: (a2 / a0) as f32,
+            x1: 0.0,
+            x2: 0.0,
+            y1: 0.0,
+            y2: 0.0,
+        }
+    }
+
+    fn lowpass(f: f64, fs: f64) -> Self {
+        let w = 2.0 * std::f64::consts::PI * f / fs;
+        let (c, a) = (w.cos(), w.sin() / 2f64.sqrt());
+        Self::new((1.0 - c) / 2.0, 1.0 - c, (1.0 - c) / 2.0, 1.0 + a, -2.0 * c, 1.0 - a)
+    }
+
+    fn highpass(f: f64, fs: f64) -> Self {
+        let w = 2.0 * std::f64::consts::PI * f / fs;
+        let (c, a) = (w.cos(), w.sin() / 2f64.sqrt());
+        Self::new((1.0 + c) / 2.0, -(1.0 + c), (1.0 + c) / 2.0, 1.0 + a, -2.0 * c, 1.0 - a)
+    }
+
+    fn low_shelf(f: f64, gain_db: f64, fs: f64) -> Self {
+        let a = 10f64.powf(gain_db / 40.0);
+        let w = 2.0 * std::f64::consts::PI * f / fs;
+        let (c, s) = (w.cos(), w.sin());
+        let al = s / 2.0 * 2f64.sqrt();
+        let sq = 2.0 * a.sqrt() * al;
+        Self::new(
+            a * ((a + 1.0) - (a - 1.0) * c + sq),
+            2.0 * a * ((a - 1.0) - (a + 1.0) * c),
+            a * ((a + 1.0) - (a - 1.0) * c - sq),
+            (a + 1.0) + (a - 1.0) * c + sq,
+            -2.0 * ((a - 1.0) + (a + 1.0) * c),
+            (a + 1.0) + (a - 1.0) * c - sq,
+        )
+    }
+
+    fn process(&mut self, v: f32) -> f32 {
+        let o = self.b0 * v + self.b1 * self.x1 + self.b2 * self.x2 - self.a1 * self.y1 - self.a2 * self.y2;
+        self.x2 = self.x1;
+        self.x1 = v;
+        self.y2 = self.y1;
+        self.y1 = o;
+        o
+    }
+}
+
+const ENH_TAPS_PER_PHASE: usize = 24;
+const ENH_FIR_LEN: usize = 6 * ENH_TAPS_PER_PHASE + 1;
+/// Output scale that leaves headroom for the low-shelf boost and the exciter before the
+/// bridge gain/limiter stage.
+const ENH_OUT_SCALE: f32 = 0.85;
+
+/// "Enhanced" call voice: causal polyphase windowed-sinc 6x upsampler (8 -> 48 kHz), +4 dB low
+/// shelf at 350 Hz, and a soft exciter that adds harmonics above 3.8 kHz generated from the
+/// 2-3.6 kHz band. State is kept across chunks. Tuned by ear with a Python simulation.
+#[derive(Debug)]
+struct EnhancedVoice {
+    taps: Vec<f32>,
+    hist: [f32; ENH_TAPS_PER_PHASE + 1],
+    shelf: Biquad,
+    ex_hp_lo: Biquad,
+    ex_lp_hi: Biquad,
+    ex_hp: Biquad,
+}
+
+impl EnhancedVoice {
+    fn new() -> Self {
+        let n = ENH_FIR_LEN;
+        let (fc, fs) = (3900.0f64, 48000.0f64);
+        let mut taps: Vec<f64> = (0..n)
+            .map(|i| {
+                let x = 2.0 * fc / fs * (i as f64 - (n as f64 - 1.0) / 2.0);
+                let sinc = if x == 0.0 { 1.0 } else { (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x) };
+                let m = (n - 1) as f64;
+                let blackman = 0.42
+                    - 0.5 * (2.0 * std::f64::consts::PI * i as f64 / m).cos()
+                    + 0.08 * (4.0 * std::f64::consts::PI * i as f64 / m).cos();
+                sinc * blackman
+            })
+            .collect();
+        let sum: f64 = taps.iter().sum();
+        for t in taps.iter_mut() {
+            *t = *t / sum * 6.0;
+        }
+        Self {
+            taps: taps.into_iter().map(|t| t as f32).collect(),
+            hist: [0.0; ENH_TAPS_PER_PHASE + 1],
+            shelf: Biquad::low_shelf(350.0, 4.0, 48000.0),
+            ex_hp_lo: Biquad::highpass(2000.0, 48000.0),
+            ex_lp_hi: Biquad::lowpass(3600.0, 48000.0),
+            ex_hp: Biquad::highpass(3800.0, 48000.0),
+        }
+    }
+
+    fn push_sample(&mut self, input: i16, output: &mut Vec<u8>) {
+        for k in (1..self.hist.len()).rev() {
+            self.hist[k] = self.hist[k - 1];
+        }
+        self.hist[0] = input as f32 / 32768.0;
+        for p in 0..6 {
+            let mut acc = 0.0f32;
+            for k in 0..=ENH_TAPS_PER_PHASE {
+                let idx = p + 6 * k;
+                if idx < ENH_FIR_LEN {
+                    acc += self.taps[idx] * self.hist[k];
+                }
+            }
+            let s = self.shelf.process(acc);
+            let band = self.ex_lp_hi.process(self.ex_hp_lo.process(s));
+            let hf = self.ex_hp.process((3.0 * band).tanh());
+            let y = ((s + 0.18 * hf) * ENH_OUT_SCALE * 32768.0).clamp(-32768.0, 32767.0) as i16;
+            let b = y.to_le_bytes();
+            output.extend_from_slice(&b);
+            output.extend_from_slice(&b);
+        }
+    }
 }
 
 /// Convert one chunk of SCO linear PCM (`s16le`, mono, 8 kHz) into the
@@ -897,6 +1037,12 @@ pub fn sco_s16le_mono_8k_to_aa_pcm_s16le_stereo_48k(
             BtScoMediaBridgeResampler::Linear => {
                 let previous = state.last_sample.unwrap_or(current);
                 push_stereo_linear_6x(output, previous, current);
+            }
+            BtScoMediaBridgeResampler::Enhanced => {
+                state
+                    .enhanced
+                    .get_or_insert_with(EnhancedVoice::new)
+                    .push_sample(current, output);
             }
         }
         state.last_sample = Some(current);

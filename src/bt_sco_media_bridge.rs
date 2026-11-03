@@ -24,6 +24,12 @@ const DEFAULT_JITTER_BUFFER_MS: u32 = 60;
 const DEFAULT_AUDIO_PEAK_THRESHOLD: u32 = 64;
 const DEFAULT_START_TIMEOUT_MS: u32 = 1500;
 
+/// bt_sco_media_bridge_start_on_timeout: when false, the bridge never sends MEDIA_MESSAGE_START just
+/// because `start_timeout_ms` elapsed with a silent SCO downlink (e.g. voice recording, which opens
+/// SCO but carries no far-end audio); it waits for real audio. Avoids hijacking the media channel
+/// (music) with silence and a later STOP. Set once at startup from the config.
+pub static START_ON_TIMEOUT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
 struct Runtime {
     tx: Mutex<Option<Sender<Packet>>>,
 
@@ -636,7 +642,8 @@ fn ensure_media_started_for_frame(
     let is_non_silent = frame_peak >= threshold;
     let timed_out = elapsed >= timeout;
 
-    if start_on_first_audio && !is_non_silent && !timed_out {
+    let allow_timeout_start = START_ON_TIMEOUT.load(Ordering::Relaxed);
+    if start_on_first_audio && !is_non_silent && (!timed_out || !allow_timeout_start) {
         *silent_frames_before_start += 1;
         if *silent_frames_before_start <= 5 || *silent_frames_before_start % 100 == 0 {
             debug!(

@@ -184,6 +184,8 @@ impl BtScoMediaBridgeLimiter {
 pub enum BtScoMediaBridgeResampler {
     Repeat,
     Linear,
+    /// Windowed-sinc 6x upsampling + low-shelf boost + soft high-frequency exciter (voice "enhanced").
+    Enhanced,
 }
 
 impl Default for BtScoMediaBridgeResampler {
@@ -197,6 +199,7 @@ impl Display for BtScoMediaBridgeResampler {
         f.write_str(match self {
             Self::Repeat => "repeat",
             Self::Linear => "linear",
+            Self::Enhanced => "enhanced",
         })
     }
 }
@@ -683,6 +686,9 @@ pub struct AppConfig {
     )]
     pub webserver: Option<String>,
     pub bt_timeout_secs: u16,
+    /// Longest wait (seconds) between rounds of Bluetooth connection attempts to the known phone.
+    /// The wait doubles from 1 s up to this value; lower = the Pi insists more often. Default: 15.
+    pub bt_connect_max_delay_secs: u16,
     pub mitm: bool,
     /// TLS backend used for MITM: "rustls" (default) or "openssl".
     /// rustls suits modern head units. Use "openssl" for legacy head units that
@@ -881,6 +887,14 @@ pub struct AppConfig {
     /// should keep routing call audio to aa-proxy-rs instead of dropping BT after
     /// the AA Wi-Fi setup phase.
     pub bt_sco_keep_bluetooth_alive: bool,
+    /// Keep the HSP control stream from the phone open and answer its AT commands with `OK`
+    /// (instead of dropping it), so Android treats aa-proxy-rs as a headset and routes call audio
+    /// to the SCO listener. Needs `bt_sco`; read at startup. Default: false.
+    pub bt_sco_hsp_responder: bool,
+    /// With `bt_sco_media_bridge_start_on_first_audio`, start the media bridge anyway after the
+    /// start timeout even if the SCO downlink is still silent. Turn off to keep voice recording
+    /// (SCO with no far-end audio) from touching the media channel. Default: true.
+    pub bt_sco_media_bridge_start_on_timeout: bool,
     /// Experimental downlink bridge: SCO call audio -> AA PCM media sink.
     /// Disabled by default. Requires `mitm = true`.
     pub bt_sco_media_bridge: bool,
@@ -1163,6 +1177,7 @@ impl Default for AppConfig {
             timeout_secs: 10,
             webserver: webserver_default_bind(),
             bt_timeout_secs: 120,
+            bt_connect_max_delay_secs: 15,
             mitm: false,
             tls_backend: "rustls".into(),
             dpi: 0,
@@ -1261,6 +1276,8 @@ impl Default for AppConfig {
             hu_button_handler: None,
             bt_sco: false,
             bt_sco_keep_bluetooth_alive: true,
+            bt_sco_hsp_responder: false,
+            bt_sco_media_bridge_start_on_timeout: true,
             bt_sco_media_bridge: false,
             bt_sco_media_bridge_audio_type: BtScoMediaBridgeAudioType::Media,
             bt_sco_media_bridge_gain_percent: 300,
@@ -1531,6 +1548,7 @@ impl AppConfig {
             doc["webserver"] = value(webserver);
         }
         doc["bt_timeout_secs"] = value(self.bt_timeout_secs as i64);
+        doc["bt_connect_max_delay_secs"] = value(self.bt_connect_max_delay_secs as i64);
         doc["mitm"] = value(self.mitm);
         doc["tls_backend"] = value(self.tls_backend.to_string());
         doc["dpi"] = value(self.dpi as i64);
@@ -1630,6 +1648,8 @@ impl AppConfig {
         }
         doc["bt_sco"] = value(self.bt_sco);
         doc["bt_sco_keep_bluetooth_alive"] = value(self.bt_sco_keep_bluetooth_alive);
+        doc["bt_sco_hsp_responder"] = value(self.bt_sco_hsp_responder);
+        doc["bt_sco_media_bridge_start_on_timeout"] = value(self.bt_sco_media_bridge_start_on_timeout);
         doc["bt_sco_media_bridge"] = value(self.bt_sco_media_bridge);
         doc["bt_sco_media_bridge_audio_type"] =
             value(self.bt_sco_media_bridge_audio_type.to_string());
