@@ -184,6 +184,8 @@ impl BtScoMediaBridgeLimiter {
 pub enum BtScoMediaBridgeResampler {
     Repeat,
     Linear,
+    /// Windowed-sinc 6x upsampling + low-shelf boost + soft high-frequency exciter (voice "enhanced").
+    Enhanced,
 }
 
 impl Default for BtScoMediaBridgeResampler {
@@ -197,6 +199,7 @@ impl Display for BtScoMediaBridgeResampler {
         f.write_str(match self {
             Self::Repeat => "repeat",
             Self::Linear => "linear",
+            Self::Enhanced => "enhanced",
         })
     }
 }

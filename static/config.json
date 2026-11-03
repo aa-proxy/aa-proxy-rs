@@ -772,8 +772,8 @@
                 },
                 "bt_sco_media_bridge_resampler": {
                   "typ": "select",
-                  "description": "SCO 8 kHz → AA 48 kHz resampler. `repeat` preserves the proven path; `linear` smooths the 6× upsampling and may reduce crackle.",
-                  "values": ["repeat", "linear"],
+                  "description": "SCO 8 kHz → AA 48 kHz resampler. `repeat` preserves the proven path; `linear` smooths the 6× upsampling and may reduce crackle; `enhanced` uses a windowed-sinc filter plus a low-shelf boost and a soft high-frequency exciter (less metallic call voice).",
+                  "values": ["repeat", "linear", "enhanced"],
                   "requires": "bt_sco_media_bridge",
                   "advanced": true
                 },
