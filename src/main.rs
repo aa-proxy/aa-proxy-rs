@@ -832,6 +832,10 @@ async fn tokio_main(
         cfg.bt_sco_media_bridge_start_on_timeout,
         std::sync::atomic::Ordering::Relaxed,
     );
+    aa_proxy_rs::bluetooth::BT_CONNECT_ATTEMPT_TIMEOUT_SECS.store(
+        cfg.bt_connect_attempt_timeout_secs as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
     aa_proxy_rs::bluetooth::BT_CONNECT_MAX_DELAY_SECS.store(
         cfg.bt_connect_max_delay_secs as u64,
         std::sync::atomic::Ordering::Relaxed,
