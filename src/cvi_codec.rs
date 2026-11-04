@@ -22,7 +22,7 @@
 //! | `AA_PROXY_CVI_MAX_W`/`_MAX_H`  | 1920x1088 | largest picture the shared VB pool must hold   |
 //! | `AA_PROXY_CVI_VB_BLOCKS`       | 12      | number of blocks in the shared VB pool           |
 //! | `AA_PROXY_CVI_BITRATE_KBPS`    | 4000    | encoder CBR bitrate                              |
-//! | `AA_PROXY_CVI_DISPLAY_FRAMES`  | 2       | decoder display queue (0..16), lower = less lag  |
+//! | `AA_PROXY_CVI_DISPLAY_FRAMES`  | 0       | decoder display queue (0..16), lower = less lag  |
 //! | `AA_PROXY_CVI_PROFILE`         | 0       | encoder H.264 profile: 0 baseline, 1 main, 2 high |
 
 use crate::v4l2_m2m::{extract_sps_pps_annex_b, split_annex_b_nals};
@@ -39,16 +39,22 @@ const DEFAULT_MAX_W: u32 = 1920;
 const DEFAULT_MAX_H: u32 = 1088;
 const DEFAULT_VB_BLOCKS: u32 = 12;
 const DEFAULT_BITRATE_KBPS: u32 = 4000;
-const DEFAULT_DISPLAY_FRAMES: u32 = 2;
+const DEFAULT_DISPLAY_FRAMES: u32 = 0;
 const DEFAULT_PROFILE: u32 = 0; // baseline: what strict car head units expect
 const ENC_FPS: u32 = 30;
 
 /// Wait for the encoder in steady state (the V4L2 encoder uses 45 ms).
-const ENC_TIMEOUT_MS: c_int = 60;
+const ENC_TIMEOUT_MS: c_int = 150;
 /// The very first frame of a channel can take much longer.
 const ENC_WARMUP_TIMEOUT_MS: c_int = 1000;
 const DEC_SEND_TIMEOUT_MS: c_int = 100;
-const DEC_GET_TIMEOUT_MS: c_int = 40;
+/// Every access unit the proxy swallows is one the car never ACKs, and the phone only has a
+/// handful of un-ACKed frames in flight (the first IDR alone can stall the whole session), so
+/// the decoder is waited for generously: the first picture of a channel needs the VPU to boot.
+const DEC_GET_FIRST_TIMEOUT_MS: c_int = 1000;
+const DEC_GET_TIMEOUT_MS: c_int = 150;
+/// The first few frames of each codec are logged at info level to diagnose bring-up problems.
+const TRACE_FRAMES: u64 = 8;
 
 const AAP_OK: c_int = 0;
 const AAP_AGAIN: c_int = 1;
@@ -85,6 +91,7 @@ mod ffi {
             bitrate_kbps: c_uint,
             fps: c_uint,
             profile: c_uint,
+            fixed_qp: c_uint,
         ) -> c_int;
         pub fn aap_cvi_enc_close(e: *mut AapEnc);
         pub fn aap_cvi_enc_request_idr(e: *mut AapEnc) -> c_int;
@@ -140,6 +147,7 @@ mod ffi {
     }
     pub unsafe fn aap_cvi_enc_open(
         out: *mut *mut AapEnc,
+        _: c_uint,
         _: c_uint,
         _: c_uint,
         _: c_uint,
@@ -296,6 +304,9 @@ pub struct CviDecoder {
     config: Vec<u8>,
     pts: u64,
     display_frames: u32,
+    /// Access units sent / pictures returned since the channel was created.
+    sent: u64,
+    got: u64,
 }
 
 // SAFETY: the handle is only ever used through `&mut self`; the vendor library keeps
@@ -324,6 +335,8 @@ impl CviDecoder {
             chn_dims: None,
             config: Vec::new(),
             pts: 0,
+            sent: 0,
+            got: 0,
             display_frames: env_u32("AA_PROXY_CVI_DISPLAY_FRAMES", DEFAULT_DISPLAY_FRAMES).min(16),
         })
     }
@@ -361,6 +374,8 @@ impl CviDecoder {
         );
         self.dec = dec;
         self.chn_dims = Some(dims);
+        self.sent = 0;
+        self.got = 0;
         Ok(())
     }
 
@@ -427,15 +442,49 @@ impl CviDecoder {
         if r != AAP_OK {
             return Err(other_err("CVI decoder send"));
         }
+        self.sent += 1;
 
-        self.fetch_frame()
+        let t0 = std::time::Instant::now();
+        let res = self.fetch_frame()?;
+        if res.is_some() {
+            self.got += 1;
+        }
+        if self.sent <= TRACE_FRAMES || (res.is_none() && self.sent > self.got) {
+            let lvl = if res.is_none() && self.sent > TRACE_FRAMES {
+                log::Level::Warn
+            } else {
+                log::Level::Info
+            };
+            log::log!(
+                lvl,
+                "cvi: dec AU #{} {} B idr={} sps={} -> {} in {} ms (sent={} got={})",
+                self.sent,
+                input.len(),
+                info.has_idr,
+                info.has_sps,
+                if res.is_some() {
+                    "picture"
+                } else {
+                    "NO picture"
+                },
+                t0.elapsed().as_millis(),
+                self.sent,
+                self.got
+            );
+        }
+        Ok(res)
     }
 
     /// Fetches the newest decoded picture, dropping stale ones so latency stays bounded.
     fn fetch_frame(&mut self) -> io::Result<Option<YuvFrame>> {
         let (mut w, mut h): (c_uint, c_uint) = (0, 0);
         // SAFETY: valid out-pointers; the frame is held inside the decoder until take/drop/next get.
-        let r = unsafe { ffi::aap_cvi_dec_get(self.dec, DEC_GET_TIMEOUT_MS, &mut w, &mut h) };
+        let timeout = if self.got == 0 {
+            DEC_GET_FIRST_TIMEOUT_MS
+        } else {
+            DEC_GET_TIMEOUT_MS
+        };
+        let r = unsafe { ffi::aap_cvi_dec_get(self.dec, timeout, &mut w, &mut h) };
         if r == AAP_AGAIN {
             return Ok(None);
         }
@@ -510,6 +559,7 @@ pub struct CviEncoder {
     width: usize,
     height: usize,
     header_bytes: Vec<u8>,
+    frames: u64,
 }
 
 // SAFETY: see CviDecoder.
@@ -518,7 +568,7 @@ unsafe impl Send for CviEncoder {}
 impl CviEncoder {
     /// Creates a baseline CBR hardware encoder for `width`x`height` and a GOP of `gop` frames.
     /// The quantiser is ignored (rate control is CBR, like the V4L2 encoder path).
-    pub fn new(width: usize, height: usize, _qp: u8, gop: u32) -> io::Result<Self> {
+    pub fn new(width: usize, height: usize, qp: u8, gop: u32) -> io::Result<Self> {
         if !cfg!(feature = "cvi") {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -541,6 +591,15 @@ impl CviEncoder {
 
         let bitrate = env_u32("AA_PROXY_CVI_BITRATE_KBPS", DEFAULT_BITRATE_KBPS);
         let profile = env_u32("AA_PROXY_CVI_PROFILE", DEFAULT_PROFILE);
+        // Fixed QP (constant quality) by default: UI content is mostly static and CBR left the
+        // picture visibly smeared. `AA_PROXY_CVI_RC=cbr` restores constant bitrate.
+        let fixed_qp =
+            if std::env::var("AA_PROXY_CVI_RC").is_ok_and(|v| v.eq_ignore_ascii_case("cbr")) {
+                0
+            } else {
+                let q = env_u32("AA_PROXY_CVI_QP", if qp == 0 { 26 } else { qp as u32 });
+                q.clamp(10, 45)
+            };
         let mut enc: *mut AapEnc = std::ptr::null_mut();
         // SAFETY: `enc` is a valid out-pointer.
         let r = unsafe {
@@ -552,6 +611,7 @@ impl CviEncoder {
                 bitrate as c_uint,
                 ENC_FPS as c_uint,
                 profile as c_uint,
+                fixed_qp as c_uint,
             )
         };
         if r != AAP_OK || enc.is_null() {
@@ -562,6 +622,7 @@ impl CviEncoder {
             width,
             height,
             header_bytes: Vec::new(),
+            frames: 0,
         };
 
         // Warm up with a black frame to learn the genuine SPS/PPS (same approach as the V4L2
@@ -580,10 +641,13 @@ impl CviEncoder {
                     warn!("cvi: warm-up access unit carried no SPS/PPS");
                 } else {
                     info!(
-                        "cvi: extracted {} bytes SPS+PPS from the hardware encoder",
-                        hdr.len()
+                        "cvi: extracted {} bytes SPS+PPS from the hardware encoder: {:02X?}",
+                        hdr.len(),
+                        hdr
                     );
-                    encoder.header_bytes = hdr;
+                    let patched = crate::overlay::patch_hw_annex_b_for_car_hu(&hdr);
+                    info!("cvi: SPS+PPS sent to the car: {:02X?}", patched);
+                    encoder.header_bytes = patched;
                 }
             }
             Err(e) => warn!("cvi: encoder warm-up frame failed: {e}"),
@@ -591,8 +655,16 @@ impl CviEncoder {
         encoder.request_keyframe();
 
         info!(
-            "cvi: hardware H.264 encoder ready ({}x{}, GOP={}, {} kbit/s CBR, profile {})",
-            width, height, gop, bitrate, profile
+            "cvi: hardware H.264 encoder ready ({}x{}, GOP={}, {}, profile {})",
+            width,
+            height,
+            gop,
+            if fixed_qp == 0 {
+                format!("{bitrate} kbit/s CBR")
+            } else {
+                format!("fixed QP {fixed_qp}")
+            },
+            profile
         );
         Ok(encoder)
     }
@@ -608,7 +680,29 @@ impl CviEncoder {
 
     /// Encodes a raw frame into one Annex-B access unit.
     pub fn encode(&mut self, frame: &YuvFrame) -> io::Result<Vec<u8>> {
-        let mut au = self.encode_with_timeout(frame, ENC_TIMEOUT_MS)?;
+        let t0 = std::time::Instant::now();
+        let res = self.encode_with_timeout(frame, ENC_TIMEOUT_MS);
+        self.frames += 1;
+        if self.frames <= TRACE_FRAMES {
+            match &res {
+                Ok(au) => {
+                    let i = analyze_au(au);
+                    info!(
+                        "cvi: enc frame #{} -> {} B idr={} sps={} in {} ms",
+                        self.frames,
+                        au.len(),
+                        i.has_idr,
+                        i.has_sps,
+                        t0.elapsed().as_millis()
+                    );
+                }
+                Err(e) => info!("cvi: enc frame #{} -> {e}", self.frames),
+            }
+        }
+        let mut au = res?;
+        if analyze_au(&au).has_sps {
+            au = crate::overlay::patch_hw_annex_b_for_car_hu(&au);
+        }
         // Make every IDR self-contained even if the encoder only emits SPS/PPS once.
         if !self.header_bytes.is_empty() {
             let info = analyze_au(&au);

@@ -47,11 +47,13 @@ int aap_cvi_sys_init(unsigned max_w, unsigned max_h, unsigned blk_cnt);
 /* ------------------------------------------------------------- encoder */
 
 /*
- * `profile`: 0 baseline, 1 main, 2 high. `gop` in frames, `bitrate_kbps` CBR.
+ * `profile`: 0 baseline, 1 main, 2 high. `gop` in frames. `fixed_qp` != 0 selects
+ * fixed-QP rate control (constant quality, best for mostly static UI content),
+ * otherwise CBR with `bitrate_kbps`.
  * Allocates the lowest free hardware channel.
  */
 int aap_cvi_enc_open(aap_cvi_enc **out, unsigned w, unsigned h, unsigned gop, unsigned bitrate_kbps,
-		     unsigned fps, unsigned profile);
+		     unsigned fps, unsigned profile, unsigned fixed_qp);
 void aap_cvi_enc_close(aap_cvi_enc *e);
 int aap_cvi_enc_request_idr(aap_cvi_enc *e);
 

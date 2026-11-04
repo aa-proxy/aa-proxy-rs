@@ -138,7 +138,7 @@ struct aap_cvi_enc {
 };
 
 int aap_cvi_enc_open(aap_cvi_enc **out, unsigned w, unsigned h, unsigned gop, unsigned bitrate_kbps,
-		     unsigned fps, unsigned profile)
+		     unsigned fps, unsigned profile, unsigned fixed_qp)
 {
 	aap_cvi_enc *e;
 	VENC_CHN_ATTR_S a;
@@ -180,13 +180,25 @@ int aap_cvi_enc_open(aap_cvi_enc **out, unsigned w, unsigned h, unsigned gop, un
 	a.stGopAttr.enGopMode = VENC_GOPMODE_NORMALP; /* no B-frames: output order == input order */
 	a.stGopAttr.stNormalP.s32IPQpDelta = 2;
 
-	a.stRcAttr.enRcMode = VENC_RC_MODE_H264CBR;
-	a.stRcAttr.stH264Cbr.u32Gop = gop;
-	a.stRcAttr.stH264Cbr.u32StatTime = 0;
-	a.stRcAttr.stH264Cbr.u32SrcFrameRate = fps;
-	a.stRcAttr.stH264Cbr.fr32DstFrameRate = fps;
-	a.stRcAttr.stH264Cbr.bVariFpsEn = 0;
-	a.stRcAttr.stH264Cbr.u32BitRate = bitrate_kbps; /* kbit/s */
+	if (fixed_qp) {
+		if (fixed_qp > 51)
+			fixed_qp = 51;
+		a.stRcAttr.enRcMode = VENC_RC_MODE_H264FIXQP;
+		a.stRcAttr.stH264FixQp.u32Gop = gop;
+		a.stRcAttr.stH264FixQp.u32SrcFrameRate = fps;
+		a.stRcAttr.stH264FixQp.fr32DstFrameRate = fps;
+		a.stRcAttr.stH264FixQp.u32IQp = fixed_qp;
+		a.stRcAttr.stH264FixQp.u32PQp = fixed_qp;
+		a.stRcAttr.stH264FixQp.bVariFpsEn = 0;
+	} else {
+		a.stRcAttr.enRcMode = VENC_RC_MODE_H264CBR;
+		a.stRcAttr.stH264Cbr.u32Gop = gop;
+		a.stRcAttr.stH264Cbr.u32StatTime = 0;
+		a.stRcAttr.stH264Cbr.u32SrcFrameRate = fps;
+		a.stRcAttr.stH264Cbr.fr32DstFrameRate = fps;
+		a.stRcAttr.stH264Cbr.bVariFpsEn = 0;
+		a.stRcAttr.stH264Cbr.u32BitRate = bitrate_kbps; /* kbit/s */
+	}
 
 	pthread_mutex_lock(&g_lock);
 	for (chn = 0; chn < AAP_MAX_CHN; chn++) {
@@ -198,6 +210,22 @@ int aap_cvi_enc_open(aap_cvi_enc **out, unsigned w, unsigned h, unsigned gop, un
 			found = chn;
 			break;
 		}
+	}
+	if (found >= 0 && profile == 0) {
+		/* The encoder defaults to CABAC (and then announces Main profile) whatever
+		 * u32Profile says. A "baseline" car HU needs CAVLC. Not fatal if refused:
+		 * the Rust side inspects the PPS and refuses to relabel a CABAC stream. */
+		VENC_H264_ENTROPY_S ent;
+
+		memset(&ent, 0, sizeof(ent));
+		if (CVI_VENC_GetH264Entropy(found, &ent) != CVI_SUCCESS)
+			memset(&ent, 0, sizeof(ent));
+		ent.u32EntropyEncModeI = 0;
+		ent.u32EntropyEncModeP = 0;
+		ent.u32EntropyEncModeB = 0;
+		r = CVI_VENC_SetH264Entropy(found, &ent);
+		if (r != CVI_SUCCESS)
+			fprintf(stderr, "aap_cvi: CVI_VENC_SetH264Entropy(CAVLC) -> 0x%x\n", (unsigned)r);
 	}
 	if (found >= 0) {
 		rp.s32RecvPicNum = -1;
@@ -554,7 +582,10 @@ int aap_cvi_dec_get(aap_cvi_dec *d, int timeout_ms, unsigned *w, unsigned *h)
 	r = CVI_VDEC_GetFrame(d->chn, &nf, timeout_ms);
 	if (r != CVI_SUCCESS) {
 		/* a frame fetched earlier stays held: the caller may still take it */
-		if (r == CVI_ERR_VDEC_BUSY || r == CVI_ERR_VDEC_BUF_EMPTY)
+		/* ERR_INVALID_RET is what the VDEC returns while no picture is ready
+		 * yet (display queue still filling); sample_vdecvo retries on it. */
+		if (r == CVI_ERR_VDEC_BUSY || r == CVI_ERR_VDEC_BUF_EMPTY ||
+		    r == CVI_ERR_VDEC_ERR_INVALID_RET)
 			return AAP_CVI_AGAIN;
 		set_err("CVI_VDEC_GetFrame", r);
 		return AAP_CVI_ERR;

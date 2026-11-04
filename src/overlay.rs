@@ -1922,7 +1922,7 @@ fn encode_decoded_video_frame(
                     // A single slow hardware frame is not a reason to give up on the
                     // hardware encoder: drop this frame and keep going.
                     state.hw_enc_timeouts += 1;
-                    debug!(
+                    warn!(
                         "overlay: ch {:#04x} hardware encode timeout ({}/{})",
                         channel, state.hw_enc_timeouts, HW_ENC_MAX_CONSECUTIVE_TIMEOUTS
                     );
@@ -2243,6 +2243,124 @@ fn patch_annex_b_for_car_hu(encoded_au: Vec<u8>) -> Vec<u8> {
         out.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
         if nal.first().map(|&b| b & 0x1F) == Some(7) {
             out.extend_from_slice(&patch_sps_nal_for_car_hu(nal));
+        } else {
+            out.extend_from_slice(nal);
+        }
+    }
+    out
+}
+
+/// Reads an unsigned Exp-Golomb value starting at bit `*pos` of `data`.
+fn read_ue(data: &[u8], pos: &mut usize) -> Option<u32> {
+    let bit =
+        |p: usize| -> Option<u32> { data.get(p / 8).map(|b| ((b >> (7 - (p % 8))) & 1) as u32) };
+    let mut zeros = 0usize;
+    while bit(*pos)? == 0 {
+        zeros += 1;
+        *pos += 1;
+        if zeros > 31 {
+            return None;
+        }
+    }
+    *pos += 1; // the terminating '1'
+    let mut v = 0u32;
+    for _ in 0..zeros {
+        v = (v << 1) | bit(*pos)?;
+        *pos += 1;
+    }
+    Some((1u32 << zeros) - 1 + v)
+}
+
+/// `Some(true)` when the PPS NAL (without start code) selects CABAC, `Some(false)` for CAVLC.
+fn pps_uses_cabac(pps_nal: &[u8]) -> Option<bool> {
+    if pps_nal.len() < 3 {
+        return None;
+    }
+    let rbsp = rbsp_unescape(&pps_nal[1..]);
+    let mut pos = 0usize;
+    read_ue(&rbsp, &mut pos)?; // pic_parameter_set_id
+    read_ue(&rbsp, &mut pos)?; // seq_parameter_set_id
+    let byte = *rbsp.get(pos / 8)?;
+    Some((byte >> (7 - (pos % 8))) & 1 == 1)
+}
+
+/// `true` when the SPS (Baseline/Main, `poc_type` 0 or 2) is fully parsed and its
+/// `vui_parameters_present_flag` is the last bit before the RBSP stop bit and is 0, i.e. the
+/// VUI can safely be appended. Anything unusual returns `false` (the SPS is left alone).
+fn sps_without_vui(sps_nal: &[u8]) -> bool {
+    let rbsp = rbsp_unescape(&sps_nal[1..]);
+    let Some(&last) = rbsp.last() else {
+        return false;
+    };
+    if last == 0 || rbsp.len() < 5 || !matches!(rbsp[0], 66 | 77) {
+        return false;
+    }
+    let total_bits = rbsp.len() * 8 - 1 - last.trailing_zeros() as usize;
+    let mut pos = 24usize; // profile_idc, constraint flags, level_idc
+    let bit = |p: usize| (rbsp[p / 8] >> (7 - (p % 8))) & 1;
+    let mut ue = |pos: &mut usize| read_ue(&rbsp, pos);
+    let ok = (|| -> Option<bool> {
+        ue(&mut pos)?; // sps_id
+        ue(&mut pos)?; // log2_max_frame_num_minus4
+        match ue(&mut pos)? {
+            0 => {
+                ue(&mut pos)?; // log2_max_pic_order_cnt_lsb_minus4
+            }
+            2 => {}
+            _ => return None,
+        }
+        ue(&mut pos)?; // max_num_ref_frames
+        pos += 1; // gaps_in_frame_num_value_allowed_flag
+        ue(&mut pos)?; // width
+        ue(&mut pos)?; // height
+        if pos >= total_bits {
+            return None;
+        }
+        let frame_mbs_only = bit(pos) == 1;
+        pos += 1;
+        if !frame_mbs_only {
+            pos += 1; // mb_adaptive_frame_field_flag
+        }
+        pos += 1; // direct_8x8_inference_flag
+        if pos >= total_bits {
+            return None;
+        }
+        let crop = bit(pos) == 1;
+        pos += 1;
+        if crop {
+            for _ in 0..4 {
+                ue(&mut pos)?;
+            }
+        }
+        Some(pos + 1 == total_bits && pos < total_bits && bit(pos) == 0)
+    })();
+    ok.unwrap_or(false)
+}
+
+/// Makes the output of a hardware encoder (Sophgo CVI) acceptable to a strict car head unit,
+/// the same way [`patch_annex_b_for_car_hu`] does for the software encoder:
+/// the SPS gets the zero-latency VUI (`max_num_reorder_frames = 0`, `max_dec_frame_buffering = 1`;
+/// without it the HU decoder holds frames back for DPB reordering and the AA video flow
+/// control stalls) and the Constrained Baseline flags. When the stream is CAVLC (no CABAC)
+/// the SPS is also relabelled from Main/High to Baseline (`profile_idc = 66`); a CABAC
+/// stream is never relabelled because it is not a valid Baseline stream.
+pub(crate) fn patch_hw_annex_b_for_car_hu(au: &[u8]) -> Vec<u8> {
+    let nals: Vec<&[u8]> = split_annex_b_nals(au);
+    let cavlc = nals
+        .iter()
+        .find(|n| n.first().map(|&b| b & 0x1F) == Some(8))
+        .and_then(|n| pps_uses_cabac(n))
+        .map(|cabac| !cabac)
+        .unwrap_or(false);
+    let mut out = Vec::with_capacity(au.len() + 16);
+    for nal in nals {
+        out.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+        if nal.first().map(|&b| b & 0x1F) == Some(7) && nal.len() > 4 && sps_without_vui(nal) {
+            let mut sps = nal.to_vec();
+            if cavlc && matches!(sps[1], 77 | 100) {
+                sps[1] = 66;
+            }
+            out.extend_from_slice(&patch_sps_nal_for_car_hu(&sps));
         } else {
             out.extend_from_slice(nal);
         }
@@ -3782,6 +3900,37 @@ const FONT8X8_BASIC: [[u8; 8]; 95] = [
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn hw_header_patch_relabels_cavlc_only() {
+        let sps = [
+            0x00, 0x00, 0x00, 0x01, 0x67, 0x4D, 0x40, 0x1F, 0xA6, 0x80, 0xC8, 0x3D, 0x90,
+        ];
+        let pps_cabac = [0x00, 0x00, 0x00, 0x01, 0x68, 0xEE, 0x38, 0x80];
+        let pps_cavlc = [0x00, 0x00, 0x00, 0x01, 0x68, 0xCE, 0x38, 0x80];
+
+        let mut cabac = sps.to_vec();
+        cabac.extend_from_slice(&pps_cabac);
+        let out = patch_hw_annex_b_for_car_hu(&cabac);
+        let nals = split_annex_b_nals(&out);
+        assert_eq!(
+            nals[0][1], 0x4D,
+            "CABAC stream must not be relabelled as Baseline"
+        );
+        assert_eq!(nals[1], &pps_cabac[4..]);
+
+        let mut cavlc = sps.to_vec();
+        cavlc.extend_from_slice(&pps_cavlc);
+        let out = patch_hw_annex_b_for_car_hu(&cavlc);
+        let nals = split_annex_b_nals(&out);
+        assert_eq!(nals[0][1], 66, "CAVLC stream is relabelled Baseline");
+        assert_eq!(nals[0][2] & 0xC0, 0xC0, "constrained baseline flags");
+        assert!(nals[0].len() > sps.len() - 4, "VUI added");
+        assert_eq!(nals[1], &pps_cavlc[4..]);
+        // idempotent: a second pass must not add a second VUI
+        let again = patch_hw_annex_b_for_car_hu(&out);
+        assert_eq!(again, out);
+    }
     use super::*;
 
     #[test]
