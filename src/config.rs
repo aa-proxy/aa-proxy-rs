@@ -689,6 +689,9 @@ pub struct AppConfig {
     /// Longest wait (seconds) between rounds of Bluetooth connection attempts to the known phone.
     /// The wait doubles from 1 s up to this value; lower = the Pi insists more often. Default: 15.
     pub bt_connect_max_delay_secs: u16,
+    /// Per-attempt limit (seconds, 0 = off) when the Pi connects to the known phone: abort a pending
+    /// attempt after this long instead of waiting ~50 s for BlueZ to give up. Default: 0.
+    pub bt_connect_attempt_timeout_secs: u16,
     pub mitm: bool,
     /// TLS backend used for MITM: "rustls" (default) or "openssl".
     /// rustls suits modern head units. Use "openssl" for legacy head units that
@@ -1178,6 +1181,7 @@ impl Default for AppConfig {
             webserver: webserver_default_bind(),
             bt_timeout_secs: 120,
             bt_connect_max_delay_secs: 15,
+            bt_connect_attempt_timeout_secs: 0,
             mitm: false,
             tls_backend: "rustls".into(),
             dpi: 0,
@@ -1549,6 +1553,7 @@ impl AppConfig {
         }
         doc["bt_timeout_secs"] = value(self.bt_timeout_secs as i64);
         doc["bt_connect_max_delay_secs"] = value(self.bt_connect_max_delay_secs as i64);
+        doc["bt_connect_attempt_timeout_secs"] = value(self.bt_connect_attempt_timeout_secs as i64);
         doc["mitm"] = value(self.mitm);
         doc["tls_backend"] = value(self.tls_backend.to_string());
         doc["dpi"] = value(self.dpi as i64);

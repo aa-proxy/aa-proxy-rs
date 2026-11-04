@@ -390,6 +390,12 @@ const HSP_HS_UUID: Uuid = Uuid::from_u128(0x0000110800001000800000805f9b34fb);
 /// (backoff starts at 1 s and doubles up to this). Set once at startup from the config.
 pub static BT_CONNECT_MAX_DELAY_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(15);
 
+/// bt_connect_attempt_timeout_secs: per-attempt limit (0 = off) for "connect to the known phone".
+/// An absent phone makes BlueZ wait ~50 s (br-connection-timeout) before the next attempt, so a phone
+/// that comes into range mid-attempt is only noticed on the next round. With a short limit the Pi
+/// aborts (Disconnect) and tries again quickly. Set once at startup from the config.
+pub static BT_CONNECT_ATTEMPT_TIMEOUT_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub static BT_SCO_HSP_RESPONDER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Minimal Headset-role AT responder. Android only routes call audio to a headset whose control
@@ -6272,13 +6278,25 @@ impl Bluetooth {
                     // shorter timeout and explicitly Disconnect() to clear the stale
                     // pending connect (otherwise subsequent calls may return
                     // InProgress / br-connection-busy forever).
+                    // bt_connect_attempt_timeout_secs (> 0) overrides the default limit with a
+                    // shorter one, so a phone that shows up in the middle of a pending attempt
+                    // is found in seconds instead of after CONNECT_PROFILE_TIMEOUT.
+                    let attempt_limit = BT_CONNECT_ATTEMPT_TIMEOUT_SECS.load(std::sync::atomic::Ordering::Relaxed);
+                    let attempt_timeout = if attempt_limit > 0 {
+                        Duration::from_secs(attempt_limit)
+                    } else {
+                        CONNECT_PROFILE_TIMEOUT
+                    };
                     let started = Instant::now();
-                    match timeout(
-                        CONNECT_PROFILE_TIMEOUT,
-                        device.connect_profile(&HSP_AG_UUID),
-                    )
-                    .await
-                    {
+                    match timeout(attempt_timeout, device.connect_profile(&HSP_AG_UUID)).await {
+                        // After a pending attempt was aborted, BlueZ may still report success
+                        // without the phone being connected; only trust it if the device is.
+                        Ok(Ok(_)) if attempt_limit > 0 && !device.is_connected().await.unwrap_or(false) => {
+                            warn!(
+                                "{} 🔇 {}{}: BlueZ reported success but the phone is not connected, retrying",
+                                NAME, addr, dev_name
+                            );
+                        }
                         Ok(Ok(_)) => {
                             info!(
                                 "{} 🔗 Successfully connected to device: {}{}",

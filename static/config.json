@@ -94,6 +94,11 @@
           "description": "Longest wait [seconds] between rounds of Bluetooth connection attempts to the known phone. The wait doubles from 1 s up to this value; lower = the Pi insists more often (1-60, default 15).",
           "advanced": true
         },
+        "bt_connect_attempt_timeout_secs": {
+          "typ": "integer",
+          "description": "Per-attempt limit [seconds, 0 = off] when the Pi connects to the known phone: abort a pending attempt after this long instead of waiting ~50 s for BlueZ to give up, so a phone that comes into range is noticed quickly (e.g. 8).",
+          "advanced": true
+        },
         "bt_poweroff": {
           "typ": "boolean",
           "description": "Powers off the Bluetooth adapter after the handshake. Intended for use only in specific configurations.",
