@@ -1763,3 +1763,7 @@ body.show-advanced .rail-advanced .rail-advanced-label {
   letter-spacing: normal;
   font-weight: 400;
 }
+
+#wasm-hooks-panel {
+  margin-top: 2.5rem;
+}

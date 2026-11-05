@@ -53,7 +53,10 @@ pub fn start_wasm_engine(
     fs::create_dir_all(&hook_dir)
         .with_context(|| format!("[wasm] failed to create hooks dir {}", hook_dir.display()))?;
 
-    let script_registry = Arc::new(ScriptRegistry::new(script_parameters));
+    let script_registry = Arc::new(ScriptRegistry {
+        hook_dir: hook_dir.clone(),
+        ..ScriptRegistry::new(script_parameters)
+    });
 
     let old_scripts = script_registry.reload_dir(&hook_dir);
     runtime.block_on(destroy_loaded_scripts(old_scripts));
@@ -87,35 +90,19 @@ pub fn start_wasm_engine(
     runtime.spawn(async move {
         let _wasm_watcher = wasm_watcher;
         while let Some(res) = watch_rx.recv().await {
-            let triggered = match res {
-                Ok(event) => {
-                    matches!(
-                        event.kind,
-                        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-                    ) && (event.paths.is_empty()
-                        || event
-                            .paths
-                            .iter()
-                            .any(|p| p.extension().map(|e| e == "wasm").unwrap_or(false)))
-                }
-                Err(err) => {
-                    error!("[wasm] watcher error: {}", err);
-                    false
-                }
-            };
-
-            if !triggered {
+            if !hook_changed(res) {
                 continue;
             }
 
-            // Drain any further events that arrive within the debounce window so
-            // a multi-write transfer (e.g. scp) only causes a single reload.
-            while let Ok(Some(_)) = tokio::time::timeout(
-                Duration::from_millis(WASM_RELOAD_DEBOUNCE_MS),
-                watch_rx.recv(),
-            )
-            .await
-            {}
+            // Only hook changes extend the debounce window. Directory reads
+            // from the status API must not postpone a pending reload.
+            let delay = Duration::from_millis(WASM_RELOAD_DEBOUNCE_MS);
+            let mut deadline = tokio::time::Instant::now() + delay;
+            while let Ok(Some(event)) = tokio::time::timeout_at(deadline, watch_rx.recv()).await {
+                if hook_changed(event) {
+                    deadline = tokio::time::Instant::now() + delay;
+                }
+            }
 
             let old_scripts = script_registry_for_watch.reload_dir(&hook_dir_for_watch);
             destroy_loaded_scripts(old_scripts).await;
@@ -143,6 +130,25 @@ pub fn start_wasm_engine(
     });
 
     Ok(script_registry)
+}
+
+fn hook_changed(result: notify::Result<notify::Event>) -> bool {
+    match result {
+        Ok(event) => {
+            matches!(
+                event.kind,
+                EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+            ) && (event.paths.is_empty()
+                || event
+                    .paths
+                    .iter()
+                    .any(|path| path.extension().is_some_and(|ext| ext == "wasm")))
+        }
+        Err(error) => {
+            error!("[wasm] watcher error: {}", error);
+            false
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -638,6 +644,7 @@ pub struct LoadedScript {
 
 #[derive(Clone)]
 pub struct ScriptRegistry {
+    hook_dir: PathBuf,
     inner: Arc<RwLock<ScriptRegistryInner>>,
 }
 
@@ -660,8 +667,14 @@ impl ScriptRegistryInner {
 impl ScriptRegistry {
     pub fn new(script_parameters: ScriptParameters) -> Self {
         Self {
+            hook_dir: PathBuf::from(WASM_HOOKS_DIR),
             inner: Arc::new(RwLock::new(ScriptRegistryInner::new(script_parameters))),
         }
+    }
+
+    /// The active directory watched by this registry, until the next start.
+    pub fn hook_dir(&self) -> &Path {
+        &self.hook_dir
     }
 
     pub async fn destroy_all(&self) {
@@ -908,5 +921,30 @@ pub fn to_wasm_cfg(cfg: &AppConfig) -> ConfigView {
         developer_mode: cfg.developer_mode,
         ev: cfg.ev,
         waze_lht_workaround: cfg.waze_lht_workaround,
+    }
+}
+
+#[cfg(test)]
+mod watcher_tests {
+    use super::hook_changed;
+    use notify::event::{AccessKind, CreateKind, ModifyKind, RenameMode};
+    use notify::{Event, EventKind};
+    use std::path::PathBuf;
+
+    #[test]
+    fn status_reads_do_not_extend_hook_reload_debounce() {
+        assert!(!hook_changed(Ok(Event::new(EventKind::Access(
+            AccessKind::Read
+        ))
+        .add_path(PathBuf::from("hooks")))));
+        assert!(!hook_changed(Ok(Event::new(EventKind::Create(
+            CreateKind::File
+        ))
+        .add_path(PathBuf::from("hooks/pending.upload")))));
+        assert!(hook_changed(Ok(Event::new(EventKind::Modify(
+            ModifyKind::Name(RenameMode::Both)
+        ))
+        .add_path(PathBuf::from("hooks/pending.upload"))
+        .add_path(PathBuf::from("hooks/exlap.wasm")))));
     }
 }

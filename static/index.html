@@ -437,6 +437,22 @@
         />
         <div class="config-grid">{CONFIG_VALUES}</div>
       </form>
+      <section id="wasm-hooks-panel" class="config-card-wrapper" hidden>
+        <div class="card-glass-bg"></div>
+        <details class="config-card" open>
+          <summary class="card-header"><span class="card-header-title">WASM hooks</span></summary>
+          <div class="card-content">
+        <p>Upload a .wasm hook (up to 16 MiB). The hook loads automatically.</p>
+        <form id="wasm-hook-form">
+          <input type="file" id="wasm-hook-file" accept=".wasm" required />
+          <button type="submit" id="wasm-hook-upload">Upload hook</button>
+          <button type="button" id="wasm-hook-refresh">Refresh</button>
+        </form>
+        <p id="wasm-hook-status" role="status"></p>
+        <ul id="wasm-hook-list"></ul>
+          </div>
+        </details>
+      </section>
     </main>
     <div
       id="snackbar"
@@ -449,6 +465,74 @@
     <script>
       document.addEventListener("DOMContentLoaded", () => {
         const fileInput = document.getElementById("file-input");
+        const hookStatus = document.getElementById("wasm-hook-status");
+        async function refreshWasmHooks() {
+          const response = await fetch("/wasm-hooks");
+          if (!response.ok) return [];
+          const hooks = await response.json();
+          document.getElementById("wasm-hooks-panel").hidden = false;
+          const list = document.getElementById("wasm-hook-list");
+          list.replaceChildren();
+          for (const hook of hooks) {
+            const row = document.createElement("li");
+            const label = document.createElement("span");
+            label.textContent = `${hook.name} (${hook.size} bytes): ${hook.error || (hook.loaded ? "loaded" : "pending")}`;
+            const remove = document.createElement("button");
+            remove.type = "button";
+            remove.textContent = "Delete";
+            remove.addEventListener("click", async () => {
+              remove.disabled = true;
+              try {
+                const result = await fetch(`/wasm-hooks/${encodeURIComponent(hook.name)}`, { method: "DELETE" });
+                if (!result.ok) throw new Error(await result.text());
+                await refreshWasmHooks();
+                hookStatus.textContent = "Hook deleted.";
+              } catch (error) {
+                hookStatus.textContent = error.message;
+                remove.disabled = false;
+              }
+            });
+            row.append(label, " ", remove);
+            list.append(row);
+          }
+          return hooks;
+        }
+        document.getElementById("wasm-hook-refresh").addEventListener("click", () => {
+          refreshWasmHooks().catch(error => { hookStatus.textContent = error.message; });
+        });
+        document.getElementById("wasm-hook-form").addEventListener("submit", async event => {
+          event.preventDefault();
+          const file = document.getElementById("wasm-hook-file").files[0];
+          if (!file) return;
+          if (file.size > 16 * 1024 * 1024) {
+            hookStatus.textContent = "The hook exceeds 16 MiB.";
+            return;
+          }
+          const button = document.getElementById("wasm-hook-upload");
+          button.disabled = true;
+          try {
+            const body = new FormData();
+            body.append("file", file);
+            const response = await fetch("/wasm-hooks", { method: "POST", body });
+            if (!response.ok) throw new Error(await response.text());
+            hookStatus.textContent = "Uploaded. Waiting for the hook to load.";
+            for (let attempt = 0; attempt < 30; attempt++) {
+              const hooks = await refreshWasmHooks();
+              const hook = hooks.find(item => item.name === file.name);
+              if (hook && (hook.loaded || hook.error)) {
+                hookStatus.textContent = hook.error || "Hook loaded.";
+                break;
+              }
+              await new Promise(resolve => setTimeout(resolve, 500));
+            }
+          } catch (error) {
+            hookStatus.textContent = error.message;
+          } finally {
+            button.disabled = false;
+          }
+        });
+        refreshWasmHooks().catch(error => { hookStatus.textContent = error.message; });
+
 
         // Download buttons
         document.querySelectorAll(".download-btn").forEach((btn) => {

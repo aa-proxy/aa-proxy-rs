@@ -12,7 +12,7 @@ use crate::config::SharedConfigJson;
 use crate::config::BASE_CONFIG_DIR;
 use crate::crash;
 use crate::device_info;
-use crate::ev::send_ev_data;
+use crate::ev::receive_battery_data;
 use crate::ev::BatteryData;
 use crate::ev::EV_MODEL_FILE;
 use crate::inject_displays;
@@ -36,6 +36,8 @@ use crate::proxy::media_tap_reverse_bridge_once;
 use crate::script_wasm::{LoadedScript, ScriptRegistry};
 use crate::sdr_ui;
 use crate::sdr_ui_preview;
+#[cfg(feature = "wasm-scripting")]
+use crate::wasm_hooks_web;
 #[cfg(not(feature = "wasm-scripting"))]
 type ScriptRegistry = ();
 use axum::{
@@ -164,7 +166,7 @@ pub struct AppState {
 }
 
 pub fn app(state: Arc<AppState>) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/", get(index))
         .route("/config", get(get_config).post(set_config))
         .route("/config-entry", post(update_config_entry))
@@ -257,8 +259,10 @@ pub fn app(state: Arc<AppState>) -> Router {
             get(bt_known_devices_handler).delete(bt_forget_known_devices_handler),
         )
         .route("/disconnect", post(disconnect_handler))
-        .route("/aa-proxy-rs.webp", get(logo_handler))
-        .with_state(state)
+        .route("/aa-proxy-rs.webp", get(logo_handler));
+    #[cfg(feature = "wasm-scripting")]
+    let router = wasm_hooks_web::routes(router);
+    router.with_state(state)
 }
 
 fn linkify_git_info(git_date: &str, git_hash: &str) -> String {
@@ -655,41 +659,17 @@ pub async fn battery_handler(
     State(state): State<Arc<AppState>>,
     Json(data): Json<BatteryData>,
 ) -> impl IntoResponse {
-    match data.battery_level_percentage {
-        Some(level) => {
-            if level < 0.0 || level > 100.0 {
-                let msg = format!(
-                    "battery_level_percentage out of range: {} (expected 0.0–100.0)",
-                    level
-                );
-                return (StatusCode::BAD_REQUEST, msg).into_response();
-            }
-        }
-        None => {
-            if data.battery_level_wh.is_none() {
-                let msg = format!(
-                    "Either `battery_level_percentage` or `battery_level_wh` has to be set",
-                );
-                return (StatusCode::BAD_REQUEST, msg).into_response();
-            }
-        }
+    match receive_battery_data(
+        data,
+        &state.tx,
+        &state.sensor_channel,
+        state.last_battery_data.clone(),
+    )
+    .await
+    {
+        Ok(()) => (StatusCode::OK, "OK").into_response(),
+        Err(message) => (StatusCode::BAD_REQUEST, message).into_response(),
     }
-
-    info!("{} Received battery data: {:?}", NAME, data);
-
-    if let Some(ch) = *state.sensor_channel.lock().await {
-        if let Some(tx) = state.tx.lock().await.clone() {
-            if let Err(e) =
-                send_ev_data(tx.clone(), ch, data, state.last_battery_data.clone()).await
-            {
-                error!("{} EV model error: {}", NAME, e);
-            }
-        }
-    } else {
-        warn!("{} Not sending packet because no sensor channel yet", NAME);
-    }
-
-    (StatusCode::OK, "OK").into_response()
 }
 
 async fn battery_status_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -2370,6 +2350,11 @@ async fn run_wasm_ws_hooks(
     payload: String,
     state: Arc<AppState>,
 ) -> Result<Option<String>> {
+    // Battery is a reserved input topic. Only the process-wide collector
+    // consumes it; per-client hooks must not republish it.
+    if topic == "battery" {
+        return Ok(None);
+    }
     let Some(registry) = state.script_registry.clone() else {
         return Ok(None);
     };

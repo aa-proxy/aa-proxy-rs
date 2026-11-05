@@ -1,3 +1,4 @@
+use crate::web::ServerEvent;
 use nix::sys::signal::{kill as nix_kill, Signal};
 use nix::unistd::Pid;
 use shell_words;
@@ -7,7 +8,7 @@ use std::sync::Arc;
 use tokio::fs;
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc::Sender;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 use tokio::time::{sleep, Duration};
 
 // protobuf stuff:
@@ -49,6 +50,88 @@ pub enum EvTaskCommand {
 fn scale_percent_to_value(percent: f32, max_value: u64) -> u64 {
     let scaled = (percent as f64 / 100.0) * max_value as f64;
     scaled.round() as u64
+}
+
+type SharedPacketSender = Arc<Mutex<Option<Sender<Packet>>>>;
+type SharedSensorChannel = Arc<Mutex<Option<u8>>>;
+
+fn validate_battery_data(data: &BatteryData) -> std::result::Result<(), String> {
+    if let Some(level) = data.battery_level_percentage {
+        if !level.is_finite() || !(0.0..=100.0).contains(&level) {
+            return Err(format!(
+                "battery_level_percentage out of range: {level} (expected 0.0-100.0)"
+            ));
+        }
+    } else if data.battery_level_wh.is_none() {
+        return Err("Either `battery_level_percentage` or `battery_level_wh` has to be set".into());
+    }
+    Ok(())
+}
+
+fn battery_from_topic(event: &ServerEvent) -> std::result::Result<Option<BatteryData>, String> {
+    if event.topic != "battery" {
+        return Ok(None);
+    }
+    let data: BatteryData = serde_json::from_str(&event.payload).map_err(|e| e.to_string())?;
+    validate_battery_data(&data)?;
+    Ok(Some(data))
+}
+
+/// Common input path for POST /battery and the process-wide battery topic.
+pub async fn receive_battery_data(
+    data: BatteryData,
+    tx: &SharedPacketSender,
+    sensor_channel: &SharedSensorChannel,
+    last_battery_data: Arc<RwLock<Option<BatteryData>>>,
+) -> std::result::Result<(), String> {
+    validate_battery_data(&data)?;
+    info!("{} Received battery data: {:?}", NAME, data);
+    let channel = *sensor_channel.lock().await;
+    let sender = tx.lock().await.clone();
+    match (channel, sender) {
+        (Some(ch), Some(sender)) => {
+            if let Err(e) = send_ev_data(sender, ch, data, last_battery_data).await {
+                error!("{} EV model error: {}", NAME, e);
+            }
+        }
+        _ => warn!("{} Not sending packet because no sensor channel yet", NAME),
+    }
+    Ok(())
+}
+
+/// Subscribe before hooks start so on-create events are also received.
+pub fn spawn_battery_topic_collector(
+    mut events: broadcast::Receiver<ServerEvent>,
+    tx: SharedPacketSender,
+    sensor_channel: SharedSensorChannel,
+    last_battery_data: Arc<RwLock<Option<BatteryData>>>,
+) {
+    tokio::spawn(async move {
+        loop {
+            match events.recv().await {
+                Ok(event) => match battery_from_topic(&event) {
+                    Ok(Some(data)) => {
+                        if let Err(e) = receive_battery_data(
+                            data,
+                            &tx,
+                            &sensor_channel,
+                            last_battery_data.clone(),
+                        )
+                        .await
+                        {
+                            warn!("{} rejected battery topic: {}", NAME, e);
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => warn!("{} rejected battery topic: {}", NAME, e),
+                },
+                Err(broadcast::error::RecvError::Lagged(count)) => {
+                    warn!("{} battery topic collector skipped {} events", NAME, count);
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
 }
 
 /// EV sensor batch data send
@@ -217,4 +300,99 @@ pub async fn spawn_ev_client_task() -> (
     });
 
     (handle, tx)
+}
+
+#[cfg(test)]
+mod battery_topic_tests {
+    use super::*;
+    use tokio::time::timeout;
+
+    fn event(topic: &str, payload: &str) -> ServerEvent {
+        ServerEvent {
+            topic: topic.into(),
+            payload: payload.into(),
+        }
+    }
+
+    #[test]
+    fn only_battery_is_decoded() {
+        assert!(battery_from_topic(&event("other", "not json"))
+            .unwrap()
+            .is_none());
+        let data = battery_from_topic(&event("battery", r#"{"battery_level_percentage":75}"#))
+            .unwrap()
+            .unwrap();
+        assert_eq!(data.battery_level_percentage, Some(75.0));
+        assert!(
+            battery_from_topic(&event("battery", r#"{"battery_level_wh":12000}"#))
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn invalid_topic_data_uses_the_http_validation() {
+        for payload in [
+            "not json",
+            "null",
+            "{}",
+            r#"{"battery_level_percentage":-1}"#,
+            r#"{"battery_level_percentage":101}"#,
+            r#"{"battery_level_percentage":"75"}"#,
+        ] {
+            assert!(
+                battery_from_topic(&event("battery", payload)).is_err(),
+                "{payload}"
+            );
+        }
+        let mut data: BatteryData =
+            serde_json::from_str(r#"{"battery_level_percentage":75}"#).unwrap();
+        data.battery_level_percentage = Some(f32::NAN);
+        assert!(validate_battery_data(&data).is_err());
+    }
+
+    #[tokio::test]
+    async fn topic_reaches_the_real_ev_model_sender_once() {
+        let (events, rx) = broadcast::channel(16);
+        let (packets, mut packet_rx) = mpsc::channel(16);
+        let last = Arc::new(RwLock::new(None));
+        spawn_battery_topic_collector(
+            rx,
+            Arc::new(Mutex::new(Some(packets))),
+            Arc::new(Mutex::new(Some(7))),
+            last.clone(),
+        );
+        events
+            .send(event(
+                "battery",
+                r#"{"battery_level_percentage":75,"battery_capacity_wh":50000}"#,
+            ))
+            .unwrap();
+        let packet = timeout(Duration::from_secs(2), packet_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(packet.channel, 7);
+        assert_eq!(
+            &packet.payload[..2],
+            &(SENSOR_MESSAGE_BATCH as u16).to_be_bytes()
+        );
+        let model = SensorBatch::parse_from_bytes(&packet.payload[2..]).unwrap();
+        assert_eq!(model.energy_model_control[0].u1.u3.u1, 37500);
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if last.read().await.is_some() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            last.read().await.as_ref().unwrap().battery_level_percentage,
+            Some(75.0)
+        );
+        assert!(packet_rx.try_recv().is_err());
+    }
 }

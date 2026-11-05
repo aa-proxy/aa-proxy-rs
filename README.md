@@ -572,3 +572,51 @@ However, using `setup-dev.sh` is the recommended approach.
 - https://github.com/f1xpl/openauto
 - https://github.com/gamelaster/opengal_proxy
 - https://github.com/tomasz-grobelny/AACS
+
+## Upload WASM hooks
+
+With `wasm-scripting` enabled, the dashboard lists hooks in the active
+`wasm_hooks_dir`. Use **Upload hook** to add or replace a hook, **Delete** to
+remove it, and **Refresh** to read its load state. Changing the configured
+directory requires a restart; uploads use the directory the engine watches.
+
+The same actions are available through HTTP:
+
+```sh
+curl -F 'file=@exlap_hook.wasm' http://localhost:8080/wasm-hooks
+curl http://localhost:8080/wasm-hooks
+curl -X DELETE http://localhost:8080/wasm-hooks/exlap_hook.wasm
+```
+
+The upload accepts exactly one `file` field, up to 16 MiB, with a WebAssembly
+header. Use a plain `.wasm` file name with ASCII letters, digits, dots,
+hyphens or underscores, starting with a letter or digit. Path parts are
+refused. The server writes a temporary file and renames it after the upload
+is complete. The watcher then loads it. Upload success does not prove load
+success: `GET /wasm-hooks` reports `name`, `size`, `loaded` and `error` for
+each file. The engine must be running for these routes to accept requests.
+Only upload hooks you trust: they execute with the configured hook limits.
+
+## Battery data from a WebSocket topic
+
+`battery` is a reserved input topic. Its payload is a JSON string containing
+the same `BatteryData` object accepted by `POST /battery`. A hook can call
+`send-ws-event("battery", payload)`. A `/ws` client can send:
+
+```json
+{"type":"script_event","topic":"battery","payload":"{\"battery_level_percentage\":75,\"battery_capacity_wh\":50000}"}
+```
+
+Or publish the same event through HTTP:
+
+```sh
+curl -H 'Content-Type: application/json' -d '{"topic":"battery","payload":"{\"battery_level_percentage\":75}"}' http://localhost:8080/raw-topic-data
+```
+
+The process consumes each event once, independent of browser subscriptions
+and overlay settings. It uses the same validation and EV model sender as
+`POST /battery`: a level in percent (0 through 100) or a level in Wh is
+required. Invalid JSON or battery values are refused and logged. A connected
+Android Auto sensor channel is required to send the EV packet. In web-only
+mode, the log confirms receipt and reports that no sensor channel exists;
+this does not prove delivery to a phone.
