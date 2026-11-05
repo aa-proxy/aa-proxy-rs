@@ -45,7 +45,7 @@ const STAGES: u8 = 5;
 const ATTEMPTS: usize = 3;
 /// Our own limit for Device1.ConnectProfile (a normal page timeout is ~10s;
 /// bluer's built-in D-Bus timeout is 120s).
-const CONNECT_PROFILE_TIMEOUT: Duration = Duration::from_secs(20);
+const CONNECT_PROFILE_TIMEOUT: Duration = Duration::from_secs(200);
 
 // module name for logging engine
 const NAME: &str = "<i><bright-black> bluetooth: </>";
