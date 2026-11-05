@@ -583,13 +583,13 @@ directory requires a restart; uploads use the directory the engine watches.
 The same actions are available through HTTP:
 
 ```sh
-curl -F 'file=@exlap_hook.wasm' http://localhost:8080/wasm-hooks
+curl -X PUT --data-binary @exlap_hook.wasm http://localhost:8080/wasm-hooks/exlap_hook.wasm
 curl http://localhost:8080/wasm-hooks
 curl -X DELETE http://localhost:8080/wasm-hooks/exlap_hook.wasm
 ```
 
-The upload accepts exactly one `file` field, up to 16 MiB, with a WebAssembly
-header. Use a plain `.wasm` file name with ASCII letters, digits, dots,
+`PUT /wasm-hooks/{name}` accepts raw WebAssembly bytes, up to 16 MiB, with a
+WebAssembly header. Use a plain `.wasm` file name with ASCII letters, digits, dots,
 hyphens or underscores, starting with a letter or digit. Path parts are
 refused. The server writes a temporary file and renames it after the upload
 is complete. The watcher then loads it. Upload success does not prove load

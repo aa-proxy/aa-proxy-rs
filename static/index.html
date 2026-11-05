@@ -511,9 +511,7 @@
           const button = document.getElementById("wasm-hook-upload");
           button.disabled = true;
           try {
-            const body = new FormData();
-            body.append("file", file);
-            const response = await fetch("/wasm-hooks", { method: "POST", body });
+            const response = await fetch(`/wasm-hooks/${encodeURIComponent(file.name)}`, { method: "PUT", body: file });
             if (!response.ok) throw new Error(await response.text());
             hookStatus.textContent = "Uploaded. Waiting for the hook to load.";
             for (let attempt = 0; attempt < 30; attempt++) {

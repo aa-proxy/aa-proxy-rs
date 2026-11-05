@@ -2,10 +2,12 @@
 
 use crate::script_wasm::ScriptRegistry;
 use crate::web::AppState;
-use axum::extract::{DefaultBodyLimit, Multipart, Path, State};
+use axum::body::Body;
+use axum::extract::{Path, RawBody, State};
 use axum::http::StatusCode;
-use axum::routing::{delete, get};
+use axum::routing::{get, put};
 use axum::{Json, Router};
+use hyper::body::HttpBody;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -19,13 +21,8 @@ type ApiError = (StatusCode, String);
 
 pub fn routes(router: Router<Arc<AppState>>) -> Router<Arc<AppState>> {
     router
-        .route(
-            "/wasm-hooks",
-            get(list)
-                .post(upload)
-                .layer(DefaultBodyLimit::max(MAX_WASM_BYTES + 16 * 1024)),
-        )
-        .route("/wasm-hooks/:name", delete(remove))
+        .route("/wasm-hooks", get(list))
+        .route("/wasm-hooks/:name", put(upload).delete(remove))
 }
 
 fn validate_name(name: &str) -> Result<(), ApiError> {
@@ -81,31 +78,18 @@ impl Drop for PendingUpload {
 
 async fn upload(
     State(state): State<Arc<AppState>>,
-    multipart: Multipart,
+    Path(name): Path<String>,
+    RawBody(body): RawBody,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    store_upload(registry(&state)?.hook_dir().to_path_buf(), multipart).await
+    store_upload(registry(&state)?.hook_dir().to_path_buf(), &name, body).await
 }
 
 async fn store_upload(
     directory: PathBuf,
-    mut multipart: Multipart,
+    name: &str,
+    mut body: Body,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let mut field = multipart
-        .next_field()
-        .await
-        .map_err(|e| (e.status(), e.body_text()))?
-        .ok_or((StatusCode::BAD_REQUEST, "Expected one file field".into()))?;
-    if field.name() != Some("file") {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Expected a field named file".into(),
-        ));
-    }
-    let name = field
-        .file_name()
-        .ok_or((StatusCode::BAD_REQUEST, "Missing file name".into()))?
-        .to_string();
-    validate_name(&name)?;
+    validate_name(name)?;
     let temporary = directory.join(format!(".{}.upload", Uuid::new_v4()));
     let mut file = fs::OpenOptions::new()
         .write(true)
@@ -116,11 +100,8 @@ async fn store_upload(
     let pending = PendingUpload(temporary);
     let mut size = 0usize;
     let mut header = Vec::with_capacity(8);
-    while let Some(chunk) = field
-        .chunk()
-        .await
-        .map_err(|e| (e.status(), e.body_text()))?
-    {
+    while let Some(chunk) = body.data().await {
+        let chunk = chunk.map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?;
         if chunk.len() > MAX_WASM_BYTES - size {
             return Err((
                 StatusCode::PAYLOAD_TOO_LARGE,
@@ -133,19 +114,10 @@ async fn store_upload(
         file.write_all(&chunk).await.map_err(io_error)?;
     }
     validate_magic(&header)?;
-    drop(field);
-    if multipart
-        .next_field()
-        .await
-        .map_err(|e| (e.status(), e.body_text()))?
-        .is_some()
-    {
-        return Err((StatusCode::BAD_REQUEST, "Expected exactly one file".into()));
-    }
     file.flush().await.map_err(io_error)?;
     file.sync_all().await.map_err(io_error)?;
     drop(file);
-    fs::rename(&pending.0, directory.join(&name))
+    fs::rename(&pending.0, directory.join(name))
         .await
         .map_err(io_error)?;
     Ok(Json(
@@ -244,31 +216,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upload_releases_its_field_before_checking_the_next_part() {
-        use axum::body::Body;
-        use axum::extract::FromRequest;
-        use hyper::Request;
-
+    async fn raw_upload_is_atomic_and_cleans_rejected_bodies() {
         let directory = std::env::temp_dir().join(format!("aa-proxy-upload-{}", Uuid::new_v4()));
         fs::create_dir(&directory).await.unwrap();
-        let mut body = b"--test-boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"hook.wasm\"\r\n\r\n".to_vec();
-        body.extend_from_slice(b"\0asm\x01\0\0\0");
-        body.extend_from_slice(b"\r\n--test-boundary--\r\n");
-        let request = Request::builder()
-            .header(
-                "content-type",
-                "multipart/form-data; boundary=test-boundary",
-            )
-            .body(Body::from(body))
+        let wasm = b"\0asm\x01\0\0\0";
+        let response = store_upload(directory.clone(), "hook.wasm", Body::from(wasm.as_slice()))
+            .await
             .unwrap();
-        let multipart = Multipart::from_request(request, &()).await.unwrap();
-        let response = store_upload(directory.clone(), multipart).await.unwrap();
         assert_eq!(response.0["name"], "hook.wasm");
+        assert_eq!(fs::read(directory.join("hook.wasm")).await.unwrap(), wasm);
+        for (body, expected) in [
+            (Body::from("not wasm"), StatusCode::BAD_REQUEST),
+            (
+                Body::from(vec![0; MAX_WASM_BYTES + 1]),
+                StatusCode::PAYLOAD_TOO_LARGE,
+            ),
+        ] {
+            let error = store_upload(directory.clone(), "hook.wasm", body)
+                .await
+                .unwrap_err();
+            assert_eq!(error.0, expected);
+            assert_eq!(fs::read(directory.join("hook.wasm")).await.unwrap(), wasm);
+            assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+        }
+        let (mut sender, body) = Body::channel();
+        let send = tokio::spawn(async move {
+            sender.send_data(wasm.as_slice().into()).await.unwrap();
+            sender.abort();
+        });
         assert_eq!(
-            fs::read(directory.join("hook.wasm")).await.unwrap(),
-            b"\0asm\x01\0\0\0"
+            store_upload(directory.clone(), "hook.wasm", body)
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::BAD_REQUEST
         );
+        send.await.unwrap();
         assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+        assert_eq!(fs::read(directory.join("hook.wasm")).await.unwrap(), wasm);
         fs::remove_file(directory.join("hook.wasm")).await.unwrap();
         fs::remove_dir(directory).await.unwrap();
     }
