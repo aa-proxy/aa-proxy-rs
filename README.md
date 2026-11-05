@@ -40,6 +40,7 @@ The project initially focused on supporting the Raspberry Pi, but has since grow
   - **Event injection** – key event injection via `/inject_event` and rotary controller support via `/inject_rotary`
   - **WASM scripting** – write hooks that modify AA packets on the fly via `wasmtime`
     - Persistent script state and lifecycle hooks
+    - Each hook can write state files in its own private folder, preopened as `.`
     - Configurable resource limits and hooks directory
     - Web UI integration for per-script configuration
     - Scripts can call the local REST API and push events over WebSocket

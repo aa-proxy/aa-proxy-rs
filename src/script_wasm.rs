@@ -236,8 +236,8 @@ impl ScriptState {
                 if let Err(err) = wasi_builder.preopened_dir(
                     &real_script_hooks_dir,
                     GUEST_WASM_HOOKS_DIR,
-                    DirPerms::READ,
-                    FilePerms::READ,
+                    DirPerms::READ | DirPerms::MUTATE,
+                    FilePerms::READ | FilePerms::WRITE,
                 ) {
                     log::warn!(
                         "[wasm] failed to preopen real dir {} as guest dir {} for script {}: {}",
