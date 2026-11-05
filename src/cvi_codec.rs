@@ -21,7 +21,9 @@
 //! |--------------------------------|---------|--------------------------------------------------|
 //! | `AA_PROXY_CVI_MAX_W`/`_MAX_H`  | 1920x1088 | largest picture the shared VB pool must hold   |
 //! | `AA_PROXY_CVI_VB_BLOCKS`       | 12      | number of blocks in the shared VB pool           |
-//! | `AA_PROXY_CVI_BITRATE_KBPS`    | 4000    | encoder CBR bitrate                              |
+//! | `AA_PROXY_CVI_RC`              | fixed QP | `cbr` selects constant bitrate instead          |
+//! | `AA_PROXY_CVI_QP`              | `h264_encoder_qp` (26 if 0) | fixed QP, clamped to 10..45  |
+//! | `AA_PROXY_CVI_BITRATE_KBPS`    | 4000    | CBR bitrate (only with `AA_PROXY_CVI_RC=cbr`)    |
 //! | `AA_PROXY_CVI_DISPLAY_FRAMES`  | 0       | decoder display queue (0..16), lower = less lag  |
 //! | `AA_PROXY_CVI_PROFILE`         | 0       | encoder H.264 profile: 0 baseline, 1 main, 2 high |
 
@@ -566,8 +568,9 @@ pub struct CviEncoder {
 unsafe impl Send for CviEncoder {}
 
 impl CviEncoder {
-    /// Creates a baseline CBR hardware encoder for `width`x`height` and a GOP of `gop` frames.
-    /// The quantiser is ignored (rate control is CBR, like the V4L2 encoder path).
+    /// Creates a baseline hardware encoder for `width`x`height` and a GOP of `gop` frames.
+    /// Rate control is fixed QP by default (`qp`, overridable with `AA_PROXY_CVI_QP`); with
+    /// `AA_PROXY_CVI_RC=cbr` it is constant bitrate and `qp` is ignored.
     pub fn new(width: usize, height: usize, qp: u8, gop: u32) -> io::Result<Self> {
         if !cfg!(feature = "cvi") {
             return Err(io::Error::new(
