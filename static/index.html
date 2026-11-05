@@ -533,7 +533,6 @@
         });
         refreshWasmHooks().catch(error => { hookStatus.textContent = error.message; });
 
-
         // Download buttons
         document.querySelectorAll(".download-btn").forEach((btn) => {
           btn.addEventListener("click", () =>

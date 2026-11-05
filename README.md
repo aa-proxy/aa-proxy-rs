@@ -616,7 +616,10 @@ curl -H 'Content-Type: application/json' -d '{"topic":"battery","payload":"{\"ba
 The process consumes each event once, independent of browser subscriptions
 and overlay settings. It uses the same validation and EV model sender as
 `POST /battery`: a level in percent (0 through 100) or a level in Wh is
-required. Invalid JSON or battery values are refused and logged. A connected
+required. Invalid JSON or battery values are refused and logged. NaN and
+infinite values are refused on both routes. Because the topic is reserved,
+a `script_event` on `battery` is not passed to the `ws-script-handler` of
+the loaded hooks. A connected
 Android Auto sensor channel is required to send the EV packet. In web-only
 mode, the log confirms receipt and reports that no sensor channel exists;
 this does not prove delivery to a phone.
