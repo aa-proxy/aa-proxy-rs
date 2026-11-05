@@ -8,6 +8,8 @@ ARG BUILD_PROFILE=release
 ARG FAST_RELEASE=true
 ARG FAST_RELEASE_LTO=false
 ARG FAST_RELEASE_CODEGEN_UNITS=16
+# Build OpenSSL from source instead of linking a target sysroot one (see below).
+ARG VENDORED_OPENSSL=true
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
@@ -22,6 +24,16 @@ RUN rustup target add aarch64-unknown-linux-gnu
 WORKDIR /usr/src/app
 
 COPY Cargo.toml Cargo.lock build.rs ./
+
+# The default Cargo.toml links the OpenSSL from the target sysroot (what Buildroot wants).
+# These containers have no target sysroot, so build OpenSSL from source (openssl-src)
+# by enabling the "vendored" feature on the openssl dependency, only inside the container.
+# The repo Cargo.toml/Cargo.lock stay untouched. Disable with --build-arg VENDORED_OPENSSL=false.
+# Needs to be repeated after "COPY . ." which brings back the original Cargo.toml.
+RUN if [ "${VENDORED_OPENSSL}" = "true" ]; then \
+        sed -i 's|^openssl = { version = "0.10" }|openssl = { version = "0.10", features = ["vendored"] }|' Cargo.toml && \
+        grep -q '^openssl = .*"vendored"' Cargo.toml; \
+    fi
 COPY src/protos ./src/protos
 
 RUN mkdir -p src && printf 'fn main() {}\n' > src/main.rs
@@ -41,6 +53,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     fi
 
 COPY . .
+
+RUN if [ "${VENDORED_OPENSSL}" = "true" ]; then \
+        sed -i 's|^openssl = { version = "0.10" }|openssl = { version = "0.10", features = ["vendored"] }|' Cargo.toml && \
+        grep -q '^openssl = .*"vendored"' Cargo.toml; \
+    fi
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
