@@ -224,11 +224,26 @@ overlay_v4l2_encoder = "" # optional explicit V4L2 encoder device (e.g. "/dev/vi
 The option is evaluated when an Android Auto session starts, so a change applies on the next connection. While enabled, every frame of the main display
 goes through the decode/render/encode pipeline (even with empty text), and `VIDEO_FPS_60` is capped to 30 (see `cap_video_fps_to_30`).
 
-On supported boards like **Raspberry Pi 3/4/Zero 2 W** (excluding Raspberry Pi 5) with h264 hw acceleration, setting `overlay_hw_accel = "auto"` offloads H.264 decoding and encoding to the hardware VideoCore VPU (`/dev/video10` and `/dev/video11`), dropping CPU usage by ~85%, significantly lowering latency and keeping temperatures 15-25°C cooler inside enclosed vehicle cabins. If hardware devices are unavailable or fail to open, it automatically falls back to software. (Ensure `/boot/firmware/config.txt` has `gpu_mem=128`).
+On supported boards like **Raspberry Pi 3/4/Zero 2 W** (excluding Raspberry Pi 5) with h264 hw acceleration, setting `overlay_hw_accel = "auto"` offloads H.264 decoding and encoding to the hardware VideoCore VPU (`/dev/video10` and `/dev/video11`), dropping CPU usage by ~85%, significantly lowering latency and keeping temperatures 15-25°C cooler inside enclosed vehicle cabins. If hardware devices are unavailable or fail to open, it automatically falls back to software.
 
 On the **Milk-V Duo S** (Sophgo SG2000/SG2002) the hardware H.264 codec is not a V4L2 device: it is reached through the vendor `cvi_mpi` libraries (`libsys`, `libvenc`, `libvdec`). Use `overlay_hw_accel = "cvi"` (or `"auto"`, which tries V4L2 first and then CVI) with a binary built with the `cvi` cargo feature: `CVI_MPI_INC=<cvi_mpi headers> CVI_MPI_LIB=<target libs> cargo build --release --features cvi` (for musl targets also `RUSTFLAGS="-C target-feature=-crt-static"`, the libraries are shared). The target needs the `cvi_vc_driver` kernel modules (`/dev/cvi_vc_enc0`, `/dev/cvi_vc_dec0`), the VPU firmware in `/usr/share/fw_vcodec` and `libatomic`; the Buildroot image for `milkv-duos` provides all of it. Without the feature, or if the devices are missing, aa-proxy-rs falls back to software. Optional tuning through environment variables: `AA_PROXY_CVI_MAX_W`/`AA_PROXY_CVI_MAX_H` (largest video, default 1920x1088), `AA_PROXY_CVI_VB_BLOCKS` (default 12), `AA_PROXY_CVI_BITRATE_KBPS` (CBR mode only, default 4000), `AA_PROXY_CVI_DISPLAY_FRAMES` (decoder display queue, default 0 = no hold-back; every held frame is an access unit the car never ACKs), `AA_PROXY_CVI_PROFILE` (0 baseline, default), `AA_PROXY_CVI_RC` (`cbr` = constant bitrate; default is fixed QP, which keeps static UI sharp), `AA_PROXY_CVI_QP` (fixed QP, default from `h264_encoder_qp`). The encoder SPS/PPS are adapted for strict car head units (CAVLC, Constrained Baseline, zero-latency VUI).
 
-**The official image is general purpose and does not include the V4L2 codec drivers.** If you want to use the hardware encoder/decoder on a Raspberry Pi, you have to build your own Buildroot image with the required kernel options, packages and `modprobe`; see [the documentation](https://aa-proxy.github.io/docs/config-options#video-overlay-hardware-acceleration) for the details. The V4L2 hardware encoder uses a fixed bitrate (4 Mbps) and does not use `h264_encoder_qp` (the CVI encoder uses a fixed QP taken from `h264_encoder_qp`, see above); a single slow hardware frame is dropped, and the software codec takes over only after repeated or fatal hardware errors.
+**Raspberry Pi: enabling hardware acceleration.** The official images for the Raspberry Pi 3, 4 and Zero 2 W already contain the `bcm2835-codec` driver (a kernel module, loaded automatically at boot), so there is nothing to build or install. The only thing you have to change yourself is the amount of memory reserved for the GPU/VPU. It is **not** raised in the images by default, because this memory is taken away from Linux (the Zero 2 W has only 512 MB of RAM in total), so do it consciously and only if you want to use the hardware codec:
+
+1. Edit `/uboot/config.txt` (the boot partition is mounted read-write there; you can also edit `config.txt` on the first, FAT partition of the SD card on a PC) and add the following lines at the **very end** of the file:
+   ```
+   [all]
+   gpu_mem=128
+   gpu_mem_512=128
+   gpu_mem_1024=128
+   ```
+   The `[all]` line is needed because the file ends with a model-specific section. `gpu_mem_512` / `gpu_mem_1024` are set explicitly, because the images already define them and they take precedence over a plain `gpu_mem` on boards with 512 MB / 1 GB of RAM.
+2. Reboot and check that the codec devices exist (usually `/dev/video10` is the decoder and `/dev/video11` the encoder): `ls -l /dev/video10 /dev/video11`
+3. Set `overlay_hw_accel = "auto"` in `config.toml`. The log line `V4L2 M2M hardware acceleration enabled` confirms that the hardware codecs are used; otherwise the software pipeline is.
+
+The Raspberry Pi Zero W and Raspberry Pi 5 images do not include the codec driver.
+
+The V4L2 hardware encoder uses a fixed bitrate (4 Mbps) and does not use `h264_encoder_qp` (the CVI encoder uses a fixed QP taken from `h264_encoder_qp`, see above); a single slow hardware frame is dropped, and the software codec takes over only after repeated or fatal hardware errors.
 
 The content and look are controlled live by a JSON file (an [example with all keys and defaults](examples/overlay.json)).
 It is re-read at most every `poll_interval_ms`, so any change, including setting `"text"` to `""`, is applied on the next video frame without reconnecting.
