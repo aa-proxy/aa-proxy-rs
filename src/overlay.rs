@@ -2,8 +2,10 @@
 //!
 //! Reads JSON (or plain text) from the path configured by `overlay_text_path` in `config.toml`
 //! (default `/dev/shm/overlay.json`), splits carriage returns (`\r\n`, `\n`, `\r`) into
-//! multiple lines, and renders a translucent box with text near the bottom-right corner of
-//! decoded YUV420 (`I420`) video frames before re-encoding to H.264 Baseline Annex-B via `rusty_h264`.
+//! multiple lines, and renders a translucent box with text on decoded YUV420 (`I420`) video
+//! frames before re-encoding to H.264 Baseline Annex-B via `rusty_h264`. The box is placed with
+//! `anchor_horizontal` / `anchor_vertical` (9 positions, default bottom-right) plus
+//! `offset_x_px` / `offset_y_px`.
 
 use crate::config::DEFAULT_OVERLAY_TEXT_PATH;
 use crate::mitm::protos::{
@@ -36,10 +38,20 @@ pub const POLL_INTERVAL_MS: u64 = 250;
 /// Opacity percentage of the overlay box background (`0` = fully transparent, `100` = fully opaque).
 pub const BOX_OPACITY_PERCENT: u8 = 0;
 
+/// Horizontal anchor of the box (`Left`, `Center` or `Right`); `offset_x_px` is measured from the
+/// anchored edge (ignored for `Center`).
+pub const ANCHOR_HORIZONTAL: HorizontalAnchor = HorizontalAnchor::Right;
+
+/// Vertical anchor of the box (`Top`, `Center` or `Bottom`); `offset_y_px` is measured from the
+/// anchored edge (ignored for `Center`).
+pub const ANCHOR_VERTICAL: VerticalAnchor = VerticalAnchor::Bottom;
+
 /// Distance in pixels from the right edge of the video frame to the right edge of the box.
+/// Legacy: used as the horizontal offset when `offset_x_px` is not set.
 pub const BOX_MARGIN_RIGHT_PX: usize = 100;
 
 /// Distance in pixels from the bottom edge of the video frame to the bottom edge of the box.
+/// Legacy: used as the vertical offset when `offset_y_px` is not set.
 pub const BOX_MARGIN_BOTTOM_PX: usize = 9;
 
 /// Horizontal internal padding (in pixels) between the box border and the text.
@@ -134,6 +146,73 @@ where
     }
 }
 
+/// Horizontal anchor of the overlay box. Accepts (case-insensitive) `"left"`, `"center"` and
+/// `"right"`; `null` or an unknown value falls back to the default (`"right"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HorizontalAnchor {
+    Left,
+    Center,
+    Right,
+}
+
+/// Vertical anchor of the overlay box. Accepts (case-insensitive) `"top"`, `"center"`
+/// (or `"middle"`) and `"bottom"`; `null` or an unknown value falls back to the default
+/// (`"bottom"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VerticalAnchor {
+    Top,
+    Center,
+    Bottom,
+}
+
+impl<'de> Deserialize<'de> for HorizontalAnchor {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(match Option::<String>::deserialize(deserializer)? {
+            None => ANCHOR_HORIZONTAL,
+            Some(s) => match s.trim().to_ascii_lowercase().as_str() {
+                "left" => Self::Left,
+                "center" => Self::Center,
+                "right" => Self::Right,
+                other => {
+                    warn!(
+                        "overlay: unknown anchor_horizontal {:?}, using default",
+                        other
+                    );
+                    ANCHOR_HORIZONTAL
+                }
+            },
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for VerticalAnchor {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(match Option::<String>::deserialize(deserializer)? {
+            None => ANCHOR_VERTICAL,
+            Some(s) => match s.trim().to_ascii_lowercase().as_str() {
+                "top" => Self::Top,
+                "center" | "middle" => Self::Center,
+                "bottom" => Self::Bottom,
+                other => {
+                    warn!(
+                        "overlay: unknown anchor_vertical {:?}, using default",
+                        other
+                    );
+                    ANCHOR_VERTICAL
+                }
+            },
+        })
+    }
+}
+
 /// Live JSON configuration and text loaded from [`OVERLAY_TEXT_PATH`] (`/dev/shm/overlay.json`).
 ///
 /// Any omitted field automatically defaults to the corresponding constant from
@@ -146,8 +225,22 @@ pub struct OverlayConfig {
     pub poll_interval_ms: u64,
     #[serde(alias = "BOX_OPACITY_PERCENT")]
     pub box_opacity_percent: u8,
+    #[serde(alias = "ANCHOR_HORIZONTAL")]
+    pub anchor_horizontal: HorizontalAnchor,
+    #[serde(alias = "ANCHOR_VERTICAL")]
+    pub anchor_vertical: VerticalAnchor,
+    /// Distance from the anchored vertical edge (left/right); falls back to
+    /// `box_margin_right_px` when not set. Ignored for `Center`.
+    #[serde(default, alias = "OFFSET_X_PX")]
+    pub offset_x_px: Option<usize>,
+    /// Distance from the anchored horizontal edge (top/bottom); falls back to
+    /// `box_margin_bottom_px` when not set. Ignored for `Center`.
+    #[serde(default, alias = "OFFSET_Y_PX")]
+    pub offset_y_px: Option<usize>,
+    /// Legacy name of the horizontal offset, kept for backward compatibility.
     #[serde(alias = "BOX_MARGIN_RIGHT_PX")]
     pub box_margin_right_px: usize,
+    /// Legacy name of the vertical offset, kept for backward compatibility.
     #[serde(alias = "BOX_MARGIN_BOTTOM_PX")]
     pub box_margin_bottom_px: usize,
     #[serde(alias = "BOX_PADDING_X_PX")]
@@ -207,6 +300,10 @@ impl Default for OverlayConfig {
         Self {
             poll_interval_ms: POLL_INTERVAL_MS,
             box_opacity_percent: BOX_OPACITY_PERCENT,
+            anchor_horizontal: ANCHOR_HORIZONTAL,
+            anchor_vertical: ANCHOR_VERTICAL,
+            offset_x_px: None,
+            offset_y_px: None,
             box_margin_right_px: BOX_MARGIN_RIGHT_PX,
             box_margin_bottom_px: BOX_MARGIN_BOTTOM_PX,
             box_padding_x_px: BOX_PADDING_X_PX,
@@ -228,6 +325,45 @@ impl Default for OverlayConfig {
             cap_video_fps_to_30: CAP_VIDEO_FPS_TO_30,
             text: String::new(),
         }
+    }
+}
+
+impl OverlayConfig {
+    /// Effective horizontal offset: `offset_x_px`, or the legacy `box_margin_right_px`.
+    pub fn effective_offset_x_px(&self) -> usize {
+        self.offset_x_px.unwrap_or(self.box_margin_right_px)
+    }
+
+    /// Effective vertical offset: `offset_y_px`, or the legacy `box_margin_bottom_px`.
+    pub fn effective_offset_y_px(&self) -> usize {
+        self.offset_y_px.unwrap_or(self.box_margin_bottom_px)
+    }
+
+    /// Top-left corner of a `box_w` x `box_h` box inside a `frame_w` x `frame_h` frame according
+    /// to the configured anchors and offsets. The result is clamped so the box never leaves
+    /// the frame.
+    pub fn box_origin(
+        &self,
+        frame_w: usize,
+        frame_h: usize,
+        box_w: usize,
+        box_h: usize,
+    ) -> (usize, usize) {
+        let max_x = frame_w.saturating_sub(box_w);
+        let max_y = frame_h.saturating_sub(box_h);
+        let off_x = self.effective_offset_x_px();
+        let off_y = self.effective_offset_y_px();
+        let x = match self.anchor_horizontal {
+            HorizontalAnchor::Left => off_x,
+            HorizontalAnchor::Center => max_x / 2,
+            HorizontalAnchor::Right => max_x.saturating_sub(off_x),
+        };
+        let y = match self.anchor_vertical {
+            VerticalAnchor::Top => off_y,
+            VerticalAnchor::Center => max_y / 2,
+            VerticalAnchor::Bottom => max_y.saturating_sub(off_y),
+        };
+        (x.min(max_x), y.min(max_y))
     }
 }
 
@@ -3397,11 +3533,8 @@ pub fn draw_overlay_box_yuv420_with_config_and_font(
     let box_w = (text_block_w + total_pad_x * 2).min(frame.width);
     let box_h = (text_block_h + total_pad_y * 2).min(frame.height);
 
-    // Position near bottom-right corner using configured margins
-    let box_x0 = frame.width.saturating_sub(box_w + cfg.box_margin_right_px);
-    let box_y0 = frame
-        .height
-        .saturating_sub(box_h + cfg.box_margin_bottom_px);
+    // Position according to the configured anchors and offsets (default: bottom-right)
+    let (box_x0, box_y0) = cfg.box_origin(frame.width, frame.height, box_w, box_h);
     let box_x1 = (box_x0 + box_w).min(frame.width);
     let box_y1 = (box_y0 + box_h).min(frame.height);
 
@@ -4021,6 +4154,103 @@ mod tests {
     }
 
     #[test]
+    fn test_box_origin_all_nine_anchors() {
+        let (fw, fh, bw, bh) = (800, 480, 200, 100);
+        let cfg = |h, v| OverlayConfig {
+            anchor_horizontal: h,
+            anchor_vertical: v,
+            offset_x_px: Some(30),
+            offset_y_px: Some(20),
+            ..OverlayConfig::default()
+        };
+        use HorizontalAnchor as H;
+        use VerticalAnchor as V;
+        let xs = [(H::Left, 30), (H::Center, 300), (H::Right, 570)];
+        let ys = [(V::Top, 20), (V::Center, 190), (V::Bottom, 360)];
+        for (h, x) in xs {
+            for (v, y) in ys {
+                assert_eq!(cfg(h, v).box_origin(fw, fh, bw, bh), (x, y), "{h:?} {v:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_box_origin_clamps_to_frame() {
+        let cfg = OverlayConfig {
+            anchor_horizontal: HorizontalAnchor::Left,
+            anchor_vertical: VerticalAnchor::Top,
+            offset_x_px: Some(10_000),
+            offset_y_px: Some(10_000),
+            ..OverlayConfig::default()
+        };
+        assert_eq!(cfg.box_origin(800, 480, 200, 100), (600, 380));
+        let cfg = OverlayConfig {
+            offset_x_px: Some(10_000),
+            offset_y_px: Some(10_000),
+            ..OverlayConfig::default()
+        };
+        assert_eq!(cfg.box_origin(800, 480, 200, 100), (0, 0));
+    }
+
+    #[test]
+    fn test_legacy_margins_still_work() {
+        // Old config without any of the new keys: bottom-right with the legacy margins
+        let (cfg, _) = parse_overlay_payload(
+            r#"{"box_margin_right_px": 40, "box_margin_bottom_px": 15, "text": "x"}"#,
+        );
+        assert_eq!(cfg.anchor_horizontal, HorizontalAnchor::Right);
+        assert_eq!(cfg.anchor_vertical, VerticalAnchor::Bottom);
+        assert_eq!(cfg.box_origin(800, 480, 200, 100), (560, 365));
+
+        // New offsets take precedence over the legacy margins
+        let (cfg, _) =
+            parse_overlay_payload(r#"{"box_margin_right_px": 40, "offset_x_px": 5, "text": "x"}"#);
+        assert_eq!(cfg.box_origin(800, 480, 200, 100), (595, 371));
+    }
+
+    #[test]
+    fn test_parse_anchor_keys() {
+        let (cfg, _) = parse_overlay_payload(
+            r#"{"anchor_horizontal": "LEFT", "ANCHOR_VERTICAL": "middle", "offset_x_px": 7, "text": "x"}"#,
+        );
+        assert_eq!(cfg.anchor_horizontal, HorizontalAnchor::Left);
+        assert_eq!(cfg.anchor_vertical, VerticalAnchor::Center);
+        assert_eq!(cfg.offset_x_px, Some(7));
+
+        // Unknown/null values fall back to defaults instead of dropping the whole payload
+        let (cfg, lines) = parse_overlay_payload(
+            r#"{"anchor_horizontal": "diagonal", "anchor_vertical": null, "text": "x"}"#,
+        );
+        assert_eq!(cfg.anchor_horizontal, HorizontalAnchor::Right);
+        assert_eq!(cfg.anchor_vertical, VerticalAnchor::Bottom);
+        assert_eq!(lines, vec!["x"]);
+    }
+
+    #[test]
+    fn test_draw_overlay_box_top_left_anchor() {
+        let (width, height) = (320, 240);
+        let mut frame = YuvFrame {
+            width,
+            height,
+            y: vec![200u8; width * height],
+            u: vec![128u8; (width / 2) * (height / 2)],
+            v: vec![128u8; (width / 2) * (height / 2)],
+        };
+        let cfg = OverlayConfig {
+            anchor_horizontal: HorizontalAnchor::Left,
+            anchor_vertical: VerticalAnchor::Top,
+            offset_x_px: Some(4),
+            offset_y_px: Some(4),
+            box_opacity_percent: 100,
+            ..OverlayConfig::default()
+        };
+        let lines = vec!["RPM: 2500".to_string()];
+        draw_overlay_box_yuv420_with_config(&mut frame, &lines, &cfg);
+        assert_ne!(frame.y[4 * width + 4], 200, "box must start at (4, 4)");
+        assert_eq!(frame.y[(height - 1) * width + width - 1], 200);
+    }
+
+    #[test]
     fn test_example_json_is_valid_and_matches_defaults() {
         let raw = include_str!("../examples/overlay.json");
         let (cfg, lines) = parse_overlay_payload(raw);
@@ -4028,9 +4258,13 @@ mod tests {
             lines,
             vec!["RPM: 2450".to_string(), "OIL: 90°C".to_string()]
         );
+        assert_eq!(cfg.effective_offset_x_px(), BOX_MARGIN_RIGHT_PX);
+        assert_eq!(cfg.effective_offset_y_px(), BOX_MARGIN_BOTTOM_PX);
         assert_eq!(
             OverlayConfig {
                 text: String::new(),
+                offset_x_px: None,
+                offset_y_px: None,
                 ..cfg
             },
             OverlayConfig::default(),

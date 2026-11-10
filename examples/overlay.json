@@ -1,8 +1,10 @@
 {
   "poll_interval_ms": 250,
   "box_opacity_percent": 0,
-  "box_margin_right_px": 100,
-  "box_margin_bottom_px": 9,
+  "anchor_horizontal": "right",
+  "anchor_vertical": "bottom",
+  "offset_x_px": 100,
+  "offset_y_px": 9,
   "box_padding_x_px": 12,
   "box_padding_y_px": 9,
   "box_border_px": 0,

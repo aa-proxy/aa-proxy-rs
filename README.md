@@ -246,7 +246,10 @@ Note: an incomplete or invalid JSON is not an error, but the overlay then falls 
 | `text` | `""` | Text to show; `\r\n`, `\n` and `\r` start a new line. Empty/`null`/missing shows nothing. May contain [HTML styling](#ttf-fonts-and-html-styling). With the built-in font, characters outside ASCII are shown as `?` (except `°`, `ñ` and basic Latin accents) |
 | `font_path` | `""` | Path to a `.ttf` font; when set it takes precedence over `overlay_font_path` from `config.toml` |
 | `poll_interval_ms` | `250` | Minimum interval between reads of the file (min. 20) |
-| `box_margin_right_px`, `box_margin_bottom_px` | `100`, `9` | Distance of the box from the right/bottom edge of the video |
+| `anchor_horizontal` | `"right"` | Horizontal position of the box: `"left"`, `"center"` or `"right"` |
+| `anchor_vertical` | `"bottom"` | Vertical position of the box: `"top"`, `"center"` or `"bottom"` |
+| `offset_x_px`, `offset_y_px` | `100`, `9` | Distance of the box from the anchored edge (left/right and top/bottom respectively); ignored on an axis anchored to `"center"`. The box is always kept inside the video |
+| `box_margin_right_px`, `box_margin_bottom_px` | `100`, `9` | Legacy names of `offset_x_px`/`offset_y_px`, still honored when the new keys are absent (with the default bottom-right anchor this keeps existing configs unchanged) |
 | `box_padding_x_px`, `box_padding_y_px` | `12`, `9` | Padding between box border and text |
 | `box_border_px` | `0` | Border thickness (`0` = none) |
 | `box_opacity_percent` | `0` | Box background opacity (`0` = floating text with shadow only, `100` = solid) |
