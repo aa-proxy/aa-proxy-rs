@@ -577,10 +577,17 @@ impl FfsGadget {
             }
         };
 
+        // Make sure the responder has really dropped its endpoint files before
+        // unbinding (an aborted task is only dropped once it is polled again).
         if let Some(task) = mtp_task {
             task.abort();
+            let _ = task.await;
         }
-        let _ = reg.remove();
+        // Unbinding a UDC with FunctionFS endpoints can block in the kernel for
+        // a long time: never do it synchronously on a tokio worker thread.
+        if let Some(Err(e)) = run_blocking_usb("MTP gadget removal", move || reg.remove()).await {
+            debug!("{} 🔌 USB Manager: MTP gadget removal: {e:#}", NAME);
+        }
         result
     }
 
