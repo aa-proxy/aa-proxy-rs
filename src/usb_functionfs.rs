@@ -709,34 +709,39 @@ impl FfsGadget {
             }
         });
 
-        // The bulk endpoint files only become truly usable once the host has
-        // finished enumerating this gadget (FunctionFS FUNCTIONFS_ENABLE,
-        // i.e. `Event::Enable` above) — on a slow/old UDC driver, querying
-        // them (via `FfsRead`/`FfsWrite`'s `max_packet_size()`) any earlier
-        // has been observed to fail outright with ENODEV rather than just
-        // being slow. Wait for it, bounded, before touching them; if it
-        // never comes within the window, fall through and try anyway
-        // (matches this function's overall "don't block forever" style).
-        const ENABLE_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
-        if timeout(ENABLE_WAIT_TIMEOUT, enabled.notified())
-            .await
-            .is_err()
-        {
-            debug!(
-                "{} accessory: no ENABLE event seen within {ENABLE_WAIT_TIMEOUT:?}, trying anyway",
-                NAME
-            );
-        }
-
-        let reader = FfsRead::new(ep_out).context("setting up accessory read pipe")?;
-        let writer = FfsWrite::new(ep_in).context("setting up accessory write pipe")?;
-        info!("{} 🔌 accessory bulk pipes ready", NAME);
-
+        // Hand the gadget over to `self.active` right away, so that every early
+        // return below (and the caller's `teardown_active()`) cleans up the
+        // ep0 task and unbinds the gadget off the async worker threads.
         self.active = Some(ActiveGadget {
             _gadget: reg,
             ep0_cancel: cancel,
             ep0_task,
         });
+
+        // The bulk endpoint files only become usable once the host has
+        // finished enumerating this gadget (FunctionFS FUNCTIONFS_ENABLE,
+        // i.e. `Event::Enable` above). Querying them earlier
+        // (`FfsRead`/`FfsWrite` call `max_packet_size()`, an ioctl) either
+        // fails with ENODEV (old kernels, e.g. 4.4) or - on newer kernels -
+        // BLOCKS in `ffs_epfile_ioctl()` (wait_event_interruptible on
+        // `epfile->ep`) until the host configures the device. That is a
+        // synchronous wait on a tokio worker thread, which stalls the whole
+        // runtime (webserver, Bluetooth, ...). So never "try anyway": if the
+        // host does not enable the gadget in time, give up and let the caller
+        // tear down and retry.
+        const ENABLE_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+        if timeout(ENABLE_WAIT_TIMEOUT, enabled.notified())
+            .await
+            .is_err()
+        {
+            return Err(anyhow!(
+                "host did not enable the accessory gadget within {ENABLE_WAIT_TIMEOUT:?}"
+            ));
+        }
+
+        let reader = FfsRead::new(ep_out).context("setting up accessory read pipe")?;
+        let writer = FfsWrite::new(ep_in).context("setting up accessory write pipe")?;
+        info!("{} 🔌 accessory bulk pipes ready", NAME);
 
         Ok(AccessorySession { reader, writer })
     }
