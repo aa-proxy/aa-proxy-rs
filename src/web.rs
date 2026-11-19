@@ -20,6 +20,7 @@ use crate::map_album_art::{
     global_album_art_store, replacement_png_for_config, status_for_config, validate_png,
 };
 use crate::mitm::protos::KeyCode;
+use crate::overlay::OverlayConfig;
 use crate::mitm::send_byebye;
 use crate::mitm::send_input_key;
 use crate::mitm::send_key_event;
@@ -170,6 +171,7 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/config-entry", post(update_config_entry))
         .route("/config-data", get(get_config_data))
         .route("/config-data-tree", get(get_config_data_tree))
+        .route("/overlay", get(overlay_get_handler).put(overlay_put_handler))
         .route(
             "/map-album-art",
             post(map_album_art_upload_handler)
@@ -1968,6 +1970,189 @@ async fn logo_handler() -> impl IntoResponse {
         .header(header::CACHE_CONTROL, "public, max-age=604800, immutable")
         .body(Body::from(LOGO_WEBP))
         .unwrap()
+}
+
+
+// The companion edits the same live file that the encoder polls. This endpoint does
+// not make assumptions about a particular device's overlay_text_path.
+#[derive(Debug, Serialize)]
+struct OverlayApiResponse {
+    enabled: bool,
+    text_path: String,
+    overlay: OverlayConfig,
+    // Enabling/disabling the video transform is latched per AA session.
+    reconnect_required_for_enable_change: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct OverlayApiUpdate {
+    enabled: bool,
+    overlay: OverlayConfig,
+}
+
+fn overlay_file_path(config: &AppConfig) -> PathBuf {
+    let path = config.overlay_text_path.to_string_lossy();
+    if path.trim().is_empty() {
+        PathBuf::from(crate::config::DEFAULT_OVERLAY_TEXT_PATH)
+    } else {
+        PathBuf::from(path.trim())
+    }
+}
+
+async fn overlay_get_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let cfg = state.config.read().await;
+    let path = overlay_file_path(&cfg);
+    let mut overlay = OverlayConfig::default();
+    match fs::read_to_string(&path).await {
+        Ok(raw) => {
+            if raw.len() > 32 * 1024 {
+                return (StatusCode::PAYLOAD_TOO_LARGE, "Overlay file exceeds 32 KiB")
+                    .into_response();
+            }
+            if raw.trim_start().starts_with('{') {
+                overlay = match serde_json::from_str::<OverlayConfig>(&raw) {
+                    Ok(parsed) => parsed,
+                    Err(err) => {
+                        return (
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            format!("Invalid overlay JSON: {err}"),
+                        )
+                            .into_response();
+                    }
+                };
+            } else {
+                // The encoder also supports a plain-text overlay file.
+                overlay.text = raw;
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Cannot read overlay file: {err}"),
+            )
+                .into_response();
+        }
+    }
+    Json(OverlayApiResponse {
+        enabled: cfg.overlay_enabled,
+        text_path: path.to_string_lossy().into_owned(),
+        overlay,
+        reconnect_required_for_enable_change: true,
+    })
+    .into_response()
+}
+
+async fn overlay_put_handler(
+    State(state): State<Arc<AppState>>,
+    Json(update): Json<OverlayApiUpdate>,
+) -> impl IntoResponse {
+    let c = &update.overlay;
+    if c.text.len() > 8192
+        || c.poll_interval_ms < 20
+        || c.text_scale == 0
+        || c.text_scale > 128
+        || c.max_display_lines == 0
+        || c.max_display_lines > 64
+        || c.max_line_chars == 0
+        || c.max_line_chars > 256
+        || c.box_opacity_percent > 100
+        || c.h264_encoder_qp > 51
+        || c.h264_encoder_gop == 0
+        || c.box_padding_x_px > 2048
+        || c.box_padding_y_px > 2048
+        || c.offset_x_px.unwrap_or(0) > 8192
+        || c.offset_y_px.unwrap_or(0) > 8192
+    {
+        return (StatusCode::BAD_REQUEST, "Overlay values are outside supported limits")
+            .into_response();
+    }
+
+    // Serialize all companion writes (including enabled flag changes) against
+    // config-entry updates by taking the same shared config write lock.
+    let mut cfg = state.config.write().await;
+    let path = overlay_file_path(&cfg);
+    let raw = match serde_json::to_vec_pretty(&update.overlay) {
+        Ok(raw) => raw,
+        Err(err) => {
+            return (StatusCode::BAD_REQUEST, format!("Cannot encode overlay: {err}"))
+                .into_response()
+        }
+    };
+
+    // Prepare the config update before writing either file. The key may be absent
+    // from older config.toml files, so insert it rather than using /config-entry.
+    let enabled_changed = cfg.overlay_enabled != update.enabled;
+    let config_update = if enabled_changed {
+        let config_path = state.config_file.as_ref();
+        let raw_cfg = match fs::read_to_string(config_path).await {
+            Ok(raw) => raw,
+            Err(err) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Cannot read config.toml: {err}"),
+                )
+                    .into_response()
+            }
+        };
+        let mut doc = match raw_cfg.parse::<DocumentMut>() {
+            Ok(doc) => doc,
+            Err(err) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Cannot parse config.toml: {err}"),
+                )
+                    .into_response()
+            }
+        };
+        doc["overlay_enabled"] = value(update.enabled);
+        Some(doc.to_string())
+    } else {
+        None
+    };
+
+    // Atomic rename keeps the encoder from observing a partially written JSON.
+    let Some(filename) = path.file_name() else {
+        return (StatusCode::BAD_REQUEST, "Invalid overlay file path").into_response();
+    };
+    let temp_path = path.with_file_name(format!(
+        ".{}.{}.tmp",
+        filename.to_string_lossy(),
+        std::process::id()
+    ));
+    if let Err(err) = fs::write(&temp_path, raw).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Cannot write overlay temporary file: {err}"),
+        )
+            .into_response();
+    }
+    if let Err(err) = fs::rename(&temp_path, &path).await {
+        let _ = fs::remove_file(&temp_path).await;
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Cannot replace overlay file: {err}"),
+        )
+            .into_response();
+    }
+
+    if let Some(toml_text) = config_update {
+        if let Err(err) = fs::write(state.config_file.as_ref(), toml_text).await {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Overlay JSON saved, but failed to update config.toml: {err}"),
+            )
+                .into_response();
+        }
+        cfg.overlay_enabled = update.enabled;
+    }
+    Json(OverlayApiResponse {
+        enabled: cfg.overlay_enabled,
+        text_path: path.to_string_lossy().into_owned(),
+        overlay: update.overlay,
+        reconnect_required_for_enable_change: true,
+    })
+    .into_response()
 }
 
 async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
