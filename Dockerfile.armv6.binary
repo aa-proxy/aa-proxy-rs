@@ -10,6 +10,12 @@ ARG FAST_RELEASE_LTO=false
 ARG FAST_RELEASE_CODEGEN_UNITS=16
 # Build OpenSSL from source instead of linking a target sysroot one (see below).
 ARG VENDORED_OPENSSL=true
+# Cargo feature flags, matching the Buildroot package (aa-proxy-rs.mk).
+# io-uring is disabled on all platforms for now: with it the real USB-gadget
+# (FunctionFS) head-unit path refuses to start (see src/usb_functionfs.rs).
+# wasm-scripting is not built on armv6 (wasmtime does not support it).
+# Override with e.g. --build-arg CARGO_FEATURE_FLAGS="" to build the Cargo.toml defaults.
+ARG CARGO_FEATURE_FLAGS="--no-default-features"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc-arm-linux-gnueabihf \
@@ -42,12 +48,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
         if [ "${FAST_RELEASE}" = "true" ]; then \
             CARGO_PROFILE_RELEASE_LTO="${FAST_RELEASE_LTO}" \
             CARGO_PROFILE_RELEASE_CODEGEN_UNITS="${FAST_RELEASE_CODEGEN_UNITS}" \
-            cargo build --release --target arm-unknown-linux-gnueabihf || true; \
+            cargo build ${CARGO_FEATURE_FLAGS} --release --target arm-unknown-linux-gnueabihf || true; \
         else \
-            cargo build --release --target arm-unknown-linux-gnueabihf || true; \
+            cargo build ${CARGO_FEATURE_FLAGS} --release --target arm-unknown-linux-gnueabihf || true; \
         fi; \
     else \
-        cargo build --target arm-unknown-linux-gnueabihf || true; \
+        cargo build ${CARGO_FEATURE_FLAGS} --target arm-unknown-linux-gnueabihf || true; \
     fi
 
 COPY . .
@@ -64,13 +70,13 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
         if [ "${FAST_RELEASE}" = "true" ]; then \
             CARGO_PROFILE_RELEASE_LTO="${FAST_RELEASE_LTO}" \
             CARGO_PROFILE_RELEASE_CODEGEN_UNITS="${FAST_RELEASE_CODEGEN_UNITS}" \
-            cargo build --release --target arm-unknown-linux-gnueabihf; \
+            cargo build ${CARGO_FEATURE_FLAGS} --release --target arm-unknown-linux-gnueabihf; \
         else \
-            cargo build --release --target arm-unknown-linux-gnueabihf; \
+            cargo build ${CARGO_FEATURE_FLAGS} --release --target arm-unknown-linux-gnueabihf; \
         fi && \
         cp target/arm-unknown-linux-gnueabihf/release/aa-proxy-rs /out/aa-proxy-rs; \
     else \
-        cargo build --target arm-unknown-linux-gnueabihf && \
+        cargo build ${CARGO_FEATURE_FLAGS} --target arm-unknown-linux-gnueabihf && \
         cp target/arm-unknown-linux-gnueabihf/debug/aa-proxy-rs /out/aa-proxy-rs; \
     fi
 

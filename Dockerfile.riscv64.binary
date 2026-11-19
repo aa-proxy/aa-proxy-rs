@@ -10,6 +10,12 @@ ARG FAST_RELEASE_LTO=false
 ARG FAST_RELEASE_CODEGEN_UNITS=16
 # Build OpenSSL from source instead of linking a target sysroot one (see below).
 ARG VENDORED_OPENSSL=true
+# Cargo feature flags, matching the Buildroot package (aa-proxy-rs.mk).
+# io-uring is disabled on all platforms for now: with it the real USB-gadget
+# (FunctionFS) head-unit path refuses to start (see src/usb_functionfs.rs).
+# Keep wasm-scripting.
+# Override with e.g. --build-arg CARGO_FEATURE_FLAGS="" to build the Cargo.toml defaults.
+ARG CARGO_FEATURE_FLAGS="--no-default-features --features wasm-scripting"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
@@ -44,12 +50,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
         if [ "${FAST_RELEASE}" = "true" ]; then \
             CARGO_PROFILE_RELEASE_LTO="${FAST_RELEASE_LTO}" \
             CARGO_PROFILE_RELEASE_CODEGEN_UNITS="${FAST_RELEASE_CODEGEN_UNITS}" \
-            cargo build --release --target riscv64gc-unknown-linux-gnu || true; \
+            cargo build ${CARGO_FEATURE_FLAGS} --release --target riscv64gc-unknown-linux-gnu || true; \
         else \
-            cargo build --release --target riscv64gc-unknown-linux-gnu || true; \
+            cargo build ${CARGO_FEATURE_FLAGS} --release --target riscv64gc-unknown-linux-gnu || true; \
         fi; \
     else \
-        cargo build --target riscv64gc-unknown-linux-gnu || true; \
+        cargo build ${CARGO_FEATURE_FLAGS} --target riscv64gc-unknown-linux-gnu || true; \
     fi
 
 COPY . .
@@ -66,13 +72,13 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
         if [ "${FAST_RELEASE}" = "true" ]; then \
             CARGO_PROFILE_RELEASE_LTO="${FAST_RELEASE_LTO}" \
             CARGO_PROFILE_RELEASE_CODEGEN_UNITS="${FAST_RELEASE_CODEGEN_UNITS}" \
-            cargo build --release --target riscv64gc-unknown-linux-gnu; \
+            cargo build ${CARGO_FEATURE_FLAGS} --release --target riscv64gc-unknown-linux-gnu; \
         else \
-            cargo build --release --target riscv64gc-unknown-linux-gnu; \
+            cargo build ${CARGO_FEATURE_FLAGS} --release --target riscv64gc-unknown-linux-gnu; \
         fi && \
         cp target/riscv64gc-unknown-linux-gnu/release/aa-proxy-rs /out/aa-proxy-rs; \
     else \
-        cargo build --target riscv64gc-unknown-linux-gnu && \
+        cargo build ${CARGO_FEATURE_FLAGS} --target riscv64gc-unknown-linux-gnu && \
         cp target/riscv64gc-unknown-linux-gnu/debug/aa-proxy-rs /out/aa-proxy-rs; \
     fi
 
