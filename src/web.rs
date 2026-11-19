@@ -299,6 +299,13 @@ fn linkify_git_info(git_date: &str, git_hash: &str) -> String {
     }
 }
 
+fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
 fn replace_backticks(s: String) -> String {
     let re = Regex::new(r"`([^`]*)`").unwrap();
     re.replace_all(&s, "<code>$1</code>").to_string()
@@ -368,7 +375,9 @@ fn render_section(section: &ConfigValues, depth: usize, html: &mut String) {
 }
 
 fn render_field(key: &str, val: &ConfigValue, html: &mut String) {
-    let desc = replace_backticks(val.description.replace('\n', "<br>"));
+    // Escape first: descriptions are plain text and may mention literal tags
+    // such as `<b>` or placeholders like `<subnet>`.
+    let desc = replace_backticks(escape_html(&val.description).replace('\n', "<br>"));
 
     // Any non-multiselect field with a `values` list renders as a
     // single-select dropdown, regardless of typ. `data-typ` is recorded so
