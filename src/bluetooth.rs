@@ -46,6 +46,21 @@ const ATTEMPTS: usize = 3;
 /// Our own limit for Device1.ConnectProfile (a normal page timeout is ~10s;
 /// bluer's built-in D-Bus timeout is 120s).
 const CONNECT_PROFILE_TIMEOUT: Duration = Duration::from_secs(20);
+/// Lower bound for bt_connect_attempt_timeout_secs. A shorter limit can cut a connection that
+/// would succeed (paging + authentication + SDP + RFCOMM), and every cut also costs a Disconnect().
+const CONNECT_ATTEMPT_TIMEOUT_MIN: Duration = Duration::from_secs(5);
+
+/// Per-attempt limit for connect_profile(): CONNECT_PROFILE_TIMEOUT, unless
+/// bt_connect_attempt_timeout_secs (`limit_secs` > 0) shortens it. The option can only shorten
+/// the limit: with a longer one bluer's 120s D-Bus timeout could fire first, which returns an
+/// error without our Disconnect() and leaves the stale pending connect in BlueZ.
+fn connect_attempt_timeout(limit_secs: u64) -> Duration {
+    if limit_secs > 0 {
+        Duration::from_secs(limit_secs).clamp(CONNECT_ATTEMPT_TIMEOUT_MIN, CONNECT_PROFILE_TIMEOUT)
+    } else {
+        CONNECT_PROFILE_TIMEOUT
+    }
+}
 
 // module name for logging engine
 const NAME: &str = "<i><bright-black> bluetooth: </>";
@@ -409,9 +424,10 @@ pub static BT_CONNECT_MAX_DELAY_SECS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(15);
 
 /// bt_connect_attempt_timeout_secs: per-attempt limit (0 = off) for "connect to the known phone".
-/// An absent phone makes BlueZ wait ~50 s (br-connection-timeout) before the next attempt, so a phone
-/// that comes into range mid-attempt is only noticed on the next round. With a short limit the Pi
-/// aborts (Disconnect) and tries again quickly. Set once at startup from the config.
+/// Without it an attempt to an absent phone can take up to CONNECT_PROFILE_TIMEOUT (20 s), so a
+/// phone that comes into range mid-attempt is only noticed on the next round. With a shorter limit
+/// the Pi aborts (Disconnect) and tries again sooner. The value is clamped to
+/// CONNECT_ATTEMPT_TIMEOUT_MIN..=CONNECT_PROFILE_TIMEOUT. Set once at startup from the config.
 pub static BT_CONNECT_ATTEMPT_TIMEOUT_SECS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
@@ -6298,11 +6314,7 @@ impl Bluetooth {
                     // is found in seconds instead of after CONNECT_PROFILE_TIMEOUT.
                     let attempt_limit =
                         BT_CONNECT_ATTEMPT_TIMEOUT_SECS.load(std::sync::atomic::Ordering::Relaxed);
-                    let attempt_timeout = if attempt_limit > 0 {
-                        Duration::from_secs(attempt_limit)
-                    } else {
-                        CONNECT_PROFILE_TIMEOUT
-                    };
+                    let attempt_timeout = connect_attempt_timeout(attempt_limit);
                     let started = Instant::now();
                     match timeout(attempt_timeout, device.connect_profile(&HSP_AG_UUID)).await {
                         // After a pending attempt was aborted, BlueZ may still report success
@@ -8164,5 +8176,29 @@ impl Bluetooth {
         info!("{} 🚀 Bluetooth launch sequence completed", NAME);
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connect_attempt_timeout_defaults_to_connect_profile_timeout() {
+        assert_eq!(connect_attempt_timeout(0), Duration::from_secs(20));
+    }
+
+    #[test]
+    fn connect_attempt_timeout_is_clamped() {
+        assert_eq!(connect_attempt_timeout(1), Duration::from_secs(5));
+        assert_eq!(connect_attempt_timeout(5), Duration::from_secs(5));
+        assert_eq!(connect_attempt_timeout(8), Duration::from_secs(8));
+        assert_eq!(connect_attempt_timeout(20), Duration::from_secs(20));
+        // never longer than CONNECT_PROFILE_TIMEOUT, so bluer's 120 s D-Bus timeout can't win
+        assert_eq!(connect_attempt_timeout(120), Duration::from_secs(20));
+        assert_eq!(
+            connect_attempt_timeout(u16::MAX as u64),
+            Duration::from_secs(20)
+        );
     }
 }

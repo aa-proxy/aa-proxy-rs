@@ -96,7 +96,7 @@
         },
         "bt_connect_attempt_timeout_secs": {
           "typ": "integer",
-          "description": "Per-attempt limit [seconds, 0 = off] when the Pi connects to the known phone: abort a pending attempt after this long instead of waiting ~50 s for BlueZ to give up, so a phone that comes into range is noticed quickly (e.g. 8).",
+          "description": "Per-attempt limit [seconds, 0 = off] when the Pi connects to the known phone: abort a pending attempt after this long instead of the built-in 20 s, so a phone that comes into range is noticed sooner. Values are clamped to 5-20. Connection times differ between Bluetooth controllers, so test the value on your hardware: a too short limit cuts connections that would succeed.",
           "advanced": true
         },
         "bt_poweroff": {
