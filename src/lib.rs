@@ -50,4 +50,6 @@ pub mod v4l2_m2m;
 pub mod vendor_ext;
 #[cfg(feature = "wasm-scripting")]
 pub mod wasm_config;
+#[cfg(feature = "wasm-scripting")]
+pub mod wasm_hooks_web;
 pub mod web;
