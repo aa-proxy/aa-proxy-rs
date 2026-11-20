@@ -9,11 +9,12 @@ use axum::routing::{get, put};
 use axum::{Json, Router};
 use hyper::body::HttpBody;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 
 const MAX_WASM_BYTES: usize = 16 * 1024 * 1024;
@@ -131,6 +132,8 @@ struct HookInfo {
     size: u64,
     loaded: bool,
     error: Option<String>,
+    // Content-addressable identifier for companion store version matching.
+    sha256: String,
 }
 
 async fn list(State(state): State<Arc<AppState>>) -> Result<Json<Vec<HookInfo>>, ApiError> {
@@ -154,11 +157,22 @@ async fn list(State(state): State<Arc<AppState>>) -> Result<Json<Vec<HookInfo>>,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => return Err(io_error(error)),
         };
+        let mut file = fs::File::open(&path).await.map_err(io_error)?;
+        let mut digest = Sha256::new();
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let bytes = file.read(&mut buffer).await.map_err(io_error)?;
+            if bytes == 0 {
+                break;
+            }
+            digest.update(&buffer[..bytes]);
+        }
         hooks.push(HookInfo {
             name,
             size: metadata.len(),
             loaded: loaded.contains(&path),
             error: errors.get(&path).cloned(),
+            sha256: hex::encode(digest.finalize()),
         });
     }
     hooks.sort_by(|a, b| a.name.cmp(&b.name));

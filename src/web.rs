@@ -20,7 +20,6 @@ use crate::map_album_art::{
     global_album_art_store, replacement_png_for_config, status_for_config, validate_png,
 };
 use crate::mitm::protos::KeyCode;
-use crate::overlay::OverlayConfig;
 use crate::mitm::send_byebye;
 use crate::mitm::send_input_key;
 use crate::mitm::send_key_event;
@@ -32,6 +31,7 @@ use crate::mitm::SharedServiceDiscoveryResponse;
 use crate::mitm::{send_odometer_data, OdometerData};
 use crate::mitm::{send_tire_pressure_data, TirePressureData};
 use crate::mitm::{SharedCompanionIp, SharedMediaChannels, SharedMediaTapEndpoints};
+use crate::overlay::OverlayConfig;
 use crate::proxy::media_tap_reverse_bridge_once;
 #[cfg(feature = "wasm-scripting")]
 use crate::script_wasm::{LoadedScript, ScriptRegistry};
@@ -173,7 +173,10 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/config-entry", post(update_config_entry))
         .route("/config-data", get(get_config_data))
         .route("/config-data-tree", get(get_config_data_tree))
-        .route("/overlay", get(overlay_get_handler).put(overlay_put_handler))
+        .route(
+            "/overlay",
+            get(overlay_get_handler).put(overlay_put_handler),
+        )
         .route(
             "/map-album-art",
             post(map_album_art_upload_handler)
@@ -1961,7 +1964,6 @@ async fn logo_handler() -> impl IntoResponse {
         .unwrap()
 }
 
-
 // The companion edits the same live file that the encoder polls. This endpoint does
 // not make assumptions about a particular device's overlay_text_path.
 #[derive(Debug, Serialize)]
@@ -2053,7 +2055,10 @@ async fn overlay_put_handler(
         || c.offset_x_px.unwrap_or(0) > 8192
         || c.offset_y_px.unwrap_or(0) > 8192
     {
-        return (StatusCode::BAD_REQUEST, "Overlay values are outside supported limits")
+        return (
+            StatusCode::BAD_REQUEST,
+            "Overlay values are outside supported limits",
+        )
             .into_response();
     }
 
@@ -2064,7 +2069,10 @@ async fn overlay_put_handler(
     let raw = match serde_json::to_vec_pretty(&update.overlay) {
         Ok(raw) => raw,
         Err(err) => {
-            return (StatusCode::BAD_REQUEST, format!("Cannot encode overlay: {err}"))
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("Cannot encode overlay: {err}"),
+            )
                 .into_response()
         }
     };
