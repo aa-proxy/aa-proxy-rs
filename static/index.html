@@ -14,7 +14,13 @@
   </head>
 
   <body>
-    <nav class="action-rail">
+    <nav class="action-rail" aria-label="Dashboard navigation">
+      <button type="button" class="rail-btn page-tab is-active" id="page-nav-config" data-page="config" data-label="Configuration" aria-label="Configuration" aria-pressed="true">⚙️</button>
+    </nav>
+    <button type="button" id="utility-toggle" class="utility-toggle" aria-controls="utility-rail" aria-expanded="false" aria-label="Open tools" title="Tools">☰ <span>Tools</span></button>
+    <div class="utility-scrim" id="utility-scrim" aria-hidden="true"></div>
+    <aside class="utility-rail" id="utility-rail" aria-label="Utility tools">
+      <div class="utility-rail-heading"><strong>Tools</strong><span>Scroll for more actions</span></div>
       <button
         type="button"
         class="rail-btn drawer-toggle"
@@ -59,10 +65,9 @@
       >
         🎫
       </button>
-      <div style="flex: 1"></div>
       <button
         type="button"
-        class="rail-btn"
+        class="rail-btn" data-config-action="true"
         onclick="saveConfig()"
         data-label="Save Configuration"
       >
@@ -113,7 +118,7 @@
         <input type="checkbox" class="rail-switch" id="advanced-toggle" />
         <span class="rail-advanced-label">Advanced</span>
       </div>
-    </nav>
+    </aside>
 
     <div class="drawer-scrim" id="drawer-scrim"></div>
 
@@ -416,7 +421,7 @@
           <img src="{LOGO_URL}" alt="logo" class="logo-img" />
           <span style="color: var(--accent)">aa-proxy-rs</span>
           <span style="color: #4b5563">//</span>
-          <span style="color: #ffffff">Dashboard</span>
+          <span style="color: #ffffff" id="dashboard-section-label">Configuration</span>
         </h1>
         <div class="build-tags">
           <span class="tag-base tag-build">
@@ -428,6 +433,7 @@
         </div>
       </header>
 
+      <section id="config-page" class="dashboard-page" aria-label="Configuration">
       <form id="config-form">
         <input
           type="file"
@@ -452,6 +458,7 @@
         <ul id="wasm-hook-list"></ul>
           </div>
         </details>
+      </section>
       </section>
     </main>
     <div
@@ -1875,6 +1882,7 @@
         }
       }
 
+
       async function saveConfig() {
         const out = {};
         for (const id of CONFIG_IDS) out[id] = getValue(id);
@@ -1895,5 +1903,42 @@
         }
       }
     </script>
+    <script>
+      // Right-hand tools rail: a fixed scrolling rail on desktop, a toggleable panel on mobile.
+      document.addEventListener('DOMContentLoaded', () => {
+        const toggle = document.getElementById('utility-toggle');
+        const panel = document.getElementById('utility-rail');
+        const scrim = document.getElementById('utility-scrim');
+        const mobile = window.matchMedia('(max-width: 900px)');
+        const close = () => {
+          panel.classList.remove('is-open');
+          scrim.classList.remove('is-open');
+          toggle.setAttribute('aria-expanded','false');
+          toggle.setAttribute('aria-label','Open tools');
+          if (mobile.matches) panel.inert = true;
+        };
+        const sync = () => {
+          if (mobile.matches) close();
+          else { panel.inert = false; panel.classList.remove('is-open'); scrim.classList.remove('is-open'); }
+        };
+        toggle.addEventListener('click', () => {
+          if (!mobile.matches) return;
+          if (panel.classList.contains('is-open')) { close(); return; }
+          panel.inert = false;
+          panel.classList.add('is-open');
+          scrim.classList.add('is-open');
+          toggle.setAttribute('aria-expanded','true');
+          toggle.setAttribute('aria-label','Close tools');
+        });
+        scrim.addEventListener('click', close);
+        document.addEventListener('keydown', (event) => { if (event.key === 'Escape') close(); });
+        document.querySelectorAll('.page-tab, #utility-rail .rail-btn').forEach(btn => btn.addEventListener('click', () => { if (mobile.matches) close(); }));
+        if (mobile.addEventListener) mobile.addEventListener('change', sync);
+        else mobile.addListener(sync);
+        for (const btn of panel.querySelectorAll('[data-label]')) btn.title = btn.dataset.label;
+        sync();
+      });
+    </script>
+    <script>{DASHBOARD_PAGES_JS}</script>
   </body>
 </html>

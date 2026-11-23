@@ -1767,3 +1767,151 @@ body.show-advanced .rail-advanced .rail-advanced-label {
 #wasm-hooks-panel {
   margin-top: 2.5rem;
 }
+
+/* Dashboard pages: reuse existing rail and native mobile horizontal scroll. */
+.dashboard-page { width:100%; max-width:1100px; min-width:0; }
+.dashboard-page[hidden], #wasm-discover-pane[hidden], #wasm-installed-pane[hidden], .rail-btn[hidden], .aa-overlay-box[hidden] {display:none !important;}
+.action-rail .rail-section-line { width:38px;height:1px;flex-shrink:0;background:rgba(255,255,255,.16);margin:2px 0; }
+.rail-btn.page-tab { border-color:rgba(20,184,166,.3); }
+.rail-btn.page-tab.is-active {background:rgba(20,184,166,.19);border-color:var(--accent);color:#e0fffa;box-shadow:0 0 0 1px rgba(20,184,166,.25);}
+.rail-btn:focus-visible, .tool-tab:focus-visible, .overlay-anchor-grid button:focus-visible {outline:2px solid #74ede0;outline-offset:2px;}
+.tools-page { color:#e6edf3; }
+.tools-page h2 {font-size:1.55rem;margin:0 0 .3rem;}
+.tool-heading {display:flex;gap:16px;align-items:center;justify-content:space-between;margin-bottom:1rem;}
+.tool-heading p {font-size:.85rem;opacity:.74;margin:0;}
+.tool-chip {font-size:.7rem;border:1px solid var(--border);border-radius:14px;padding:.45rem .7rem;white-space:nowrap;color:#a5f3e8;max-width:100%;overflow-wrap:anywhere;}
+.tool-panel { border:1px solid rgba(20,184,166,.17);background:rgba(17,24,39,.74);border-radius:16px;padding:1.2rem;min-width:0;box-sizing:border-box;}
+.tool-panel + .tool-panel {margin-top:1rem;}
+.tool-panel-heading {display:flex;align-items:center;gap:12px;justify-content:space-between;margin-bottom:.85rem;}
+.tool-panel-heading strong {font-size:1rem;}
+.tool-panel-heading > span,.tool-panel-heading > small {font-size:.74rem;opacity:.6;text-align:right;}
+.tool-status {font-size:.82rem;min-height:0;margin:0 0 .7rem;color:#a7ebe1;overflow-wrap:anywhere;}
+.tool-status:empty {display:none;}
+.tool-status.is-error,.wasm-module-card.is-error,.tool-panel .is-error {color:#ff9ca6;}
+.tools-page button {width:auto;min-width:0;margin:0;font-size:.86rem;}
+.tools-page button.secondary,.tools-page button.outline {background:rgba(255,255,255,.045);border:1px solid rgba(255,255,255,.17);color:#e2e8f0;}
+.tools-page button:hover {filter:brightness(1.15);}
+.tools-page button:disabled {opacity:.48;cursor:wait;}
+.tools-page input,.tools-page textarea {color:#f2f5f8;background:rgba(5,12,22,.66);border:1px solid rgba(255,255,255,.16);font-size:16px;min-width:0;box-sizing:border-box;margin:0;}
+.tools-page input[type="file"]{padding:.55rem;}
+.tools-page input[type="color"]{height:44px;min-height:44px;padding:5px;width:100%;}
+.tools-page label{display:block;font-size:.79rem;color:#d8e5ec;min-width:0;}
+.tools-page label input,.tools-page label textarea{display:block;width:100%;margin-top:.35rem;}
+.tool-footnote {font-size:.73rem;opacity:.65;line-height:1.5;margin:.55rem 0 1rem;overflow-wrap:anywhere;}
+.tool-actions {display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;}
+.tool-footer-actions {margin-top:1.1rem;justify-content:flex-end;}
+.tool-fields-2 {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:1rem;}
+.tool-empty{color:#8fa7b4;padding:1rem;border:1px dashed rgba(255,255,255,.14);border-radius:8px;font-size:.84rem;}
+@media (max-width:900px){
+  .action-rail .rail-section-line{width:1px;height:30px;margin:0 .3rem;background:rgba(255,255,255,.2);}
+  .action-rail{scroll-snap-type:x proximity;}
+  .action-rail .rail-btn{scroll-snap-align:start;}
+  .tool-heading{align-items:flex-start;flex-direction:column;gap:8px;}
+  .tools-page h2{font-size:1.3rem;}
+  .tool-panel{padding:1rem;}
+  .tool-panel-heading{flex-wrap:wrap;}
+  .tool-chip{white-space:normal;font-size:.67rem;}
+}
+@media (max-width:390px){
+  .tool-fields-2{grid-template-columns:minmax(0,1fr);}
+}
+
+/* Ensure Pico's default heading colors remain legible on dark tool pages. */
+.tools-page h2,.tool-panel-heading strong,.wasm-module-info strong,.tool-tabbar .tool-tab,.tools-page label {color:#e6edf3;}
+.tools-page input::placeholder,.tools-page textarea::placeholder{color:#8299a9;opacity:1;}
+@media (max-width:900px){
+  .dashboard-header{align-items:flex-start;gap:12px;flex-direction:column;}
+  .dashboard-header .title{font-size:clamp(1.35rem,5.8vw,1.8rem);line-height:1.15;}
+  .dashboard-header .build-tags{align-self:flex-start;}
+}
+
+html {background-color:#0a0e14;}
+.tools-page .tool-heading p {color:#c4d7df;opacity:.88;}
+.tools-page .tool-footnote {color:#b2c2d0;opacity:.85;}
+
+/* ============================================================
+   WEB UI V2 — separate navigation from tools.
+   Desktop: three page buttons left; utilities right with independent
+   vertical scrolling. Mobile: page buttons remain visible, tools live
+   in an accessible toggleable overlay instead of consuming screen width.
+   ============================================================ */
+@media (min-width: 901px) {
+  .main-content {margin-right:var(--rail-width);}
+  .action-rail {overflow:visible;}
+}
+.utility-rail {
+  position:fixed;
+  right:0; top:0; bottom:0;
+  width:var(--rail-width);
+  z-index:1010;
+  box-sizing:border-box;
+  padding:1rem 0;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  gap:.6rem;
+  min-height:0;
+  overflow-y:auto;
+  overflow-x:hidden;
+  overscroll-behavior:contain;
+  scrollbar-width:thin;
+  scrollbar-color:rgba(20,184,166,.65) transparent;
+  background:linear-gradient(180deg,rgba(17,24,39,.96),rgba(10,12,18,.98));
+  border-left:1px solid var(--border);
+}
+.utility-rail::-webkit-scrollbar {width:5px;}
+.utility-rail::-webkit-scrollbar-thumb {background:rgba(20,184,166,.6);border-radius:20px;}
+.utility-rail > .rail-btn, .utility-rail > .rail-advanced {flex:0 0 auto;}
+.utility-rail .rail-btn::after {display:none !important;}
+.utility-rail-heading, .utility-toggle, .utility-scrim {display:none;}
+/* Separate rail also retains keyboard accessibility for all actions. */
+.utility-rail .rail-btn:focus-visible, .utility-toggle:focus-visible {
+  outline:2px solid #74ede0;outline-offset:2px;
+}
+/* Compact the right tools on short desktop screens, but never clip them. */
+@media (min-width:901px) and (max-height:720px) {
+  .utility-rail {gap:.4rem;padding:.5rem 0;}
+  .utility-rail .rail-btn {height:42px;width:42px;min-height:42px;font-size:1.05rem;}
+}
+@media (max-width:900px) {
+  .action-rail {
+    position:fixed;top:0;left:0;right:auto;width:calc(100% - 78px);
+    height:70px;display:flex;justify-content:flex-start;align-items:center;
+    padding:0 .65rem;gap:.65rem;overflow-x:auto;overflow-y:hidden;
+    scrollbar-width:none;z-index:1100;
+  }
+  .action-rail::-webkit-scrollbar{display:none;}
+  .action-rail .page-tab {flex:0 0 48px;width:48px;max-width:48px;min-width:48px;height:48px;min-height:48px;font-size:1.25rem;}
+  .utility-toggle {
+    display:flex;align-items:center;justify-content:center;gap:3px;
+    box-sizing:border-box;position:fixed;top:0;right:0;width:78px;height:70px;
+    z-index:1101;border:0;border-left:1px solid var(--border);
+    border-bottom:1px solid var(--border);border-radius:0;
+    background:#111b28;color:#e5fffa;font-size:1.3rem;
+    margin:0;padding:.3rem;cursor:pointer;
+  }
+  .utility-toggle span {font-size:.68rem;font-weight:600;}
+  .utility-rail {
+    top:70px;right:0;bottom:0;width:min(320px,92vw);
+    padding:1rem;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));
+    gap:.8rem;align-content:start;justify-items:center;
+    overflow-y:auto;overflow-x:hidden;
+    z-index:1090;visibility:hidden;pointer-events:none;
+    transform:translateX(104%);transition:transform 180ms ease,visibility 180ms;
+    box-shadow:-14px 0 35px rgba(0,0,0,.55);
+  }
+  .utility-rail.is-open {visibility:visible;pointer-events:auto;transform:translateX(0);}
+  .utility-rail .rail-btn {width:56px;max-width:56px;min-width:56px;height:56px;min-height:56px;font-size:1.3rem;}
+  .utility-rail-heading {display:flex;grid-column:1/-1;width:100%;justify-content:space-between;gap:.5rem;align-items:center;margin-bottom:.4rem;}
+  .utility-rail-heading strong {font-size:1rem;}
+  .utility-rail-heading span {font-size:.68rem;color:#9ab4c5;}
+  .utility-rail .rail-advanced {grid-column:1/-1;justify-self:stretch;margin:0;}
+  .utility-scrim {display:block;position:fixed;inset:70px 0 0;z-index:1080;background:rgba(0,0,0,.55);visibility:hidden;opacity:0;pointer-events:none;transition:opacity 180ms ease;}
+  .utility-scrim.is-open {opacity:1;visibility:visible;pointer-events:auto;}
+  .main-content {margin-left:0;margin-right:0;margin-top:80px;}
+  .rail-label-toast {left:12px;right:12px;}
+}
+@media (prefers-reduced-motion:reduce){.utility-rail,.utility-scrim{transition:none;}}
+/* Final Pico normalization: its nav defaults must not space the three page
+   icons down the entire left rail. */
+@media (min-width:901px){.action-rail{justify-content:flex-start !important;}}
