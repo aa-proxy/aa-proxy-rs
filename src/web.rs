@@ -92,6 +92,7 @@ const OVERLAY_EDITOR_JS: &str = include_str!("../static/overlay-editor.js");
 const WASM_STORE_JS: &str = include_str!("../static/wasm-store.js");
 const SDR_PROFILES_WEB_JS: &str = include_str!("../static/sdr-profiles-web.js");
 const SDR_INFO_WEB_JS: &str = include_str!("../static/sdr-info-web.js");
+const DISPLAY_INJECTION_WEB_JS: &str = include_str!("../static/display-injection-web.js");
 const LOGO_WEBP: &[u8] = include_bytes!("../static/aa-proxy-rs.webp");
 const AA_PROXY_RS_URL: &str = "https://github.com/aa-proxy/aa-proxy-rs";
 const BUILDROOT_URL: &str = "https://github.com/aa-proxy/buildroot";
@@ -542,6 +543,7 @@ async fn index(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         .replace("{WASM_STORE_JS}", WASM_STORE_JS)
         .replace("{SDR_PROFILES_WEB_JS}", SDR_PROFILES_WEB_JS)
         .replace("{SDR_INFO_WEB_JS}", SDR_INFO_WEB_JS)
+        .replace("{DISPLAY_INJECTION_WEB_JS}", DISPLAY_INJECTION_WEB_JS)
         .replace("{CONFIG_VALUES}", &render_config_values(&config_json))
         .replace("{CONFIG_IDS}", &render_config_ids(&config_json))
         .replace("{LOGO_URL}", "/aa-proxy-rs.webp");

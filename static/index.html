@@ -20,6 +20,7 @@
       <button type="button" class="rail-btn page-tab" id="page-nav-wasm-store" data-page="wasm-store" data-label="WASM Store" aria-label="WASM Store" aria-pressed="false">🧩</button>
       <button type="button" class="rail-btn page-tab" id="page-nav-sdr-ui" data-page="sdr-ui" data-label="SDR UI Editor" aria-label="SDR UI Editor" aria-pressed="false">📐</button>
       <button type="button" class="rail-btn page-tab" id="page-nav-sdr-info" data-page="sdr-info" data-label="SDR Info" aria-label="SDR Info" aria-pressed="false">📡</button>
+      <button type="button" class="rail-btn page-tab" id="page-nav-display-injection" data-page="display-injection" data-label="Display Injection" aria-label="Display Injection" aria-pressed="false">🖧</button>
     </nav>
     <button type="button" id="utility-toggle" class="utility-toggle" aria-controls="utility-rail" aria-expanded="false" aria-label="Open tools" title="Tools">☰ <span>Tools</span></button>
     <div class="utility-scrim" id="utility-scrim" aria-hidden="true"></div>
@@ -477,6 +478,120 @@
         <div id="sdr-profile-detail" class="tool-panel sdr-profile-detail" hidden aria-label="Vehicle and phone profile editor"></div>
         <dialog id="sdr-video-edit-dialog" class="sdr-video-dialog" aria-label="Video geometry editor"></dialog>
       </section>
+      <section id="display-injection-page" class="dashboard-page tools-page di-page" aria-label="Display Injection" hidden>
+        <div class="tool-heading di-top-heading">
+          <div>
+            <h2>🖥️ Display Injection</h2>
+            <p>Configure injected Cluster and Auxiliary displays for Android Auto.</p>
+          </div>
+          <button type="button" id="di-refresh" class="secondary">↻ Refresh</button>
+        </div>
+        <p id="di-status" class="di-notice" role="status" aria-live="polite"></p>
+        <div class="tool-panel di-global-panel">
+          <div class="di-global-copy">
+            <strong>Display Injection</strong>
+            <small>Display IDs are assigned automatically from SDR. Changes apply after restart/reconnect.</small>
+          </div>
+          <label class="di-switch" aria-label="Enable Display Injection">
+            <input id="di-master-enable" type="checkbox" />
+            <span aria-hidden="true"></span>
+          </label>
+        </div>
+        <p class="di-rules">Rules: max 1 Cluster, 0+ Auxiliary displays, MAIN injection disabled. AUX always requires input source.</p>
+        <div class="tool-panel di-section-panel">
+          <div class="tool-panel-heading"><strong>Cluster Display</strong></div>
+          <div id="di-cluster" class="di-cards"></div>
+        </div>
+        <div class="tool-panel di-section-panel">
+          <div class="tool-panel-heading di-aux-heading">
+            <strong>Auxiliary displays</strong>
+            <button type="button" id="di-add-aux">+ Add AUX</button>
+          </div>
+          <div id="di-aux-list" class="di-cards"></div>
+        </div>
+        <p class="tool-footnote" id="di-config-path"></p>
+        <p class="tool-footnote">Profiles are saved through the existing Display Injection API. Restart or reconnect Android Auto to apply configuration changes.</p>
+
+        <div id="di-editor-overlay" class="di-modal-overlay" role="presentation" hidden>
+          <div class="di-editor" role="dialog" aria-modal="true" aria-labelledby="di-editor-heading" tabindex="-1">
+            <div class="di-editor-header">
+              <h3 id="di-editor-heading">Edit display</h3>
+              <button type="button" id="di-editor-x" class="secondary" aria-label="Close editor">✕</button>
+            </div>
+            <form id="di-editor-form" autocomplete="off" novalidate>
+              <label class="di-toggle-row">Enabled
+                <span class="di-switch"><input name="enabled" type="checkbox" /><span aria-hidden="true"></span></span>
+              </label>
+              <label>Name <input type="text" name="name" maxlength="180" /></label>
+              <fieldset class="di-choice-group" data-choice="codec_resolution"><legend>Resolution</legend><div class="di-choice-row">
+                <button type="button" data-choice-value="VIDEO_800x480">800x480</button>
+                <button type="button" data-choice-value="VIDEO_1280x720">1280x720</button>
+                <button type="button" data-choice-value="VIDEO_1920x1080">1920x1080</button>
+              </div></fieldset>
+              <fieldset class="di-choice-group" data-choice="frame_rate"><legend>Frame rate</legend><div class="di-choice-row">
+                <button type="button" data-choice-value="VIDEO_FPS_30">FPS 30</button>
+                <button type="button" data-choice-value="VIDEO_FPS_60">FPS 60</button>
+              </div></fieldset>
+              <fieldset class="di-choice-group" data-choice="initial_content_keycode" id="di-initial-content-group"><legend>Initial content keycode</legend><div class="di-choice-row">
+                <button type="button" data-choice-value="KEYCODE_NAVIGATION">Navigation</button>
+                <button type="button" data-choice-value="KEYCODE_TURN_CARD">Turn card</button>
+              </div></fieldset>
+              <div class="di-number-grid di-cols-2">
+                <label>Width margin <input name="width_margin" type="text" inputmode="numeric" /></label>
+                <label>Height margin <input name="height_margin" type="text" inputmode="numeric" /></label>
+              </div>
+              <fieldset class="di-insets"><legend>Content insets</legend><div class="di-number-grid di-cols-2">
+                <label>Left <input name="content_insets.left" type="text" inputmode="numeric" /></label>
+                <label>Right <input name="content_insets.right" type="text" inputmode="numeric" /></label>
+                <label>Top <input name="content_insets.top" type="text" inputmode="numeric" /></label>
+                <label>Bottom <input name="content_insets.bottom" type="text" inputmode="numeric" /></label>
+              </div></fieldset>
+              <label class="di-keep"><input type="checkbox" name="stable_same" /> Keep Stable Content Insets same as Content Insets</label>
+              <fieldset class="di-insets" id="di-stable-insets"><legend>Stable content insets</legend><div class="di-number-grid di-cols-2">
+                <label>Left <input name="stable_content_insets.left" type="text" inputmode="numeric" /></label>
+                <label>Right <input name="stable_content_insets.right" type="text" inputmode="numeric" /></label>
+                <label>Top <input name="stable_content_insets.top" type="text" inputmode="numeric" /></label>
+                <label>Bottom <input name="stable_content_insets.bottom" type="text" inputmode="numeric" /></label>
+              </div></fieldset>
+              <div class="di-number-grid di-cols-2">
+                <label>Density <input name="density" type="text" inputmode="numeric" /></label>
+                <label>Viewing distance <input name="viewing_distance" type="text" inputmode="numeric" /></label>
+              </div>
+              <label class="di-toggle-row">Touch
+                <span class="di-switch"><input name="input_touchscreen" type="checkbox" /><span aria-hidden="true"></span></span>
+              </label>
+              <div class="di-number-grid di-cols-2">
+                <label>Touch width <input name="touch_width" type="text" inputmode="numeric" /></label>
+                <label>Touch height <input name="touch_height" type="text" inputmode="numeric" /></label>
+              </div>
+              <label class="di-toggle-row"> <span>Input source <small id="di-input-source-hint"></small></span>
+                <span class="di-switch"><input name="input_source" type="checkbox" /><span aria-hidden="true"></span></span>
+              </label>
+              <p class="di-editor-error" id="di-editor-error" role="alert" hidden></p>
+              <div class="di-editor-footer">
+                <button type="button" class="secondary" id="di-editor-cancel">Cancel</button>
+                <button type="submit" id="di-editor-save">Save</button>
+              </div>
+            </form>
+          </div>
+        </div>
+        <div id="di-confirm-overlay" class="di-modal-overlay di-confirm-overlay" hidden>
+          <div class="di-confirm" role="alertdialog" aria-modal="true" aria-labelledby="di-confirm-heading" aria-describedby="di-confirm-description">
+            <h3 id="di-confirm-heading">Remove display?</h3>
+            <p id="di-confirm-description">This removes the injected display config. Restart/reconnect is required.</p>
+            <div class="di-editor-footer"><button type="button" class="secondary" id="di-confirm-cancel">Cancel</button><button type="button" id="di-confirm-remove">Remove</button></div>
+          </div>
+        </div>
+        <div id="di-media-overlay" class="di-modal-overlay" hidden>
+          <div class="di-confirm" role="dialog" aria-modal="true" aria-labelledby="di-media-title">
+            <h3 id="di-media-title">Media tap</h3>
+            <div id="di-media-details"></div>
+            <p class="tool-footnote">The Companion's live View player uses a native Android reverse-socket bridge. The existing web API exposes the tap metadata, but not a browser-playable stream. No media stream is opened from this dialog.</p>
+            <div class="di-editor-footer"><button type="button" class="secondary" id="di-media-close">Close</button></div>
+          </div>
+        </div>
+      </section>
+
       <section id="overlay-page" class="dashboard-page tools-page" aria-label="Overlay Editor" hidden>
         <div class="tool-heading"><div><h2>🖥️ Overlay Editor</h2><p>Design a text overlay for Android Auto video. Preview is local and approximate.</p></div><span class="tool-chip">16:9 preview</span></div>
         <div id="overlay-status" class="tool-status" role="status" aria-live="polite"></div>
@@ -2066,5 +2181,6 @@
     <script>{WASM_STORE_JS}</script>
     <script>{SDR_PROFILES_WEB_JS}</script>
     <script>{SDR_INFO_WEB_JS}</script>
+    <script>{DISPLAY_INJECTION_WEB_JS}</script>
   </body>
 </html>

@@ -1,7 +1,7 @@
 (() => {
   'use strict';
-  const names = {config: 'Configuration', overlay: 'Overlay Editor', 'wasm-store': 'WASM Store', 'sdr-ui': 'SDR UI Editor', 'sdr-info': 'SDR Info'};
-  const panels = { config: 'config-page', overlay: 'overlay-page', 'wasm-store': 'wasm-store-page', 'sdr-ui': 'sdr-ui-page', 'sdr-info': 'sdr-info-page' };
+  const names = {config: 'Configuration', overlay: 'Overlay Editor', 'wasm-store': 'WASM Store', 'sdr-ui': 'SDR UI Editor', 'sdr-info': 'SDR Info', 'display-injection': 'Display Injection'};
+  const panels = { config: 'config-page', overlay: 'overlay-page', 'wasm-store': 'wasm-store-page', 'sdr-ui': 'sdr-ui-page', 'sdr-info': 'sdr-info-page', 'display-injection': 'display-injection-page' };
   let current = null;
   function route() {
     const page = window.location.hash.replace(/^#\/?/, '').toLowerCase();
