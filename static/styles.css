@@ -1801,7 +1801,28 @@ body.show-advanced .rail-advanced .rail-advanced-label {
 .tool-actions {display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;}
 .tool-footer-actions {margin-top:1.1rem;justify-content:flex-end;}
 .tool-fields-2 {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:1rem;}
+.overlay-layout{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,1fr);gap:16px;align-items:start;}
+.overlay-preview-column{position:sticky;top:16px;}
+.aa-preview-frame{width:100%;aspect-ratio:16/9;box-sizing:border-box;position:relative;overflow:hidden;background:linear-gradient(140deg,#1a2332 0%,#0c1831 40%,#152a41 100%);border:1px solid #405c68;border-radius:12px;color:#edf5ff;}
+.aa-preview-top{position:absolute;top:0;left:0;right:0;height:15%;padding:2% 4%;background:rgba(6,9,17,.65);font-size:clamp(8px,.85vw,13px);box-sizing:border-box;}
+.aa-preview-top span,.aa-preview-dock span{float:right;}
+.aa-preview-media{position:absolute;left:10%;top:32%;display:flex;align-items:center;gap:12px;font-size:clamp(10px,1.2vw,18px);}
+.aa-preview-media small{display:block;font-size:.65em;opacity:.6;margin-top:5px;}
+.aa-preview-cover{display:grid;place-items:center;width:clamp(25px,5vw,60px);height:clamp(25px,5vw,60px);border-radius:8px;background:#243b52;font-size:1.6em;}
+.aa-preview-dock{position:absolute;bottom:0;left:0;right:0;height:15%;padding:2% 4%;box-sizing:border-box;background:rgba(0,0,0,.85);font-size:clamp(9px,1vw,14px);}
+.aa-overlay-box{box-sizing:border-box;position:absolute;max-width:95%;max-height:90%;overflow:hidden;white-space:pre-wrap;overflow-wrap:anywhere;z-index:2;font-family:system-ui,sans-serif;text-shadow:1px 1px 1px #000;}
+.overlay-editor-controls > label:not(.tool-switch-row label){display:block;margin-top:.6rem;}
+.overlay-editor-controls > textarea{display:block;width:100%;margin-top:.5rem;}
+.overlay-anchor-grid{display:grid;grid-template-columns:repeat(3,44px);gap:5px;justify-content:center;margin-bottom:1rem;}
+.overlay-anchor-grid button{height:44px;min-height:44px;padding:0;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.2);color:#e6edf3;}
+.overlay-anchor-grid button.is-selected {color:#072d2a;background:#6ee7d5;border-color:#b1fff0;}
+.tool-switch-row{display:flex;align-items:center;justify-content:space-between;gap:15px;margin-bottom:1.2rem;}
+.tool-switch-row label{font-size:1rem;font-weight:600;}
+.tool-switch-row label small{display:block;font-size:.7rem;font-weight:400;color:#91a9b0;margin-top:4px;}
+.tool-switch-row input[type="checkbox"]{width:22px;height:22px;flex:0 0 auto;margin:0;}
+.tool-layout-presets button{flex:1;min-width:110px;padding:.65rem .6rem;}
 .tool-empty{color:#8fa7b4;padding:1rem;border:1px dashed rgba(255,255,255,.14);border-radius:8px;font-size:.84rem;}
+@media (max-width: 1050px){.overlay-layout{grid-template-columns:minmax(0,1fr);} .overlay-preview-column{position:static;}}
 @media (max-width:900px){
   .action-rail .rail-section-line{width:1px;height:30px;margin:0 .3rem;background:rgba(255,255,255,.2);}
   .action-rail{scroll-snap-type:x proximity;}
@@ -1811,9 +1832,11 @@ body.show-advanced .rail-advanced .rail-advanced-label {
   .tool-panel{padding:1rem;}
   .tool-panel-heading{flex-wrap:wrap;}
   .tool-chip{white-space:normal;font-size:.67rem;}
+  .overlay-preview-column{position:static;}
 }
 @media (max-width:390px){
   .tool-fields-2{grid-template-columns:minmax(0,1fr);}
+  .tool-layout-presets button{flex:1 0 100%;}
 }
 
 /* Ensure Pico's default heading colors remain legible on dark tool pages. */
@@ -1915,3 +1938,12 @@ html {background-color:#0a0e14;}
 /* Final Pico normalization: its nav defaults must not space the three page
    icons down the entire left rail. */
 @media (min-width:901px){.action-rail{justify-content:flex-start !important;}}
+
+/* Vector Canvas background. The editable text remains a separate HTML overlay. */
+.aa-preview-frame .aa-preview-canvas {position:absolute;inset:0;display:block;width:100%;height:100%;pointer-events:none;z-index:0;}
+.aa-preview-frame .aa-preview-guide {position:absolute;inset:4%;border:1px dashed #75f4ee;z-index:1;pointer-events:none;box-shadow:0 0 0 1px #0c171f77;}
+.aa-preview-frame .aa-preview-guide[hidden]{display:none!important;}
+.aa-preview-frame .aa-overlay-box.show-bounds {outline:2px dashed #ffd166;outline-offset:1px;}
+.overlay-preview-tools{display:flex;gap:20px;align-items:center;flex-wrap:wrap;margin:12px 0 5px;}
+.overlay-preview-tools label{display:inline-flex!important;align-items:center;gap:7px;width:auto!important;font-size:.84rem;margin:0;cursor:pointer;}
+.overlay-preview-tools input[type=checkbox]{position:static!important;display:inline-block!important;appearance:auto!important;width:19px!important;height:19px!important;margin:0!important;accent-color:#14b8a6;flex:0 0 19px;}

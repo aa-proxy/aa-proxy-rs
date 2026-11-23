@@ -16,6 +16,7 @@
   <body>
     <nav class="action-rail" aria-label="Dashboard navigation">
       <button type="button" class="rail-btn page-tab is-active" id="page-nav-config" data-page="config" data-label="Configuration" aria-label="Configuration" aria-pressed="true">⚙️</button>
+      <button type="button" class="rail-btn page-tab" id="page-nav-overlay" data-page="overlay" data-label="Overlay Editor" aria-label="Overlay Editor" aria-pressed="false">🖥️</button>
     </nav>
     <button type="button" id="utility-toggle" class="utility-toggle" aria-controls="utility-rail" aria-expanded="false" aria-label="Open tools" title="Tools">☰ <span>Tools</span></button>
     <div class="utility-scrim" id="utility-scrim" aria-hidden="true"></div>
@@ -459,6 +460,61 @@
           </div>
         </details>
       </section>
+      </section>
+
+      <section id="overlay-page" class="dashboard-page tools-page" aria-label="Overlay Editor" hidden>
+        <div class="tool-heading"><div><h2>🖥️ Overlay Editor</h2><p>Design a text overlay for Android Auto video. Preview is local and approximate.</p></div><span class="tool-chip">16:9 preview</span></div>
+        <div id="overlay-status" class="tool-status" role="status" aria-live="polite"></div>
+        <div class="overlay-layout">
+          <div class="tool-panel overlay-preview-column">
+            <div class="tool-panel-heading"><strong>Live preview</strong><span>Sample Android Auto screen</span></div>
+            <div class="aa-preview-frame" id="overlay-preview-frame">
+              <canvas class="aa-preview-canvas" id="overlay-preview-canvas" width="1280" height="720" role="img" aria-label="Illustrated Android Auto dashboard preview"></canvas>
+              <div class="aa-preview-guide" id="overlay-preview-guide" hidden aria-hidden="true"></div>
+              <div id="overlay-preview-box" class="aa-overlay-box" aria-label="Overlay preview"></div>
+            </div>
+            <div class="overlay-preview-tools" role="group" aria-label="Preview display options">
+              <label><input type="checkbox" id="overlay-preview-guides"> Show guides</label>
+              <label><input type="checkbox" id="overlay-preview-bounds"> Show text bounds</label>
+            </div>
+            <p class="tool-footnote">Canvas-drawn Android Auto sample, not live video. Overlay text, position and colors update as you edit. Guides and text bounds are optional. TTF rendering may differ on the proxy.</p>
+            <div class="tool-panel-heading"><strong>Quick layouts</strong></div>
+            <div class="tool-actions tool-layout-presets">
+              <button type="button" data-overlay-preset="telemetry">Telemetry</button>
+              <button type="button" data-overlay-preset="temperature">Temperature</button>
+              <button type="button" data-overlay-preset="dtc">DTC alert</button>
+            </div>
+          </div>
+          <div class="tool-panel overlay-editor-controls">
+            <div class="tool-switch-row"><label for="overlay-enabled">Enable overlay <small>Reconnect Android Auto after changing this switch</small></label><input id="overlay-enabled" type="checkbox"></div>
+            <label for="overlay-text">Text / styled HTML</label>
+            <textarea id="overlay-text" rows="5" maxlength="8192" spellcheck="false" placeholder="RPM: 2500"></textarea>
+            <p class="tool-footnote">Supports &lt;b&gt;, &lt;i&gt;, &lt;u&gt;, &lt;font color&gt;, &lt;span style&gt;, &lt;br&gt; and variables.</p>
+            <div class="tool-panel-heading"><strong>Position</strong><small>Choose anchor</small></div>
+            <div class="overlay-anchor-grid" id="overlay-anchor-grid" aria-label="Overlay position">
+              <button type="button" data-anchor="left,top" aria-label="Top left">↖</button><button type="button" data-anchor="center,top" aria-label="Top center">↑</button><button type="button" data-anchor="right,top" aria-label="Top right">↗</button>
+              <button type="button" data-anchor="left,center" aria-label="Middle left">←</button><button type="button" data-anchor="center,center" aria-label="Center">●</button><button type="button" data-anchor="right,center" aria-label="Middle right">→</button>
+              <button type="button" data-anchor="left,bottom" aria-label="Bottom left">↙</button><button type="button" data-anchor="center,bottom" aria-label="Bottom center">↓</button><button type="button" data-anchor="right,bottom" aria-label="Bottom right">↘</button>
+            </div>
+            <div class="tool-fields-2">
+              <label>X offset (px)<input id="overlay-x" type="number" min="0" max="8192" inputmode="numeric"></label>
+              <label>Y offset (px)<input id="overlay-y" type="number" min="0" max="8192" inputmode="numeric"></label>
+              <label>Font size / scale<input id="overlay-scale" type="number" min="1" max="128" inputmode="numeric"></label>
+              <label>Background opacity %<input id="overlay-opacity" type="number" min="0" max="100" inputmode="numeric"></label>
+              <label>Padding X<input id="overlay-padding-x" type="number" min="0" max="2048" inputmode="numeric"></label>
+              <label>Padding Y<input id="overlay-padding-y" type="number" min="0" max="2048" inputmode="numeric"></label>
+              <label>Border (px)<input id="overlay-border" type="number" min="0" max="40" inputmode="numeric"></label>
+              <label>Line spacing (px)<input id="overlay-linespace" type="number" min="0" max="100" inputmode="numeric"></label>
+              <label>Character spacing (px)<input id="overlay-charspace" type="number" min="0" max="100" inputmode="numeric"></label>
+              <label>Text color<input id="overlay-color-text" type="color"></label>
+              <label>Background color<input id="overlay-color-bg" type="color"></label>
+              <label>Border color<input id="overlay-color-border" type="color"></label>
+            </div>
+            <label for="overlay-font">TTF font path on proxy<input id="overlay-font" type="text" placeholder="/path/to/font.ttf" maxlength="500"></label>
+            <p id="overlay-path" class="tool-footnote"></p>
+            <div class="tool-actions tool-footer-actions"><button type="button" id="overlay-reload" class="secondary">Reload</button><button type="button" id="overlay-save">Save overlay</button></div>
+          </div>
+        </div>
       </section>
     </main>
     <div
@@ -1940,5 +1996,6 @@
       });
     </script>
     <script>{DASHBOARD_PAGES_JS}</script>
+    <script>{OVERLAY_EDITOR_JS}</script>
   </body>
 </html>

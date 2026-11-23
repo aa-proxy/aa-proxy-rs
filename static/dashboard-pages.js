@@ -1,7 +1,7 @@
 (() => {
   'use strict';
-  const names = {config: 'Configuration'};
-  const panels = { config: 'config-page' };
+  const names = {config: 'Configuration', overlay: 'Overlay Editor'};
+  const panels = { config: 'config-page', overlay: 'overlay-page' };
   let current = null;
   function route() {
     const page = window.location.hash.replace(/^#\/?/, '').toLowerCase();
