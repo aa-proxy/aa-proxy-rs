@@ -188,9 +188,12 @@ pub fn app(state: Arc<AppState>) -> Router {
         )
         // Dedicated authenticated telemetry ingestion; existing /overlay and
         // legacy /raw-topic-data paths are intentionally preserved.
-        .route("/overlay/data", get(overlay_data_api::get_data)
-            .post(overlay_data_api::post_data)
-            .layer(axum::extract::DefaultBodyLimit::max(16 * 1024)))
+        .route(
+            "/overlay/data",
+            get(overlay_data_api::get_data)
+                .post(overlay_data_api::post_data)
+                .layer(axum::extract::DefaultBodyLimit::max(16 * 1024)),
+        )
         .route("/ws/overlay", get(overlay_data_api::websocket))
         .route(
             "/map-album-art",
@@ -1959,30 +1962,39 @@ async fn service_discovery_response_handler(
         return (
             [("cache-control", "no-store"), ("x-sdr-source", "memory")],
             Json(value),
-        ).into_response();
+        )
+            .into_response();
     }
     // First request after aa-proxy-rs restart, or when AA is disconnected.
     match sdr_snapshot::load().await {
         Ok(Some(value)) => (
             [("cache-control", "no-store"), ("x-sdr-source", "disk")],
             Json(value),
-        ).into_response(),
+        )
+            .into_response(),
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(json!({
                 "error": "service_discovery_response_not_available",
                 "message": "No ServiceDiscoveryResponse has been observed or saved yet"
             })),
-        ).into_response(),
+        )
+            .into_response(),
         Err(e) => {
-            warn!("{} failed to load saved SDR from {}: {}", NAME, sdr_snapshot::LAST_SDR_PATH, e);
+            warn!(
+                "{} failed to load saved SDR from {}: {}",
+                NAME,
+                sdr_snapshot::LAST_SDR_PATH,
+                e
+            );
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
                     "error": "service_discovery_response_cache_error",
                     "message": "Saved SDR could not be read"
                 })),
-            ).into_response()
+            )
+                .into_response()
         }
     }
 }

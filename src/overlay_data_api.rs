@@ -34,17 +34,31 @@ struct DataUpdate {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum WsRequest {
-    Auth { token: String },
-    Update { source: String, values: Map<String, Value>, #[serde(default)] ttl_ms: Option<u64> },
+    Auth {
+        token: String,
+    },
+    Update {
+        source: String,
+        values: Map<String, Value>,
+        #[serde(default)]
+        ttl_ms: Option<u64>,
+    },
 }
 
 #[derive(Debug, Serialize)]
-struct WriteAck { ok: bool, source: String, ttl_ms: u64 }
+struct WriteAck {
+    ok: bool,
+    source: String,
+    ttl_ms: u64,
+}
 
 fn configured_token() -> Result<String, (StatusCode, &'static str)> {
     match std::env::var("OVERLAY_DATA_TOKEN") {
         Ok(s) if s.len() >= 16 && s.len() <= 256 => Ok(s),
-        _ => Err((StatusCode::SERVICE_UNAVAILABLE, "OVERLAY_DATA_TOKEN is not configured (minimum 16 characters)")),
+        _ => Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "OVERLAY_DATA_TOKEN is not configured (minimum 16 characters)",
+        )),
     }
 }
 
@@ -61,7 +75,8 @@ fn token_matches(actual: &str, expected: &str) -> bool {
 
 fn verify_http(headers: &HeaderMap) -> Result<(), (StatusCode, &'static str)> {
     let configured = configured_token()?;
-    let given = headers.get(header::AUTHORIZATION)
+    let given = headers
+        .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
     match given {
@@ -71,19 +86,27 @@ fn verify_http(headers: &HeaderMap) -> Result<(), (StatusCode, &'static str)> {
 }
 
 fn valid_identifier(s: &str, max: usize) -> bool {
-    !s.is_empty() && s.len() <= max && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+    !s.is_empty()
+        && s.len() <= max
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
 }
 
 fn validate_and_update(update: DataUpdate) -> Result<WriteAck, (StatusCode, &'static str)> {
     if !valid_identifier(&update.source, 48) {
-        return Err((StatusCode::BAD_REQUEST, "source must be 1-48 characters: lowercase letters, digits, _ or -"));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "source must be 1-48 characters: lowercase letters, digits, _ or -",
+        ));
     }
     if update.values.is_empty() || update.values.len() > MAX_FIELDS {
         return Err((StatusCode::BAD_REQUEST, "values must contain 1-32 fields"));
     }
     for (key, val) in &update.values {
-        if !valid_identifier(key, 48) || matches!(val, Value::Array(_) | Value::Object(_)) ||
-           val.as_str().map(|v| v.len() > 256).unwrap_or(false) {
+        if !valid_identifier(key, 48)
+            || matches!(val, Value::Array(_) | Value::Object(_))
+            || val.as_str().map(|v| v.len() > 256).unwrap_or(false)
+        {
             return Err((StatusCode::BAD_REQUEST, "field keys must be simple identifiers and values must be scalar (string max 256 bytes)"));
         }
     }
@@ -92,21 +115,38 @@ fn validate_and_update(update: DataUpdate) -> Result<WriteAck, (StatusCode, &'st
         return Err((StatusCode::BAD_REQUEST, "ttl_ms must be 250..60000"));
     }
     overlay_vars::update_overlay_source(&update.source, update.values, Duration::from_millis(ttl))
-        .map_err(|_| (StatusCode::TOO_MANY_REQUESTS, "Overlay source limit reached"))?;
-    Ok(WriteAck { ok: true, source: update.source, ttl_ms: ttl })
+        .map_err(|_| {
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                "Overlay source limit reached",
+            )
+        })?;
+    Ok(WriteAck {
+        ok: true,
+        source: update.source,
+        ttl_ms: ttl,
+    })
 }
 
 pub async fn get_data(headers: HeaderMap) -> impl IntoResponse {
-    if let Err(error) = verify_http(&headers) { return error.into_response(); }
-    ([(header::CACHE_CONTROL, "no-store")], axum::Json(json!({
-        "sources": overlay_vars::overlay_sources_status(),
-        "namespace": "ws.overlay.<source>.<field>",
-        "max_sources": 32
-    }))).into_response()
+    if let Err(error) = verify_http(&headers) {
+        return error.into_response();
+    }
+    (
+        [(header::CACHE_CONTROL, "no-store")],
+        axum::Json(json!({
+            "sources": overlay_vars::overlay_sources_status(),
+            "namespace": "ws.overlay.<source>.<field>",
+            "max_sources": 32
+        })),
+    )
+        .into_response()
 }
 
 pub async fn post_data(headers: HeaderMap, Json(update): Json<Value>) -> impl IntoResponse {
-    if let Err(error) = verify_http(&headers) { return error.into_response(); }
+    if let Err(error) = verify_http(&headers) {
+        return error.into_response();
+    }
     let update: DataUpdate = match serde_json::from_value(update) {
         Ok(value) => value,
         Err(_) => return (StatusCode::BAD_REQUEST, "Invalid overlay data request").into_response(),
@@ -140,28 +180,58 @@ async fn handle_socket(mut socket: WebSocket, secret: String) {
                 Ok(WsRequest::Auth { token }) if token_matches(&token, &secret))
     );
     if !authenticated {
-        let _ = socket.send(Message::Text(json!({"type":"error","message":"authentication required"}).to_string())).await;
+        let _ = socket
+            .send(Message::Text(
+                json!({"type":"error","message":"authentication required"}).to_string(),
+            ))
+            .await;
         let _ = socket.close().await;
         return;
     }
-    if socket.send(Message::Text(json!({"type":"authenticated"}).to_string())).await.is_err() { return; }
+    if socket
+        .send(Message::Text(json!({"type":"authenticated"}).to_string()))
+        .await
+        .is_err()
+    {
+        return;
+    }
     while let Some(message) = socket.next().await {
         match message {
             Ok(Message::Text(text)) => {
                 let response = match serde_json::from_str::<WsRequest>(&text) {
-                    Ok(WsRequest::Update { source, values, ttl_ms }) => {
-                        match validate_and_update(DataUpdate {source, values, ttl_ms}) {
-                            Ok(ack) => json!({"type":"ack", "source":ack.source, "ttl_ms":ack.ttl_ms}),
+                    Ok(WsRequest::Update {
+                        source,
+                        values,
+                        ttl_ms,
+                    }) => {
+                        match validate_and_update(DataUpdate {
+                            source,
+                            values,
+                            ttl_ms,
+                        }) {
+                            Ok(ack) => {
+                                json!({"type":"ack", "source":ack.source, "ttl_ms":ack.ttl_ms})
+                            }
                             Err((_, error)) => json!({"type":"error", "message":error}),
                         }
                     }
                     _ => json!({"type":"error", "message":"expected update message"}),
                 };
-                if socket.send(Message::Text(response.to_string())).await.is_err() { break; }
+                if socket
+                    .send(Message::Text(response.to_string()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
             }
-            Ok(Message::Ping(data)) => { if socket.send(Message::Pong(data)).await.is_err() { break; } }
+            Ok(Message::Ping(data)) => {
+                if socket.send(Message::Pong(data)).await.is_err() {
+                    break;
+                }
+            }
             Ok(Message::Close(_)) | Err(_) => break,
-            _ => {},
+            _ => {}
         }
     }
 }
@@ -178,16 +248,23 @@ mod tests {
             source: "obd".to_string(),
             values: serde_json::from_str(r#"{"rpm":{"nested":1}}"#).unwrap(),
             ttl_ms: Some(3000),
-        }).is_err());
+        })
+        .is_err());
     }
     #[test]
     fn accepts_scalar_values_and_validates_ttl() {
         assert!(validate_and_update(DataUpdate {
-            source:"obd".into(), values:serde_json::from_str(r#"{"rpm":2500,"temp":87.5}"#).unwrap(), ttl_ms:Some(3000)
-        }).is_ok());
+            source: "obd".into(),
+            values: serde_json::from_str(r#"{"rpm":2500,"temp":87.5}"#).unwrap(),
+            ttl_ms: Some(3000)
+        })
+        .is_ok());
         assert!(validate_and_update(DataUpdate {
-            source:"obd".into(), values:serde_json::from_str(r#"{"rpm":2500}"#).unwrap(), ttl_ms:Some(1)
-        }).is_err());
+            source: "obd".into(),
+            values: serde_json::from_str(r#"{"rpm":2500}"#).unwrap(),
+            ttl_ms: Some(1)
+        })
+        .is_err());
     }
     #[test]
     fn token_comparison() {

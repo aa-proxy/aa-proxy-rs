@@ -19,13 +19,22 @@ pub async fn save(value: &Value) -> io::Result<()> {
 
 async fn save_at(path: &Path, value: &Value) -> io::Result<()> {
     if !value.is_object() {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "SDR must be a JSON object"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "SDR must be a JSON object",
+        ));
     }
-    let bytes = serde_json::to_vec(value).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let bytes =
+        serde_json::to_vec(value).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     if bytes.len() > MAX_SDR_BYTES {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "SDR snapshot exceeds 1 MiB"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "SDR snapshot exceeds 1 MiB",
+        ));
     }
-    let parent = path.parent().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "SDR path has no parent"))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "SDR path has no parent"))?;
     fs::create_dir_all(parent).await?;
     // Unique temporary file and atomic rename: readers never see half a JSON document.
     let serial = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
@@ -40,7 +49,8 @@ async fn save_at(path: &Path, value: &Value) -> io::Result<()> {
         file.sync_all().await?;
         drop(file);
         fs::rename(&tmp, path).await
-    }.await;
+    }
+    .await;
     if result.is_err() {
         let _ = fs::remove_file(&tmp).await;
     }
@@ -58,13 +68,19 @@ async fn load_at(path: &Path) -> io::Result<Option<Value>> {
         Err(e) => return Err(e),
     };
     if meta.len() > MAX_SDR_BYTES as u64 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "Saved SDR exceeds 1 MiB"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Saved SDR exceeds 1 MiB",
+        ));
     }
     let bytes = fs::read(path).await?;
     let value: Value = serde_json::from_slice(&bytes)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     if !value.is_object() {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "Saved SDR is not a JSON object"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Saved SDR is not a JSON object",
+        ));
     }
     Ok(Some(value))
 }
@@ -78,7 +94,8 @@ mod tests {
     async fn save_load_replace_and_missing() {
         let path = std::env::temp_dir().join(format!(
             "aa-proxy-sdr-test-{}-{}.json",
-            std::process::id(), TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            std::process::id(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
         assert!(load_at(&path).await.unwrap().is_none());
         let old = json!({"services": [{"id": 1}], "headUnitMake": "Google"});
@@ -94,10 +111,14 @@ mod tests {
     async fn invalid_json_is_not_accepted() {
         let path = std::env::temp_dir().join(format!(
             "aa-proxy-sdr-bad-{}-{}.json",
-            std::process::id(), TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            std::process::id(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
         fs::write(&path, b"{broken").await.unwrap();
-        assert_eq!(load_at(&path).await.unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            load_at(&path).await.unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
         fs::remove_file(path).await.unwrap();
     }
 }

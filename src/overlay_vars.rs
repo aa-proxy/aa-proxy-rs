@@ -19,9 +19,9 @@
 
 use crate::ev::BatteryData;
 use crate::web::ServerEvent;
-use std::collections::{BTreeMap, HashMap};
-use serde_json::{Map as JsonMap, Value as JsonValue};
 use serde::Serialize;
+use serde_json::{Map as JsonMap, Value as JsonValue};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
@@ -96,7 +96,6 @@ pub struct OverlaySourceStatus {
     pub fields: BTreeMap<String, OverlayFieldStatus>,
 }
 
-
 #[derive(Default)]
 struct Store {
     battery: BatteryValues,
@@ -155,23 +154,49 @@ fn merge_overlay_source(
 ) -> Result<(), &'static str> {
     // Keep memory bounded even if clients only send data occasionally.
     store.overlay_sources.retain(|_, source| {
-        source.fields.retain(|_, field| now.saturating_duration_since(field.updated) <= field.ttl);
+        source
+            .fields
+            .retain(|_, field| now.saturating_duration_since(field.updated) <= field.ttl);
         !source.fields.is_empty()
     });
-    if !store.overlay_sources.contains_key(source) && store.overlay_sources.len() >= MAX_OVERLAY_SOURCES {
+    if !store.overlay_sources.contains_key(source)
+        && store.overlay_sources.len() >= MAX_OVERLAY_SOURCES
+    {
         return Err("Too many overlay sources (maximum 32)");
     }
-    let existing_count = store.overlay_sources.get(source).map(|e| e.fields.len()).unwrap_or(0);
-    let new_count = values.keys().filter(|key| {
-        !store.overlay_sources.get(source).map(|e| e.fields.contains_key(*key)).unwrap_or(false)
-    }).count();
+    let existing_count = store
+        .overlay_sources
+        .get(source)
+        .map(|e| e.fields.len())
+        .unwrap_or(0);
+    let new_count = values
+        .keys()
+        .filter(|key| {
+            !store
+                .overlay_sources
+                .get(source)
+                .map(|e| e.fields.contains_key(*key))
+                .unwrap_or(false)
+        })
+        .count();
     if existing_count + new_count > 32 {
         return Err("Too many overlay fields in source (maximum 32)");
     }
-    let source_entry = store.overlay_sources.entry(source.to_owned())
-        .or_insert_with(|| OverlaySource { fields: HashMap::new() });
+    let source_entry = store
+        .overlay_sources
+        .entry(source.to_owned())
+        .or_insert_with(|| OverlaySource {
+            fields: HashMap::new(),
+        });
     for (key, value) in values {
-        source_entry.fields.insert(key, OverlayField { value, updated: now, ttl });
+        source_entry.fields.insert(
+            key,
+            OverlayField {
+                value,
+                updated: now,
+                ttl,
+            },
+        );
     }
     Ok(())
 }
@@ -191,32 +216,49 @@ pub fn update_overlay_source(
 /// keys for backwards compatibility with V9 clients.
 pub fn overlay_sources_status() -> Vec<OverlaySourceStatus> {
     let now = Instant::now();
-    let Ok(store) = STORE.lock() else { return Vec::new(); };
-    let mut result: Vec<_> = store.overlay_sources.iter().map(|(source, entry)| {
-        let mut values = JsonMap::new();
-        let mut fields = BTreeMap::new();
-        let mut newest: Option<&OverlayField> = None;
-        for (key, field) in &entry.fields {
-            let age = now.saturating_duration_since(field.updated);
-            let fresh = age <= field.ttl;
-            if fresh { values.insert(key.clone(), field.value.clone()); }
-            fields.insert(key.clone(), OverlayFieldStatus {
-                age_ms: age.as_millis().min(u64::MAX as u128) as u64,
-                ttl_ms: field.ttl.as_millis().min(u64::MAX as u128) as u64,
-                fresh,
-            });
-            if newest.map(|e| field.updated > e.updated).unwrap_or(true) { newest = Some(field); }
-        }
-        let latest_age = newest.map(|f| now.saturating_duration_since(f.updated)).unwrap_or_default();
-        OverlaySourceStatus {
-            source: source.clone(),
-            fresh: !values.is_empty(),
-            values,
-            age_ms: latest_age.as_millis().min(u64::MAX as u128) as u64,
-            ttl_ms: newest.map(|f| f.ttl.as_millis().min(u64::MAX as u128) as u64).unwrap_or(0),
-            fields,
-        }
-    }).collect();
+    let Ok(store) = STORE.lock() else {
+        return Vec::new();
+    };
+    let mut result: Vec<_> = store
+        .overlay_sources
+        .iter()
+        .map(|(source, entry)| {
+            let mut values = JsonMap::new();
+            let mut fields = BTreeMap::new();
+            let mut newest: Option<&OverlayField> = None;
+            for (key, field) in &entry.fields {
+                let age = now.saturating_duration_since(field.updated);
+                let fresh = age <= field.ttl;
+                if fresh {
+                    values.insert(key.clone(), field.value.clone());
+                }
+                fields.insert(
+                    key.clone(),
+                    OverlayFieldStatus {
+                        age_ms: age.as_millis().min(u64::MAX as u128) as u64,
+                        ttl_ms: field.ttl.as_millis().min(u64::MAX as u128) as u64,
+                        fresh,
+                    },
+                );
+                if newest.map(|e| field.updated > e.updated).unwrap_or(true) {
+                    newest = Some(field);
+                }
+            }
+            let latest_age = newest
+                .map(|f| now.saturating_duration_since(f.updated))
+                .unwrap_or_default();
+            OverlaySourceStatus {
+                source: source.clone(),
+                fresh: !values.is_empty(),
+                values,
+                age_ms: latest_age.as_millis().min(u64::MAX as u128) as u64,
+                ttl_ms: newest
+                    .map(|f| f.ttl.as_millis().min(u64::MAX as u128) as u64)
+                    .unwrap_or(0),
+                fields,
+            }
+        })
+        .collect();
     result.sort_by(|a, b| a.source.cmp(&b.source));
     result
 }
@@ -388,7 +430,9 @@ fn lookup_ws(store: &Store, now: Instant, path: &str) -> Option<Value> {
         if let Some((source, key)) = rest.split_once('.') {
             if let Some(entry) = store.overlay_sources.get(source) {
                 let field = entry.fields.get(key)?;
-                if now.saturating_duration_since(field.updated) > field.ttl { return None; }
+                if now.saturating_duration_since(field.updated) > field.ttl {
+                    return None;
+                }
                 return json_to_overlay_value(field.value.clone());
             }
         }
@@ -713,9 +757,26 @@ mod tests {
         let now = Instant::now();
         let mut s = Store::default();
         s.set_ws("obd", r#"{"rpm":900}"#, now);
-        merge_overlay_source(&mut s, "obd", serde_json::from_str(r#"{"rpm":2500,"coolant":87.5}"#).unwrap(), Duration::from_secs(2), now).unwrap();
-        assert_eq!(expand_with(&s, now, "{{ws.obd.rpm}}/{{ws.overlay.obd.rpm:0}}"), "900/2500");
-        assert_eq!(expand_with(&s, now + Duration::from_secs(3), "{{ws.overlay.obd.rpm | —}}"), "—");
+        merge_overlay_source(
+            &mut s,
+            "obd",
+            serde_json::from_str(r#"{"rpm":2500,"coolant":87.5}"#).unwrap(),
+            Duration::from_secs(2),
+            now,
+        )
+        .unwrap();
+        assert_eq!(
+            expand_with(&s, now, "{{ws.obd.rpm}}/{{ws.overlay.obd.rpm:0}}"),
+            "900/2500"
+        );
+        assert_eq!(
+            expand_with(
+                &s,
+                now + Duration::from_secs(3),
+                "{{ws.overlay.obd.rpm | —}}"
+            ),
+            "—"
+        );
         assert_eq!(expand_with(&s, now, "{{ws.overlay.obd.coolant:1}}"), "87.5");
     }
 
@@ -723,9 +784,18 @@ mod tests {
     fn dynamic_values_cannot_inject_html() {
         let now = Instant::now();
         let mut s = Store::default();
-        merge_overlay_source(&mut s, "sensor", serde_json::from_str(r#"{"text":"<script>alert(1)</script>"}"#).unwrap(), Duration::from_secs(3), now).unwrap();
-        assert_eq!(expand_with(&s, now, "{{ws.overlay.sensor.text}}"),
-            "&lt;script&gt;alert(1)&lt;/script&gt;");
+        merge_overlay_source(
+            &mut s,
+            "sensor",
+            serde_json::from_str(r#"{"text":"<script>alert(1)</script>"}"#).unwrap(),
+            Duration::from_secs(3),
+            now,
+        )
+        .unwrap();
+        assert_eq!(
+            expand_with(&s, now, "{{ws.overlay.sensor.text}}"),
+            "&lt;script&gt;alert(1)&lt;/script&gt;"
+        );
     }
 
     #[test]
@@ -733,15 +803,50 @@ mod tests {
         let t0 = Instant::now();
         let mut s = Store::default();
         s.set_ws("obd", r#"{"rpm":999}"#, t0);
-        merge_overlay_source(&mut s, "obd", serde_json::from_str(r#"{"rpm":2500,"coolant":86}"#).unwrap(), Duration::from_secs(2), t0).unwrap();
+        merge_overlay_source(
+            &mut s,
+            "obd",
+            serde_json::from_str(r#"{"rpm":2500,"coolant":86}"#).unwrap(),
+            Duration::from_secs(2),
+            t0,
+        )
+        .unwrap();
         let t1 = t0 + Duration::from_millis(1500);
-        merge_overlay_source(&mut s, "obd", serde_json::from_str(r#"{"rpm":2600}"#).unwrap(), Duration::from_secs(3), t1).unwrap();
-        assert_eq!(expand_with(&s, t1, "{{ws.overlay.obd.coolant}} / {{ws.overlay.obd.rpm}}"), "86 / 2600");
+        merge_overlay_source(
+            &mut s,
+            "obd",
+            serde_json::from_str(r#"{"rpm":2600}"#).unwrap(),
+            Duration::from_secs(3),
+            t1,
+        )
+        .unwrap();
+        assert_eq!(
+            expand_with(
+                &s,
+                t1,
+                "{{ws.overlay.obd.coolant}} / {{ws.overlay.obd.rpm}}"
+            ),
+            "86 / 2600"
+        );
         let later = t0 + Duration::from_millis(2200);
-        assert_eq!(expand_with(&s, later, "{{ws.overlay.obd.coolant | —}} / {{ws.overlay.obd.rpm}}"), "— / 2600");
+        assert_eq!(
+            expand_with(
+                &s,
+                later,
+                "{{ws.overlay.obd.coolant | —}} / {{ws.overlay.obd.rpm}}"
+            ),
+            "— / 2600"
+        );
         assert_eq!(expand_with(&s, later, "{{ws.obd.rpm}}"), "999");
         // The source can accept new fields after expired fields are pruned.
-        merge_overlay_source(&mut s, "obd", serde_json::from_str(r#"{"speed_kmh":84}"#).unwrap(), Duration::from_secs(2), later).unwrap();
+        merge_overlay_source(
+            &mut s,
+            "obd",
+            serde_json::from_str(r#"{"speed_kmh":84}"#).unwrap(),
+            Duration::from_secs(2),
+            later,
+        )
+        .unwrap();
         assert_eq!(s.overlay_sources["obd"].fields.len(), 2);
     }
 
@@ -750,12 +855,27 @@ mod tests {
         let now = Instant::now();
         let mut s = Store::default();
         let mut values = JsonMap::new();
-        for i in 0..32 { values.insert(format!("key{i}"), JsonValue::from(i)); }
+        for i in 0..32 {
+            values.insert(format!("key{i}"), JsonValue::from(i));
+        }
         merge_overlay_source(&mut s, "obd", values, Duration::from_secs(3), now).unwrap();
-        assert!(merge_overlay_source(&mut s, "obd", serde_json::from_str(r#"{"extra":10}"#).unwrap(), Duration::from_secs(3), now).is_err());
+        assert!(merge_overlay_source(
+            &mut s,
+            "obd",
+            serde_json::from_str(r#"{"extra":10}"#).unwrap(),
+            Duration::from_secs(3),
+            now
+        )
+        .is_err());
         assert_eq!(s.overlay_sources["obd"].fields.len(), 32);
-        merge_overlay_source(&mut s, "obd", serde_json::from_str(r#"{"key0":11}"#).unwrap(), Duration::from_secs(3), now).unwrap();
+        merge_overlay_source(
+            &mut s,
+            "obd",
+            serde_json::from_str(r#"{"key0":11}"#).unwrap(),
+            Duration::from_secs(3),
+            now,
+        )
+        .unwrap();
         assert_eq!(s.overlay_sources["obd"].fields.len(), 32);
     }
-
 }
