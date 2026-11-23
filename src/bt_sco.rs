@@ -1069,9 +1069,14 @@ impl Biquad {
     }
 
     fn process(&mut self, v: f32) -> f32 {
-        let o = self.b0 * v + self.b1 * self.x1 + self.b2 * self.x2
+        let mut o = self.b0 * v + self.b1 * self.x1 + self.b2 * self.x2
             - self.a1 * self.y1
             - self.a2 * self.y2;
+        // During silence the recursive state decays into subnormal floats, which are very slow
+        // on some ARM cores. Anything this small is far below one 16-bit LSB, so flush it.
+        if o.abs() < 1e-20 {
+            o = 0.0;
+        }
         self.x2 = self.x1;
         self.x1 = v;
         self.y2 = self.y1;
