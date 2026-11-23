@@ -32,6 +32,7 @@ use crate::mitm::{send_odometer_data, OdometerData};
 use crate::mitm::{send_tire_pressure_data, TirePressureData};
 use crate::mitm::{SharedCompanionIp, SharedMediaChannels, SharedMediaTapEndpoints};
 use crate::overlay::OverlayConfig;
+use crate::overlay_data_api;
 use crate::proxy::media_tap_reverse_bridge_once;
 #[cfg(feature = "wasm-scripting")]
 use crate::script_wasm::{LoadedScript, ScriptRegistry};
@@ -89,6 +90,7 @@ const PICO_CSS: &str = include_str!("../static/pico.min.css");
 const STYLES_CSS: &str = include_str!("../static/styles.css");
 const DASHBOARD_PAGES_JS: &str = include_str!("../static/dashboard-pages.js");
 const OVERLAY_EDITOR_JS: &str = include_str!("../static/overlay-editor.js");
+const OVERLAY_DYNAMIC_JS: &str = include_str!("../static/overlay-dynamic.js");
 const WASM_STORE_JS: &str = include_str!("../static/wasm-store.js");
 const SDR_PROFILES_WEB_JS: &str = include_str!("../static/sdr-profiles-web.js");
 const SDR_INFO_WEB_JS: &str = include_str!("../static/sdr-info-web.js");
@@ -184,6 +186,12 @@ pub fn app(state: Arc<AppState>) -> Router {
             "/overlay",
             get(overlay_get_handler).put(overlay_put_handler),
         )
+        // Dedicated authenticated telemetry ingestion; existing /overlay and
+        // legacy /raw-topic-data paths are intentionally preserved.
+        .route("/overlay/data", get(overlay_data_api::get_data)
+            .post(overlay_data_api::post_data)
+            .layer(axum::extract::DefaultBodyLimit::max(16 * 1024)))
+        .route("/ws/overlay", get(overlay_data_api::websocket))
         .route(
             "/map-album-art",
             post(map_album_art_upload_handler)
@@ -540,6 +548,7 @@ async fn index(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         .replace("{STYLES_CSS}", STYLES_CSS)
         .replace("{DASHBOARD_PAGES_JS}", DASHBOARD_PAGES_JS)
         .replace("{OVERLAY_EDITOR_JS}", OVERLAY_EDITOR_JS)
+        .replace("{OVERLAY_DYNAMIC_JS}", OVERLAY_DYNAMIC_JS)
         .replace("{WASM_STORE_JS}", WASM_STORE_JS)
         .replace("{SDR_PROFILES_WEB_JS}", SDR_PROFILES_WEB_JS)
         .replace("{SDR_INFO_WEB_JS}", SDR_INFO_WEB_JS)

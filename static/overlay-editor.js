@@ -43,6 +43,7 @@
     el('path').textContent = `Overlay file: ${response.text_path || '(unknown)'}${(response.text_path || '').startsWith('/dev/shm/') ? ' · RAM-backed: changes are lost on reboot.' : ''}`;
     dirty = false;
     render();
+    document.dispatchEvent(new CustomEvent('overlay-config-loaded', {detail: {text: o.text || ''}}));
   }
   function chooseAnchor(horizontal,vertical) {
     for (const btn of el('anchor-grid').querySelectorAll('button')) {
@@ -67,7 +68,15 @@
     function append(node,dest,depth) {
       if (depth > 20) return;
       if(node.nodeType === Node.TEXT_NODE) {
-        dest.appendChild(document.createTextNode(node.nodeValue.replace(/\{\{([A-Za-z0-9_]+)(?::\d+)?\}\}/g,(_,key)=>({battery_level_percentage:'85',speed:'42',rpm:'2500',temperature:'40'}[key.toLowerCase()] || `[${key}]`))));
+        dest.appendChild(document.createTextNode(node.nodeValue.replace(/\{\{\s*([A-Za-z0-9_.-]+)(?::([0-6]))?\s*(?:\|\s*([^}]*?))?\s*\}\}/g,(_,key,precision,fallback)=>{
+          const provided=window.aaOverlayDynamic?.previewValue(key);
+          if (provided !== undefined && provided !== null) {
+            const n=Number(provided);
+            return precision !== undefined && Number.isFinite(n) ? n.toFixed(Number(precision)) : String(provided);
+          }
+          const samples={battery_level_percentage:'85',speed:'42',rpm:'2500',temperature:'40'};
+          return samples[key.toLowerCase()] ?? (fallback?.trim() || `[${key}]`);
+        })));
       } else if (node.nodeType === Node.ELEMENT_NODE) {
         let span;
         if (node.tagName === 'BR') {dest.appendChild(document.createElement('br'));return;}
@@ -207,6 +216,7 @@
     for(const [id] of config)el(id).addEventListener('blur',()=>{
       if(el(id).value.trim()===''){el(id).value='1';dirty=true;render();}
     });
+    document.addEventListener('overlay-dynamic-preview', render);
     el('save').addEventListener('click', save);
     el('reload').addEventListener('click',()=>{if(dirty&&!confirm('Discard unsaved overlay changes?'))return;fetchOverlay(true);});
     for(const btn of document.querySelectorAll('[data-overlay-preset]'))btn.addEventListener('click',()=>{

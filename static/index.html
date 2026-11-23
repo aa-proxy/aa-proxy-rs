@@ -645,6 +645,72 @@
             <div class="tool-actions tool-footer-actions"><button type="button" id="overlay-reload" class="secondary">Reload</button><button type="button" id="overlay-save">Save overlay</button></div>
           </div>
         </div>
+
+        <section class="tool-panel dynamic-overlay-panel" id="dynamic-overlay-builder" aria-labelledby="dynamic-overlay-heading">
+          <div class="tool-panel-heading dynamic-builder-heading"><strong id="dynamic-overlay-heading">Dynamic Overlay Builder</strong><div class="dynamic-help-actions"><span>REST / WebSocket · No shell script required</span><button type="button" id="dynamic-help-open" class="secondary outline" aria-haspopup="dialog" aria-controls="dynamic-help-dialog">? Help</button></div></div>
+          <p class="tool-footnote">Start with empty fields. <strong>Test values are optional</strong> and never become real sensor defaults. Generate text changes the editor locally; <strong>Save overlay</strong> writes the existing overlay.json file.</p>
+          <div class="dynamic-overlay-actions">
+            <button type="button" id="dynamic-add-field" class="secondary">+ Add field</button>
+            <button type="button" id="dynamic-example-fields" class="secondary outline">Load OBD example</button>
+            <button type="button" id="dynamic-generate">Generate text → preview</button>
+          </div>
+          <div id="dynamic-fields" class="dynamic-fields" aria-live="polite"></div>
+          <p class="tool-footnote">Value badges: <strong>LIVE</strong> = data returned by the last REST status refresh; <strong>SAMPLE</strong> = an explicitly entered preview/test value; <strong>WAITING</strong> = no observed data; <strong>STALE</strong> = the field's TTL elapsed. Existing WS topics cannot be live-inspected here.</p>
+          <div id="dynamic-validation" class="tool-status" role="status" aria-live="polite"></div>
+          <div class="tool-panel-heading"><strong>Data integrations</strong><span>Optional live test · one credential per device</span></div>
+          <p class="tool-footnote">Set <code>OVERLAY_DATA_TOKEN</code> (16+ characters) in the proxy environment to enable the new endpoints. The token entered below stays in this browser tab's memory, is not saved in the overlay JSON, and is not embedded in examples.</p>
+          <div class="tool-fields-2">
+            <label>Data API token (this tab only)<input id="dynamic-token" type="password" autocomplete="off" placeholder="Paste OVERLAY_DATA_TOKEN"></label>
+            <label>Example TTL (ms)<input id="dynamic-ttl" type="number" inputmode="numeric" min="250" max="60000" value="3000"></label>
+          </div>
+          <div class="dynamic-overlay-actions">
+            <button type="button" id="dynamic-test" class="secondary">Send example REST update</button>
+            <button type="button" id="dynamic-refresh" class="secondary outline">Refresh received values</button>
+          </div>
+          <div id="dynamic-data-status" class="tool-status" role="status" aria-live="polite"></div>
+          <div class="tool-panel-heading"><strong>Generated integration examples</strong><small>Copy into your OBD integration / ESP32 / app</small></div>
+          <div class="dynamic-examples">
+            <div><div class="dynamic-example-heading"><strong>REST (curl)</strong><button type="button" id="dynamic-copy-rest" class="secondary outline">Copy</button></div><pre id="dynamic-rest-example" tabindex="0"></pre></div>
+            <div><div class="dynamic-example-heading"><strong>WebSocket (JavaScript)</strong><button type="button" id="dynamic-copy-ws" class="secondary outline">Copy</button></div><pre id="dynamic-ws-example" tabindex="0"></pre></div>
+          </div>
+          <p class="tool-footnote">Fields use <code>{{ws.overlay.source.key}}</code>. Existing <code>{{ws.obd.rpm}}</code>, <code>/raw-topic-data</code>, and shell-driven <code>overlay.json</code> remain unchanged. Dynamic sources accept <strong>partial updates with independent field TTLs</strong>.</p>
+          <dialog id="dynamic-help-dialog" class="dynamic-help-dialog" aria-labelledby="dynamic-help-title">
+            <article>
+              <header class="dynamic-help-header"><div><h3 id="dynamic-help-title">Dynamic Overlay Builder — Help</h3><small>REST, WebSocket and legacy topic integration</small></div><button type="button" id="dynamic-help-close" class="secondary outline">Close</button></header>
+              <div class="dynamic-help-content">
+                <details open><summary>Getting started</summary>
+                  <ol><li>Select <strong>Add field</strong>. Fields are blank by default.</li><li>Choose a data type, label, source ID, field key, unit and fallback.</li><li>Select <strong>Generate text → preview</strong> to update the local overlay text editor.</li><li>Select <strong>Save overlay</strong> to write the existing <code>overlay.json</code> configuration.</li><li>Send data from your OBD reader or other client; use <strong>Refresh received values</strong> to inspect it.</li></ol>
+                  <p><strong>Load OBD example</strong> explicitly inserts test-only values. Nothing is uploaded or saved until you choose a corresponding action.</p>
+                </details>
+                <details><summary>Which field type should I choose?</summary>
+                  <p><strong>Dynamic REST / WS:</strong> New authenticated telemetry: <code>{{ws.overlay.obd.rpm}}</code>. Send data through <code>POST /overlay/data</code> or <code>WS /ws/overlay</code>.</p>
+                  <p><strong>Existing WS topic:</strong> Preserve the old event bus, e.g. <code>{{ws.obd.rpm}}</code>. No new data token or migration is required.</p>
+                  <p><strong>Static text:</strong> A label and fixed text, with no data connection.</p>
+                </details>
+                <details><summary>Sample values vs live values</summary>
+                  <p><strong>Sample / test value</strong> is optional. Leave it empty when designing a real integration; it is not written as a live default. It appears in the preview only after you enter it, or when you explicitly load the OBD example.</p>
+                  <p><strong>LIVE</strong> means a recent value was returned by <code>GET /overlay/data</code>. <strong>STALE</strong> means its TTL expired; the configured fallback is shown. The browser reports what it last refreshed, not a continuously connected telemetry feed. Legacy topics are not inspected by this REST endpoint.</p>
+                  <p>Generated integration examples use JSON <code>null</code> placeholders for fields without test values. Replace those with real sensor data; <strong>Send example REST update</strong> refuses to send empty test fields.</p>
+                </details>
+                <details><summary>Partial updates and field-specific TTL</summary>
+                  <p>Previously a second update for the same source replaced its entire <code>values</code> object. Sending just <code>coolant_temp_c</code> could remove an earlier <code>rpm</code> value.</p>
+                  <p>Now the new API <strong>merges fields</strong>. For example, send <code>{"source":"obd","values":{"rpm":2500},"ttl_ms":3000}</code>, then send <code>{"source":"obd","values":{"coolant_temp_c":86},"ttl_ms":5000}</code>. Both fields are available independently. Sending coolant again does not refresh RPM's clock.</p>
+                  <p>After 3 seconds without a new RPM update, RPM falls back while coolant can remain valid for up to 5 seconds from its own last update. Sending JSON <code>null</code> for a field explicitly makes the overlay use its fallback.</p>
+                </details>
+                <details><summary>REST / WebSocket and security</summary>
+                  <p>Set the <code>OVERLAY_DATA_TOKEN</code> environment variable on the running proxy (minimum 16 characters) to enable the new API. Use <code>Authorization: Bearer TOKEN</code> for REST; WebSocket clients authenticate with an initial <code>{"type":"auth","token":"TOKEN"}</code> message.</p>
+                  <p>REST: <code>POST /overlay/data</code> writes values, and <code>GET /overlay/data</code> reads the current status. WebSocket: connect to <code>/ws/overlay</code> and send <code>{"type":"update","source":"obd","values":{"rpm":2500},"ttl_ms":3000}</code>.</p>
+                  <p>The integration examples under the Builder can be copied and adapted. Do not expose this plain-HTTP management service or token on untrusted networks.</p>
+                </details>
+                <details><summary>Legacy scripts, persistence and limits</summary>
+                  <p>Old scripts writing <code>/dev/shm/overlay.json</code>, existing <code>{{ws.*}}</code> placeholders, and <code>/raw-topic-data</code> are unchanged. The Builder writes the JSON only when you select <strong>Save overlay</strong>; REST/WS updates live only in RAM.</p>
+                  <p>Do not let a shell script and the Builder write the same overlay file concurrently: whichever writes last controls the layout. The default <code>/dev/shm</code> file is lost on reboot; use a persistent configured path for layouts that must survive restarts.</p>
+                  <p>Limits: 32 sources; 32 fields per source; 250–60,000 ms field TTL; 16 KiB per REST/WS message. The overlay renderer still handles the visual rendering.</p>
+                </details>
+              </div>
+            </article>
+          </dialog>
+        </section>
       </section>
       <section id="wasm-store-page" class="dashboard-page tools-page" aria-label="WASM Store" hidden>
         <div class="tool-heading"><div><h2>🧩 WASM Store</h2><p>Install hooks from the official catalog or manage local .wasm files.</p></div><span class="tool-chip">aa-proxy/wasm-catalog-registry</span></div>
@@ -2178,6 +2244,7 @@
     </script>
     <script>{DASHBOARD_PAGES_JS}</script>
     <script>{OVERLAY_EDITOR_JS}</script>
+    <script>{OVERLAY_DYNAMIC_JS}</script>
     <script>{WASM_STORE_JS}</script>
     <script>{SDR_PROFILES_WEB_JS}</script>
     <script>{SDR_INFO_WEB_JS}</script>
