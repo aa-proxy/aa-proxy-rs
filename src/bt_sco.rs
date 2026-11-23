@@ -306,9 +306,17 @@ fn run(options: BtScoOptions) -> io::Result<()> {
             format_bdaddr(peer.sco_bdaddr),
             generation
         );
-        log_sco_socket_info(fd);
+        let voice_setting = log_sco_socket_info(fd);
+        let linear_pcm = voice_setting.map(is_linear_pcm_voice).unwrap_or(true);
+        if !linear_pcm {
+            warn!(
+                "{} SCO link uses transparent air coding (BT_VOICE=0x{:04x}, e.g. mSBC/LC3 wideband speech), not linear PCM; audio bridging and echo control are disabled for this connection",
+                NAME,
+                voice_setting.unwrap_or(0)
+            );
+        }
 
-        handle_sco_connection(fd, &options, generation);
+        handle_sco_connection(fd, &options, generation, linear_pcm);
 
         SCO_CONNECTED.store(false, Ordering::SeqCst);
         clear_aa_pcm_queue();
@@ -357,7 +365,9 @@ fn create_sco_listener() -> io::Result<RawFd> {
     Ok(fd)
 }
 
-fn handle_sco_connection(fd: RawFd, options: &BtScoOptions, generation: u64) {
+/// `linear_pcm = false` means the socket carries encoded (transparent) data: the connection is
+/// still drained so the link stays up, but nothing is bridged in either direction.
+fn handle_sco_connection(fd: RawFd, options: &BtScoOptions, generation: u64, linear_pcm: bool) {
     let started = Instant::now();
 
     let mut buf = [0u8; 2048];
@@ -436,9 +446,11 @@ fn handle_sco_connection(fd: RawFd, options: &BtScoOptions, generation: u64) {
             );
         }
 
-        bt_sco_echo::observe_downlink_sco_8k_mono(&buf[..n]);
+        if linear_pcm {
+            bt_sco_echo::observe_downlink_sco_8k_mono(&buf[..n]);
+        }
 
-        if options.bridge_aa_media_pcm {
+        if options.bridge_aa_media_pcm && linear_pcm {
             sco_s16le_mono_8k_to_aa_pcm_s16le_stereo_48k(
                 &buf[..n],
                 &mut aa_pcm_chunk,
@@ -454,7 +466,7 @@ fn handle_sco_connection(fd: RawFd, options: &BtScoOptions, generation: u64) {
             }
         }
 
-        if options.bridge_sco_uplink_pcm {
+        if options.bridge_sco_uplink_pcm && linear_pcm {
             let (uplink, from_mic) = match pop_sco_uplink_frame(n) {
                 Some(frame) => (frame, true),
                 None => (vec![0u8; n], false),
@@ -879,7 +891,8 @@ fn rms_from_energy(energy: u128, samples: u64) -> f64 {
     }
 }
 
-fn log_sco_socket_info(fd: RawFd) {
+/// Logs the SCO socket parameters and returns the BT_VOICE setting when available.
+fn log_sco_socket_info(fd: RawFd) -> Option<u16> {
     match getsockopt_value::<ScoOptions>(fd, SOL_SCO, SCO_OPTIONS) {
         Ok(v) => debug!("{} SCO_OPTIONS mtu={}", NAME, v.mtu),
         Err(e) => debug!("{} SCO_OPTIONS unavailable: {}", NAME, e),
@@ -893,15 +906,21 @@ fn log_sco_socket_info(fd: RawFd) {
         Err(e) => debug!("{} SCO_CONNINFO unavailable: {}", NAME, e),
     }
 
-    match getsockopt_value::<BtVoice>(fd, SOL_BLUETOOTH, BT_VOICE) {
-        Ok(v) => debug!(
-            "{} BT_VOICE setting=0x{:04x} ({})",
-            NAME,
-            v.setting,
-            describe_bt_voice(v.setting)
-        ),
-        Err(e) => debug!("{} BT_VOICE unavailable: {}", NAME, e),
-    }
+    let voice_setting = match getsockopt_value::<BtVoice>(fd, SOL_BLUETOOTH, BT_VOICE) {
+        Ok(v) => {
+            debug!(
+                "{} BT_VOICE setting=0x{:04x} ({})",
+                NAME,
+                v.setting,
+                describe_bt_voice(v.setting)
+            );
+            Some(v.setting)
+        }
+        Err(e) => {
+            debug!("{} BT_VOICE unavailable: {}", NAME, e);
+            None
+        }
+    };
 
     match getsockopt_int(fd, SOL_BLUETOOTH, BT_RCVMTU) {
         Ok(v) => debug!("{} BT_RCVMTU={}", NAME, v),
@@ -912,6 +931,8 @@ fn log_sco_socket_info(fd: RawFd) {
         Ok(v) => debug!("{} BT_SNDMTU={}", NAME, v),
         Err(e) => debug!("{} BT_SNDMTU unavailable: {}", NAME, e),
     }
+
+    voice_setting
 }
 
 fn getsockopt_value<T: Copy + Default>(
@@ -942,17 +963,24 @@ fn getsockopt_int(fd: RawFd, level: libc::c_int, optname: libc::c_int) -> io::Re
     getsockopt_value::<libc::c_int>(fd, level, optname)
 }
 
+/// HCI voice setting: bits 0-1 are the air coding format (CVSD, u-law, A-law, transparent),
+/// bits 8-9 the input coding (linear, u-law, A-law). Linux uses 0x0060 (CVSD, 16-bit linear PCM
+/// input) by default and 0x0003 (transparent) for wideband speech.
 fn describe_bt_voice(setting: u16) -> &'static str {
-    // These are the common HCI voice-setting low bits used by Linux/BlueZ.
-    // Exact transport codec is still best confirmed with HCI events, but this
-    // is useful enough to distinguish the common CVSD path from transparent data.
-    match setting & 0x0003 {
-        0x0000 => "linear/input coding",
-        0x0001 => "u-law/input coding",
-        0x0002 => "a-law/input coding",
-        0x0003 => "reserved/input coding",
+    match (setting & 0x0003, (setting >> 8) & 0x0003) {
+        (0x0003, _) => "transparent air coding (encoded data, e.g. mSBC)",
+        (0x0000, 0x0000) => "CVSD air coding, linear PCM input",
+        (0x0001, 0x0000) => "u-law air coding, linear PCM input",
+        (0x0002, 0x0000) => "A-law air coding, linear PCM input",
+        (_, 0x0001) => "u-law input coding",
+        (_, 0x0002) => "A-law input coding",
         _ => "unknown",
     }
+}
+
+/// True when the SCO socket carries 16-bit linear PCM (the only format the bridge handles).
+fn is_linear_pcm_voice(setting: u16) -> bool {
+    setting & 0x0003 != 0x0003 && (setting >> 8) & 0x0003 == 0
 }
 
 /// Confirmed format for the current HSP/SCO path seen on the target phone/HU setup.
@@ -1410,6 +1438,13 @@ mod tests {
             }
         }
         assert_eq!(dropped, Some(30 - SCO_UPLINK_TARGET_STANDING_PACKETS));
+    }
+
+    #[test]
+    fn bt_voice_linear_pcm_detection() {
+        assert!(is_linear_pcm_voice(0x0060)); // Linux default: CVSD, 16-bit linear input
+        assert!(!is_linear_pcm_voice(0x0003)); // transparent (mSBC / LC3)
+        assert!(!is_linear_pcm_voice(0x0160)); // u-law input coding
     }
 
     #[test]
