@@ -953,7 +953,8 @@ pub struct AppConfig {
     /// Send AA MEDIA_MESSAGE_MICROPHONE_REQUEST open/close while SCO is connected.
     /// Keep enabled for the first mic test; disable to observe/passively log mic frames only.
     pub bt_sco_mic_request: bool,
-    /// Maximum 60-byte SCO uplink packets buffered for the mic bridge.
+    /// Hard limit of 60-byte SCO uplink packets buffered for the mic bridge.
+    /// The standing latency is trimmed automatically; this only caps bursts.
     pub bt_sco_mic_uplink_ring_capacity: usize,
     /// Echo handling for the microphone uplink. `off` preserves the current
     /// proven path; `ducking` lowers mic gain while downlink audio is active.

@@ -33,6 +33,16 @@ const DEFAULT_AA_PCM_RING_CAPACITY: usize = 128;
 pub const SCO_UPLINK_PACKET_BYTES: usize = 60;
 const DEFAULT_SCO_UPLINK_RING_CAPACITY: usize = 256;
 const SCO_DOWNLINK_AUDIO_LOG_PEAK_THRESHOLD: i16 = 64;
+/// Uplink latency control: the HU microphone and the SCO link run on different clocks, so a
+/// slightly faster microphone makes the uplink queue (and the latency heard by the far end)
+/// grow during a call. The smallest queue length seen within a window is the standing latency
+/// (microphone bursts do not count); when it exceeds the maximum, the oldest packets are dropped
+/// down to the target.
+const SCO_UPLINK_LATENCY_WINDOW: Duration = Duration::from_secs(1);
+/// 16 x 3.75 ms = 60 ms
+const SCO_UPLINK_MAX_STANDING_PACKETS: usize = 16;
+/// 4 x 3.75 ms = 15 ms
+const SCO_UPLINK_TARGET_STANDING_PACKETS: usize = 4;
 
 #[derive(Debug, Clone)]
 pub struct AaPcmFrame {
@@ -360,6 +370,7 @@ fn handle_sco_connection(fd: RawFd, options: &BtScoOptions, generation: u64) {
     let mut uplink_mic_packets = 0u64;
     let mut uplink_silence_packets = 0u64;
     let mut uplink_write_errors = 0u64;
+    let mut uplink_latency = UplinkLatencyControl::new(Instant::now());
 
     loop {
         let n = unsafe {
@@ -441,6 +452,18 @@ fn handle_sco_connection(fd: RawFd, options: &BtScoOptions, generation: u64) {
                 Some(frame) => (frame, true),
                 None => (vec![0u8; n], false),
             };
+            if let Some(excess) = uplink_latency.observe(sco_uplink_queue_len(), now) {
+                let dropped = drop_oldest_sco_uplink_packets(excess);
+                debug!(
+                    "{} mic-uplink latency control: standing queue above {} packets for {}ms, dropped {} oldest packets ({}ms), total_dropped={}",
+                    NAME,
+                    SCO_UPLINK_MAX_STANDING_PACKETS,
+                    SCO_UPLINK_LATENCY_WINDOW.as_millis(),
+                    dropped,
+                    dropped as u64 * SCO_UPLINK_PACKET_BYTES as u64 / 16,
+                    uplink_latency.dropped_total
+                );
+            }
             let written = unsafe {
                 libc::write(
                     fd,
@@ -675,6 +698,52 @@ fn pop_sco_uplink_frame(len: usize) -> Option<Vec<u8>> {
     } else {
         frame.resize(len, 0);
         Some(frame)
+    }
+}
+
+fn drop_oldest_sco_uplink_packets(count: usize) -> usize {
+    let Some(ring) = SCO_UPLINK_RING.get() else {
+        return 0;
+    };
+    let mut q = ring.lock().unwrap();
+    let count = count.min(q.len());
+    q.drain(..count);
+    count
+}
+
+struct UplinkLatencyControl {
+    window_started: Instant,
+    window_min: usize,
+    dropped_total: u64,
+}
+
+impl UplinkLatencyControl {
+    fn new(now: Instant) -> Self {
+        Self {
+            window_started: now,
+            window_min: usize::MAX,
+            dropped_total: 0,
+        }
+    }
+
+    /// Feed the queue length after each uplink write. Returns how many of the oldest packets
+    /// should be dropped once per window when the standing latency is too high.
+    fn observe(&mut self, queued: usize, now: Instant) -> Option<usize> {
+        self.window_min = self.window_min.min(queued);
+        if now.duration_since(self.window_started) < SCO_UPLINK_LATENCY_WINDOW {
+            return None;
+        }
+
+        let standing = self.window_min;
+        self.window_started = now;
+        self.window_min = usize::MAX;
+        if standing > SCO_UPLINK_MAX_STANDING_PACKETS {
+            let excess = standing - SCO_UPLINK_TARGET_STANDING_PACKETS;
+            self.dropped_total += excess as u64;
+            Some(excess)
+        } else {
+            None
+        }
     }
 }
 
@@ -1286,6 +1355,29 @@ mod tests {
         let out = resample_all(&mut r, &sine(16_000, 6_000.0, 16_000, 10_000.0));
         let p = peak(&out[100..]);
         assert!(p < 500, "alias peak={}", p);
+    }
+
+    #[test]
+    fn uplink_latency_control_ignores_bursts_and_trims_standing_queue() {
+        let t0 = Instant::now();
+        let ms = |v: u64| t0 + Duration::from_millis(v);
+
+        // Bursty microphone: the queue drains to 0 between bursts -> nothing to drop.
+        let mut c = UplinkLatencyControl::new(t0);
+        for i in 0..200u64 {
+            let queued = (20 - (i % 20)) as usize % 20;
+            assert_eq!(c.observe(queued, ms(i * 7)), None);
+        }
+
+        // Standing queue of 30 packets for a whole window -> drop down to the target.
+        let mut c = UplinkLatencyControl::new(t0);
+        let mut dropped = None;
+        for i in 0..150u64 {
+            if let Some(n) = c.observe(30 + (i % 3) as usize, ms(i * 7 + 7)) {
+                dropped = Some(n);
+            }
+        }
+        assert_eq!(dropped, Some(30 - SCO_UPLINK_TARGET_STANDING_PACKETS));
     }
 
     #[test]

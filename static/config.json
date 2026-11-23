@@ -899,7 +899,7 @@
                 },
                 "bt_sco_mic_uplink_ring_capacity": {
                   "typ": "integer",
-                  "description": "Maximum 60-byte SCO uplink packets buffered for the microphone bridge. 256 is a safe default.",
+                  "description": "Hard limit of 60-byte SCO uplink packets (3.75 ms each) buffered for the microphone bridge. The standing latency is trimmed to ~15 ms automatically; this only caps short bursts. 256 is a safe default.",
                   "requires": "bt_sco_mic_bridge",
                   "advanced": true
                 }
