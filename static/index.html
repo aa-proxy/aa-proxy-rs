@@ -19,6 +19,7 @@
       <button type="button" class="rail-btn page-tab" id="page-nav-overlay" data-page="overlay" data-label="Overlay Editor" aria-label="Overlay Editor" aria-pressed="false">🖥️</button>
       <button type="button" class="rail-btn page-tab" id="page-nav-wasm-store" data-page="wasm-store" data-label="WASM Store" aria-label="WASM Store" aria-pressed="false">🧩</button>
       <button type="button" class="rail-btn page-tab" id="page-nav-sdr-ui" data-page="sdr-ui" data-label="SDR UI Editor" aria-label="SDR UI Editor" aria-pressed="false">📐</button>
+      <button type="button" class="rail-btn page-tab" id="page-nav-sdr-info" data-page="sdr-info" data-label="SDR Info" aria-label="SDR Info" aria-pressed="false">📡</button>
     </nav>
     <button type="button" id="utility-toggle" class="utility-toggle" aria-controls="utility-rail" aria-expanded="false" aria-label="Open tools" title="Tools">☰ <span>Tools</span></button>
     <div class="utility-scrim" id="utility-scrim" aria-hidden="true"></div>
@@ -284,6 +285,26 @@
         />
         <div class="config-grid">{CONFIG_VALUES}</div>
       </form>
+      </section>
+
+      <section id="sdr-info-page" class="dashboard-page tools-page" aria-label="SDR Info" hidden>
+        <div class="tool-heading sdr-info-heading">
+          <div>
+            <h2>📡 SDR Info</h2>
+            <p>Read-only Android Auto service discovery data. The last captured response remains available after a restart.</p>
+          </div>
+          <button type="button" id="sdr-info-refresh">↻ Refresh SDR</button>
+        </div>
+        <p class="sdr-info-status" id="sdr-info-status" role="status" aria-live="polite">Open SDR Info to load the latest capture.</p>
+        <div class="sdr-info-actions" id="sdr-info-actions" hidden>
+          <button type="button" class="secondary" id="sdr-info-copy">Copy JSON</button>
+          <button type="button" class="secondary" id="sdr-info-download">Save JSON</button>
+        </div>
+        <div class="sdr-info-sections" id="sdr-info-sections"></div>
+        <details id="sdr-info-raw-panel" hidden>
+          <summary>Raw ServiceDiscoveryResponse (JSON)</summary>
+          <pre class="sdr-info-raw" id="sdr-info-raw"></pre>
+        </details>
       </section>
 
       <section id="sdr-ui-page" class="dashboard-page tools-page" aria-label="SDR UI Editor" hidden>
@@ -2044,5 +2065,6 @@
     <script>{OVERLAY_EDITOR_JS}</script>
     <script>{WASM_STORE_JS}</script>
     <script>{SDR_PROFILES_WEB_JS}</script>
+    <script>{SDR_INFO_WEB_JS}</script>
   </body>
 </html>

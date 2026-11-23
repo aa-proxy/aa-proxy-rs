@@ -2171,6 +2171,37 @@ html {background-color:#0a0e14;}
   #sdr-video-edit-dialog .sdr-form-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
 }
 
+/* Companion-style read-only SDR Info (separate from geometry editor). */
+.sdr-info-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.sdr-info-heading button{width:auto;min-height:44px;flex:0 0 auto}
+.sdr-info-status{min-height:1.3em;color:#a4becb;margin:12px 0;overflow-wrap:anywhere}
+.sdr-info-status.is-error{color:#ff9ca6}
+.sdr-info-actions{display:flex;gap:8px;flex-wrap:wrap}
+.sdr-info-actions button{width:auto;min-height:44px}
+.sdr-info-sections{display:grid;gap:14px;min-width:0}
+.sdr-info-card{border:1px solid rgba(20,184,166,.22);border-radius:14px;background:rgba(15,25,39,.72);padding:16px;min-width:0}
+.sdr-info-card h3{margin:0 0 12px;font-size:1.05rem}
+.sdr-info-data{display:grid;grid-template-columns:minmax(130px,38%) minmax(0,1fr);gap:7px 16px;margin:0}
+.sdr-info-data dt{color:#9ab0bd;overflow-wrap:anywhere}
+.sdr-info-data dd{margin:0;overflow-wrap:anywhere;white-space:pre-wrap;color:#e1edf2}
+.sdr-info-service{min-width:0;border-top:1px solid rgba(20,184,166,.14);padding:12px 0}
+.sdr-info-service:first-child{border-top:0;padding-top:0}
+.sdr-info-service summary{cursor:pointer;font-weight:600;padding:5px 0;overflow-wrap:anywhere}
+.sdr-info-subsection{margin:12px 0 0;min-width:0;border-left:2px solid rgba(20,184,166,.34);padding-left:12px}
+.sdr-info-subsection h4{font-size:.9rem;margin:0 0 8px;color:#9be2d8}
+.sdr-info-raw{max-height:460px;overflow:auto;font-size:.75rem;white-space:pre-wrap;overflow-wrap:anywhere;padding:12px;border:1px solid #2d4951;border-radius:8px}
+@media(max-width:580px){
+  .sdr-info-heading{align-items:stretch}
+  .sdr-info-heading button{width:100%}
+  .sdr-info-data{grid-template-columns:minmax(0,1fr);gap:3px}
+  .sdr-info-data dt{margin-top:8px;font-size:.79rem}
+  .sdr-info-data dd{margin-bottom:3px}
+  .sdr-info-actions button{flex:1 1 130px}
+}
+.sdr-info-card h3,.sdr-info-service summary,#sdr-info-raw-panel summary{color:#e6edf3}
+.sdr-info-service summary:hover,#sdr-info-raw-panel summary:hover{color:#93eadf}
+.sdr-info-card .sdr-info-subsection h4{color:#9be2d8}
+
 /* Vector Canvas background. The editable text remains a separate HTML overlay. */
 .aa-preview-frame .aa-preview-canvas {position:absolute;inset:0;display:block;width:100%;height:100%;pointer-events:none;z-index:0;}
 .aa-preview-frame .aa-preview-guide {position:absolute;inset:4%;border:1px dashed #75f4ee;z-index:1;pointer-events:none;box-shadow:0 0 0 1px #0c171f77;}
