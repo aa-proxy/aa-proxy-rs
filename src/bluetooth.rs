@@ -438,8 +438,9 @@ pub static BT_SCO_HSP_RESPONDER: std::sync::atomic::AtomicBool =
 
 /// Minimal Headset-role AT responder. Android only routes call audio to a headset whose control
 /// channel stays open and answers; the SCO audio link itself is accepted by the `bt_sco` listener.
-/// Every command gets `OK` (AT+BRSF also gets a zero feature set so a phone that talks HFP does not
-/// stall). Runs until the phone closes the stream.
+/// Every AT command gets `OK` (AT+BRSF also gets a zero feature set so a phone that talks HFP does
+/// not stall). Unsolicited result codes from the audio gateway (`RING`, `+VGS=`, `+VGM=`, ...) are
+/// only logged: a headset does not answer them. Runs until the phone closes the stream.
 async fn hsp_respond(mut stream: bluer::rfcomm::Stream, device: String) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     info!(
@@ -468,7 +469,12 @@ async fn hsp_respond(mut stream: bluer::rfcomm::Stream, device: String) {
                 continue;
             }
             info!("{} 🎧 HSP responder: <- {:?}", NAME, cmd);
-            let reply: &[u8] = if cmd.to_ascii_uppercase().starts_with("AT+BRSF") {
+            let upper = cmd.to_ascii_uppercase();
+            if !upper.starts_with("AT") {
+                // Result code / unsolicited indication from the AG, not a command.
+                continue;
+            }
+            let reply: &[u8] = if upper.starts_with("AT+BRSF") {
                 b"\r\n+BRSF: 0\r\n\r\nOK\r\n"
             } else {
                 b"\r\nOK\r\n"
