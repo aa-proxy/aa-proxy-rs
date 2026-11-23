@@ -32,6 +32,7 @@ use crate::mitm::{send_odometer_data, OdometerData};
 use crate::mitm::{send_tire_pressure_data, TirePressureData};
 use crate::mitm::{SharedCompanionIp, SharedMediaChannels, SharedMediaTapEndpoints};
 use crate::overlay::OverlayConfig;
+use crate::overlay_data_api;
 use crate::proxy::media_tap_reverse_bridge_once;
 #[cfg(feature = "wasm-scripting")]
 use crate::script_wasm::{LoadedScript, ScriptRegistry};
@@ -184,6 +185,15 @@ pub fn app(state: Arc<AppState>) -> Router {
             "/overlay",
             get(overlay_get_handler).put(overlay_put_handler),
         )
+        // Dedicated authenticated telemetry ingestion; existing /overlay and
+        // legacy /raw-topic-data paths are intentionally preserved.
+        .route(
+            "/overlay/data",
+            get(overlay_data_api::get_data)
+                .post(overlay_data_api::post_data)
+                .layer(axum::extract::DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route("/ws/overlay", get(overlay_data_api::websocket))
         .route(
             "/map-album-art",
             post(map_album_art_upload_handler)
