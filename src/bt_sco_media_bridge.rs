@@ -316,6 +316,8 @@ fn bridge_loop(runtime: Arc<Runtime>) {
     let mut silent_frames_before_start = 0u64;
     let mut next_cadence_send_at: Option<Instant> = None;
     let mut last_mic_wait_log = Instant::now();
+    let mut rate_adapter: Option<bt_sco::PcmResampler> = None;
+    let mut rate_adapter_generation = 0u64;
 
     loop {
         handle_microphone_request_state(&runtime, &mut last_mic_wait_log);
@@ -340,6 +342,7 @@ fn bridge_loop(runtime: Arc<Runtime>) {
             pending_start_started_at = None;
             silent_frames_before_start = 0;
             next_cadence_send_at = None;
+            rate_adapter = None;
             debug!(
                 "{} target channel=<b>{:#04x}</>, epoch={} armed; waiting for existing HU media CONFIG, no CHANNEL_OPEN/SETUP will be injected",
                 NAME, channel, epoch
@@ -417,11 +420,21 @@ fn bridge_loop(runtime: Arc<Runtime>) {
             continue;
         }
 
-        // The SCO reader currently emits 48kHz stereo s16le chunks. Adapt that
-        // to the actual selected sink: MEDIA is usually stereo, GUIDANCE is
-        // often mono. This lets us test GUIDANCE without changing the SCO reader.
-        let mut adapted =
-            adapt_48k_stereo_s16le_to_target(&frame.pcm, target_channels, gain_percent, limiter);
+        // The SCO reader emits 48kHz stereo s16le chunks. Adapt that to the
+        // actual selected sink: MEDIA is usually 48kHz stereo, GUIDANCE is
+        // often 16kHz mono.
+        if frame.generation != rate_adapter_generation {
+            rate_adapter = None;
+            rate_adapter_generation = frame.generation;
+        }
+        let mut adapted = adapt_48k_stereo_s16le_to_target(
+            &frame.pcm,
+            target_sample_rate,
+            target_channels,
+            gain_percent,
+            limiter,
+            &mut rate_adapter,
+        );
         let bytes_per_frame = target_channels as usize * 2;
         if bytes_per_frame == 0 || adapted.len() < bytes_per_frame {
             continue;
@@ -845,32 +858,60 @@ fn build_microphone_request_payload(open: bool) -> Vec<u8> {
     payload
 }
 
+/// Sample rate of the PCM chunks produced by the SCO reader.
+const SOURCE_SAMPLE_RATE_HZ: u32 = bt_sco::AA_MEDIA_PCM_SAMPLE_RATE_HZ;
+/// Adapt one SCO reader chunk (48 kHz stereo s16le, L == R) to the selected sink format:
+/// sample rate, channel count, gain and limiter.
 fn adapt_48k_stereo_s16le_to_target(
     input: &[u8],
+    target_sample_rate: u32,
     target_channels: u32,
     gain_percent: u32,
     limiter: BtScoMediaBridgeLimiter,
+    rate_adapter: &mut Option<bt_sco::PcmResampler>,
 ) -> Vec<u8> {
-    let even_len = input.len() & !1;
     let gain = gain_percent.max(1) as i32;
+    let target_channels = target_channels.max(1) as usize;
 
-    if target_channels == 1 {
-        // Stereo 48k -> mono 48k by taking the left channel. The source is a
-        // duplicated mono SCO signal, so L/R are identical in the common path.
-        let mut out = Vec::with_capacity(even_len / 2);
-        for frame in input[..even_len].chunks_exact(4) {
-            let sample = i16::from_le_bytes([frame[0], frame[1]]);
-            out.extend_from_slice(&apply_gain(sample, gain, limiter).to_le_bytes());
-        }
-        out
+    // The source is a duplicated mono SCO signal, so taking the left channel is lossless.
+    let mono = input
+        .chunks_exact(4)
+        .map(|frame| i16::from_le_bytes([frame[0], frame[1]]));
+
+    let samples: Vec<i16> = if target_sample_rate == SOURCE_SAMPLE_RATE_HZ {
+        *rate_adapter = None;
+        mono.collect()
     } else {
-        let mut out = Vec::with_capacity(even_len);
-        for sample in input[..even_len].chunks_exact(2) {
-            let sample = i16::from_le_bytes([sample[0], sample[1]]);
-            out.extend_from_slice(&apply_gain(sample, gain, limiter).to_le_bytes());
+        if rate_adapter
+            .as_ref()
+            .map(|a| a.out_rate() != target_sample_rate)
+            .unwrap_or(true)
+        {
+            // The SCO voice band ends at 4 kHz, so that is the widest useful passband.
+            *rate_adapter = Some(bt_sco::PcmResampler::new(
+                SOURCE_SAMPLE_RATE_HZ,
+                target_sample_rate,
+                4_000,
+            ));
+        }
+        let adapter = rate_adapter.as_mut().unwrap();
+        let mut out = Vec::with_capacity(
+            input.len() / 4 * target_sample_rate as usize / SOURCE_SAMPLE_RATE_HZ as usize + 2,
+        );
+        for sample in mono {
+            adapter.push(sample, &mut out);
         }
         out
+    };
+
+    let mut out = Vec::with_capacity(samples.len() * target_channels * 2);
+    for sample in samples {
+        let bytes = apply_gain(sample, gain, limiter).to_le_bytes();
+        for _ in 0..target_channels {
+            out.extend_from_slice(&bytes);
+        }
     }
+    out
 }
 
 fn apply_gain(sample: i16, gain_percent: i32, limiter: BtScoMediaBridgeLimiter) -> i16 {
@@ -935,4 +976,81 @@ fn send_packet(runtime: &Runtime, pkt: Packet, label: &str) -> std::result::Resu
 fn push_media_message_id(payload: &mut Vec<u8>, id: u16) {
     payload.insert(0, (id & 0xff) as u8);
     payload.insert(0, (id >> 8) as u8);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stereo_48k_sine(freq: f64, frames: usize, amplitude: f64) -> Vec<u8> {
+        let mut out = Vec::with_capacity(frames * 4);
+        for i in 0..frames {
+            let v = (amplitude * (2.0 * std::f64::consts::PI * freq * i as f64 / 48_000.0).sin())
+                as i16;
+            out.extend_from_slice(&v.to_le_bytes());
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn adapt_keeps_48k_stereo_unchanged() {
+        let input = stereo_48k_sine(1000.0, 1080, 8000.0);
+        let mut adapter = None;
+        let out = adapt_48k_stereo_s16le_to_target(
+            &input,
+            48_000,
+            2,
+            100,
+            BtScoMediaBridgeLimiter::Off,
+            &mut adapter,
+        );
+        assert_eq!(out, input);
+        assert!(adapter.is_none());
+    }
+
+    #[test]
+    fn adapt_48k_to_16k_mono_keeps_duration_and_level() {
+        let mut adapter = None;
+        let mut total = 0usize;
+        let mut peak = 0i16;
+        // 10 chunks of 22.5 ms, like the SCO reader produces.
+        for chunk in 0..10 {
+            let input = stereo_48k_sine(1000.0, 1080, 8000.0);
+            let out = adapt_48k_stereo_s16le_to_target(
+                &input,
+                16_000,
+                1,
+                100,
+                BtScoMediaBridgeLimiter::Off,
+                &mut adapter,
+            );
+            total += out.len() / 2;
+            if chunk > 0 {
+                peak = peak.max(peak_s16le(&out));
+            }
+        }
+        assert_eq!(total, 10 * 360);
+        assert!((7000..=8200).contains(&peak), "peak={}", peak);
+    }
+
+    #[test]
+    fn adapt_handles_non_integer_ratio() {
+        let mut adapter = None;
+        let mut total = 0usize;
+        for _ in 0..100 {
+            let input = stereo_48k_sine(500.0, 480, 8000.0);
+            let out = adapt_48k_stereo_s16le_to_target(
+                &input,
+                44_100,
+                2,
+                100,
+                BtScoMediaBridgeLimiter::Off,
+                &mut adapter,
+            );
+            total += out.len() / 4;
+        }
+        // 1 s of input -> 44100 frames (+/- 1 for the fractional position).
+        assert!((44_099..=44_101).contains(&total), "total={}", total);
+    }
 }

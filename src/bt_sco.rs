@@ -1092,6 +1092,107 @@ fn push_stereo_linear_6x(output: &mut Vec<u8>, previous: i16, current: i16) {
     }
 }
 
+/// Streaming sample rate converter for mono s16 PCM: windowed-sinc (Blackman) low-pass at the
+/// input rate followed by fractional linear interpolation. Used for downsampling (the low-pass is
+/// the anti-alias filter) as well as for upsampling. The filter is only evaluated at the input
+/// positions that an output sample needs. State is kept across calls, so a stream can be fed in
+/// arbitrary chunks.
+#[derive(Debug)]
+pub struct PcmResampler {
+    out_rate: u32,
+    step: f64,
+    taps: Vec<f32>,
+    hist: Vec<f32>,
+    hist_pos: usize,
+    prev: f32,
+    prev_valid: bool,
+    pos: f64,
+}
+
+impl PcmResampler {
+    /// `cutoff_hz` is the passband edge; it is capped below the Nyquist frequency of both rates.
+    pub fn new(in_rate: u32, out_rate: u32, cutoff_hz: u32) -> Self {
+        let in_rate = in_rate.max(1);
+        let out_rate = out_rate.max(1);
+        let cutoff = (cutoff_hz as f64)
+            .min(0.45 * in_rate as f64)
+            .min(0.45 * out_rate as f64)
+            .max(1.0);
+        // Blackman transition width is ~5.5 * fs / N; 8 * fs / cutoff keeps it below the cutoff.
+        let n = (((8.0 * in_rate as f64 / cutoff) as usize) | 1).clamp(15, 129);
+        let m = (n - 1) as f64;
+        let mut taps: Vec<f64> = (0..n)
+            .map(|i| {
+                let x = 2.0 * cutoff / in_rate as f64 * (i as f64 - m / 2.0);
+                let sinc = if x == 0.0 {
+                    1.0
+                } else {
+                    (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x)
+                };
+                let blackman = 0.42 - 0.5 * (2.0 * std::f64::consts::PI * i as f64 / m).cos()
+                    + 0.08 * (4.0 * std::f64::consts::PI * i as f64 / m).cos();
+                sinc * blackman
+            })
+            .collect();
+        let sum: f64 = taps.iter().sum();
+        for t in taps.iter_mut() {
+            *t /= sum;
+        }
+
+        Self {
+            out_rate,
+            step: in_rate as f64 / out_rate as f64,
+            taps: taps.into_iter().map(|t| t as f32).collect(),
+            hist: vec![0.0; n + 1],
+            hist_pos: 0,
+            prev: 0.0,
+            prev_valid: true,
+            pos: 0.0,
+        }
+    }
+
+    pub fn out_rate(&self) -> u32 {
+        self.out_rate
+    }
+
+    /// Low-pass output for the input sample `delay` samples before the newest one.
+    fn filtered(&self, delay: usize) -> f32 {
+        let len = self.hist.len();
+        let newest = self.hist_pos + len - 1 - delay;
+        self.taps
+            .iter()
+            .enumerate()
+            .map(|(k, tap)| tap * self.hist[(newest - k) % len])
+            .sum()
+    }
+
+    pub fn push(&mut self, input: i16, out: &mut Vec<i16>) {
+        self.hist[self.hist_pos] = input as f32;
+        self.hist_pos = (self.hist_pos + 1) % self.hist.len();
+
+        if self.pos < 1.0 {
+            // At least one output point lies between the previous input sample (0.0) and
+            // this one (1.0).
+            let cur = self.filtered(0);
+            let prev = if self.prev_valid {
+                self.prev
+            } else {
+                self.filtered(1)
+            };
+            while self.pos < 1.0 {
+                let v = prev + (cur - prev) * self.pos as f32;
+                out.push(v.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16);
+                self.pos += self.step;
+            }
+            self.prev = cur;
+            self.prev_valid = true;
+        } else {
+            self.prev_valid = false;
+        }
+        self.pos -= 1.0;
+    }
+}
+
 fn format_bdaddr(addr: BdAddr) -> String {
     let b = addr.b;
     format!(
@@ -1129,6 +1230,57 @@ mod tests {
             &output[second_sample_offset..second_sample_offset + 4],
             &[0x02, 0x00, 0x02, 0x00]
         );
+    }
+
+    fn sine(rate: u32, freq: f64, samples: usize, amplitude: f64) -> Vec<i16> {
+        (0..samples)
+            .map(|i| {
+                (amplitude * (2.0 * std::f64::consts::PI * freq * i as f64 / rate as f64).sin())
+                    as i16
+            })
+            .collect()
+    }
+
+    fn resample_all(r: &mut PcmResampler, input: &[i16]) -> Vec<i16> {
+        let mut out = Vec::new();
+        for &s in input {
+            r.push(s, &mut out);
+        }
+        out
+    }
+
+    fn peak(samples: &[i16]) -> i32 {
+        samples.iter().map(|s| (*s as i32).abs()).max().unwrap_or(0)
+    }
+
+    #[test]
+    fn resampler_output_length_matches_ratio() {
+        for (inr, outr) in [
+            (48_000, 16_000),
+            (16_000, 8_000),
+            (44_100, 8_000),
+            (8_000, 16_000),
+        ] {
+            let mut r = PcmResampler::new(inr, outr, 3_500);
+            let out = resample_all(&mut r, &sine(inr, 500.0, inr as usize, 8000.0));
+            let diff = (out.len() as i64 - outr as i64).abs();
+            assert!(diff <= 1, "{}->{}: {} samples", inr, outr, out.len());
+        }
+    }
+
+    #[test]
+    fn resampler_passes_voice_and_rejects_alias() {
+        // 1 kHz is in the voice band and must pass at ~full level.
+        let mut r = PcmResampler::new(16_000, 8_000, 3_500);
+        let out = resample_all(&mut r, &sine(16_000, 1_000.0, 16_000, 10_000.0));
+        let p = peak(&out[100..]);
+        assert!((9_000..=10_300).contains(&p), "passband peak={}", p);
+
+        // 6 kHz would alias to 2 kHz with plain decimation; it must be strongly attenuated.
+        let mut r = PcmResampler::new(16_000, 8_000, 3_500);
+        let out = resample_all(&mut r, &sine(16_000, 6_000.0, 16_000, 10_000.0));
+        let p = peak(&out[100..]);
+        assert!(p < 500, "alias peak={}", p);
     }
 
     #[test]
