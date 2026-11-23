@@ -378,14 +378,80 @@ struct CachedOverlayText {
     lines: Vec<String>,
 }
 
+impl CachedOverlayText {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            last_check: None,
+            config: OverlayConfig::default(),
+            lines: Vec::new(),
+        }
+    }
+}
+
+/// Overlay file of the main display (`overlay_text_path`). Also used by the other displays
+/// without an own file when `only_main_display = false`.
 static OVERLAY_TEXT_CACHE: LazyLock<Mutex<CachedOverlayText>> = LazyLock::new(|| {
-    Mutex::new(CachedOverlayText {
-        path: PathBuf::from(DEFAULT_OVERLAY_TEXT_PATH),
-        last_check: None,
-        config: OverlayConfig::default(),
-        lines: Vec::new(),
-    })
+    Mutex::new(CachedOverlayText::new(PathBuf::from(
+        DEFAULT_OVERLAY_TEXT_PATH,
+    )))
 });
+
+/// Overlay state of a non-main display that has its own `overlay_<id>.json` file (see
+/// [`display_overlay_path`]): its own text/style and its own TTF font cache.
+struct DisplayOverlaySource {
+    text: Mutex<CachedOverlayText>,
+    font: Mutex<CachedOverlayFont>,
+}
+
+/// Video channels using their own overlay file, set up in [`register_video_channels_from_sdr`].
+/// Registered channels missing here use the main overlay.
+static DISPLAY_SOURCES: LazyLock<Mutex<HashMap<u8, Arc<DisplayOverlaySource>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn display_source(channel: u8) -> Option<Arc<DisplayOverlaySource>> {
+    DISPLAY_SOURCES.lock().ok()?.get(&channel).cloned()
+}
+
+/// Returns `true` for an id usable in an `overlay_<id>.json` file name: 1-64 characters out of
+/// lowercase ASCII letters, digits, `-` and `_`.
+pub fn valid_display_overlay_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+}
+
+/// Overlay file of the display `id`: `overlay_<id>.json` in the directory of the main overlay
+/// file (`main_path` = `overlay_text_path`), e.g. `/dev/shm/overlay_cluster-1.json`.
+/// `None` for an invalid id (see [`valid_display_overlay_id`]).
+pub fn display_overlay_path(main_path: &Path, id: &str) -> Option<PathBuf> {
+    if !valid_display_overlay_id(id) {
+        return None;
+    }
+    Some(resolve_overlay_text_path(main_path).with_file_name(format!("overlay_{id}.json")))
+}
+
+/// Overlay id of a non-main video sink: the Display Injection profile id for injected displays
+/// (e.g. `cluster-1`, `auxiliary-1`), `hu-cluster-<display_id>` / `hu-auxiliary-<display_id>`
+/// for the head unit's own displays. `None` for the main display.
+fn display_overlay_id(
+    channel: u8,
+    display_type: DisplayType,
+    display_id: u32,
+    injected_display_ids: &HashMap<u8, String>,
+) -> Option<String> {
+    let prefix = match display_type {
+        DisplayType::DISPLAY_TYPE_MAIN => return None,
+        DisplayType::DISPLAY_TYPE_CLUSTER => "cluster",
+        DisplayType::DISPLAY_TYPE_AUXILIARY => "auxiliary",
+    };
+    match injected_display_ids.get(&channel) {
+        Some(id) => Some(id.clone()),
+        None => Some(format!("hu-{prefix}-{display_id}")),
+    }
+}
 
 /// Set at ServiceDiscoveryResponse time from `overlay_enabled`. While `false` every hook in
 /// this module returns immediately (single relaxed atomic load: no locks, no file access), so the
@@ -453,6 +519,33 @@ struct CachedOverlayFont {
 }
 
 impl CachedOverlayFont {
+    fn new(config_path: PathBuf) -> Self {
+        let mut cache = Self {
+            config_path: PathBuf::new(),
+            json_path: PathBuf::new(),
+            path: PathBuf::new(),
+            last_check: None,
+            attempted_mtime: None,
+            font: None,
+        };
+        cache.set_config_path(config_path);
+        cache
+    }
+
+    fn set_config_path(&mut self, path: PathBuf) {
+        if self.config_path != path {
+            self.config_path = path;
+            self.refresh_effective_path();
+        }
+    }
+
+    fn set_json_path(&mut self, path: PathBuf) {
+        if self.json_path != path {
+            self.json_path = path;
+            self.refresh_effective_path();
+        }
+    }
+
     fn refresh_effective_path(&mut self) {
         let effective = if self.json_path.as_os_str().is_empty() {
             self.config_path.clone()
@@ -468,16 +561,8 @@ impl CachedOverlayFont {
     }
 }
 
-static OVERLAY_FONT_CACHE: LazyLock<Mutex<CachedOverlayFont>> = LazyLock::new(|| {
-    Mutex::new(CachedOverlayFont {
-        config_path: PathBuf::new(),
-        json_path: PathBuf::new(),
-        path: PathBuf::new(),
-        last_check: None,
-        attempted_mtime: None,
-        font: None,
-    })
-});
+static OVERLAY_FONT_CACHE: LazyLock<Mutex<CachedOverlayFont>> =
+    LazyLock::new(|| Mutex::new(CachedOverlayFont::new(PathBuf::new())));
 
 /// Number of font file read+parse attempts (used by tests to verify they are not repeated).
 #[cfg(test)]
@@ -488,27 +573,41 @@ fn trimmed_path(path: &Path) -> PathBuf {
     PathBuf::from(s.trim())
 }
 
-/// Sets the TTF font path from `overlay_font_path` in `config.toml`. Empty or whitespace-only means
-/// "no TTF font" (built-in bitmap font). A non-empty `"font_path"` in the live JSON file
-/// ([`set_overlay_json_font_path`]) takes precedence over this value.
+/// Sets the TTF font path from `overlay_font_path` in `config.toml` (for the main overlay and the
+/// displays with an own overlay file). Empty or whitespace-only means "no TTF font" (built-in
+/// bitmap font). A non-empty `"font_path"` in the live JSON file ([`set_overlay_json_font_path`])
+/// takes precedence over this value.
 pub fn set_overlay_font_path(path: &Path) {
     let resolved = trimmed_path(path);
     if let Ok(mut cache) = OVERLAY_FONT_CACHE.lock() {
-        if cache.config_path != resolved {
-            cache.config_path = resolved;
-            cache.refresh_effective_path();
+        cache.set_config_path(resolved.clone());
+    }
+    if let Ok(sources) = DISPLAY_SOURCES.lock() {
+        for source in sources.values() {
+            if let Ok(mut cache) = source.font.lock() {
+                cache.set_config_path(resolved.clone());
+            }
         }
     }
 }
 
-/// Sets the TTF font path from `"font_path"` in the live JSON file (empty = not set).
+/// Sets the TTF font path from `"font_path"` in the live main JSON file (empty = not set).
 pub fn set_overlay_json_font_path(path: &str) {
-    let resolved = trimmed_path(Path::new(path));
     if let Ok(mut cache) = OVERLAY_FONT_CACHE.lock() {
-        if cache.json_path != resolved {
-            cache.json_path = resolved;
-            cache.refresh_effective_path();
-        }
+        cache.set_json_path(trimmed_path(Path::new(path)));
+    }
+}
+
+/// Retrieves the active TTF font of the main overlay, see [`load_overlay_font`].
+pub fn get_cached_overlay_font() -> Option<Arc<fontdue::Font>> {
+    load_overlay_font(&OVERLAY_FONT_CACHE)
+}
+
+/// TTF font of the overlay drawn on `channel` (its own overlay file, or the main overlay).
+fn overlay_font_for_channel(channel: u8) -> Option<Arc<fontdue::Font>> {
+    match display_source(channel) {
+        Some(source) => load_overlay_font(&source.font),
+        None => get_cached_overlay_font(),
     }
 }
 
@@ -519,12 +618,12 @@ pub fn set_overlay_json_font_path(path: &str) {
 /// The font file is re-checked at most every [`FONT_CHECK_INTERVAL`] and (re)loaded only when its
 /// modification time changes. Reading and parsing a font takes tens of milliseconds, so it is done
 /// without holding the cache lock, which is also taken by the packet-handling thread.
-pub fn get_cached_overlay_font() -> Option<Arc<fontdue::Font>> {
+fn load_overlay_font(font_cache: &Mutex<CachedOverlayFont>) -> Option<Arc<fontdue::Font>> {
     let now = Instant::now();
 
     // Phase 1 (locked): decide whether the file has to be (re)loaded.
     let (path, mtime) = {
-        let mut cache = OVERLAY_FONT_CACHE.lock().ok()?;
+        let mut cache = font_cache.lock().ok()?;
         if cache.path.as_os_str().is_empty() {
             cache.font = None;
             return None;
@@ -587,7 +686,7 @@ pub fn get_cached_overlay_font() -> Option<Arc<fontdue::Font>> {
     };
 
     // Phase 3 (locked): publish the result unless the path changed in the meantime.
-    let mut cache = OVERLAY_FONT_CACHE.lock().ok()?;
+    let mut cache = font_cache.lock().ok()?;
     if cache.path == path {
         cache.attempted_mtime = Some(mtime);
         cache.font = loaded;
@@ -1208,7 +1307,7 @@ fn stage2_encoder_worker_loop(stage2: &'static WorkerQueue<Stage2Job>) {
                 fallback_frame_data,
                 out_tx,
             } => {
-                let (cfg, lines) = get_cached_overlay_config_and_lines();
+                let (cfg, lines) = get_cached_overlay_config_and_lines_for_channel(channel);
                 let (out_msgs, _) = encode_decoded_video_frame(
                     channel,
                     &timestamp_bytes,
@@ -1264,6 +1363,16 @@ pub fn overlay_enabled() -> bool {
 /// session using the configured `overlay_text_path` (or [`DEFAULT_OVERLAY_TEXT_PATH`] if empty) and
 /// default [`OverlayConfig`] values if the file is missing/empty. Even if `"text"` is initially
 /// empty, the H.264 pipeline engages from the start so text can be added or updated live at any time.
+///
+/// Which overlay a video sink gets:
+/// - the main display: the main overlay file (`overlay_text_path`),
+/// - another display (cluster, auxiliary) whose own overlay file ([`display_overlay_path`], e.g.
+///   `overlay_cluster-1.json`) exists at this point: that file,
+/// - another display without its own file: the main overlay file when `only_main_display` is
+///   `false` in it, otherwise no overlay.
+///
+/// `injected_display_ids` maps the channels of injected displays to their Display Injection
+/// profile id, used as the overlay id of these displays.
 pub fn register_video_channels_from_sdr(
     sdr: &mut ServiceDiscoveryResponse,
     enabled: bool,
@@ -1272,6 +1381,7 @@ pub fn register_video_channels_from_sdr(
     hw_accel: crate::config::OverlayHwAccel,
     v4l2_decoder: &str,
     v4l2_encoder: &str,
+    injected_display_ids: &HashMap<u8, String>,
 ) {
     SESSION_ENABLED.store(enabled, Ordering::Release);
     if let Ok(mut lock) = SESSION_HW_ACCEL.lock() {
@@ -1334,6 +1444,9 @@ pub fn register_video_channels_from_sdr(
             d.clear();
             e.clear();
         }
+        if let Ok(mut sources) = DISPLAY_SOURCES.lock() {
+            sources.clear();
+        }
         return;
     }
     let resolved_path = resolve_overlay_text_path(overlay_text_path);
@@ -1357,6 +1470,7 @@ pub fn register_video_channels_from_sdr(
     gates.clear();
     decoders.clear();
     encoders.clear();
+    let mut sources = HashMap::new();
 
     for svc in &mut sdr.services {
         let Ok(ch) = u8::try_from(svc.id()) else {
@@ -1371,15 +1485,31 @@ pub fn register_video_channels_from_sdr(
             continue;
         }
         let display_type = sink.display_type();
-        if cfg.only_main_display && display_type != DisplayType::DISPLAY_TYPE_MAIN {
-            debug!(
-                "overlay: skipping non-main video channel {:#04x} ({:?})",
-                ch, display_type
-            );
-            continue;
-        }
+        // A display with its own overlay file uses it; otherwise the main overlay (always on the
+        // main display, on the other displays only with `only_main_display = false`).
+        let own_path =
+            display_overlay_id(ch, display_type, sink.display_id(), injected_display_ids)
+                .and_then(|id| display_overlay_path(&resolved_path, &id))
+                .filter(|path| path.is_file());
+        let own_source = own_path.as_ref().map(|path| {
+            Arc::new(DisplayOverlaySource {
+                text: Mutex::new(CachedOverlayText::new(path.clone())),
+                font: Mutex::new(CachedOverlayFont::new(trimmed_path(overlay_font_path))),
+            })
+        });
+        let sink_cfg = match &own_source {
+            Some(source) => load_overlay_config_and_lines(&source.text, &source.font).0,
+            None if cfg.only_main_display && display_type != DisplayType::DISPLAY_TYPE_MAIN => {
+                debug!(
+                    "overlay: skipping non-main video channel {:#04x} ({:?})",
+                    ch, display_type
+                );
+                continue;
+            }
+            None => cfg.clone(),
+        };
 
-        if cfg.cap_video_fps_to_30 {
+        if sink_cfg.cap_video_fps_to_30 {
             let mut capped_count = 0usize;
             for vc in &mut sink.video_configs {
                 if vc.frame_rate() == VideoFrameRateType::VIDEO_FPS_60 {
@@ -1399,8 +1529,11 @@ pub fn register_video_channels_from_sdr(
             "overlay: registered video channel {:#04x} ({:?}) for text overlay from {}",
             ch,
             display_type,
-            resolved_path.display()
+            own_path.as_deref().unwrap_or(&resolved_path).display()
         );
+        if let Some(source) = own_source {
+            sources.insert(ch, source);
+        }
         gates.insert(
             ch,
             ChannelGateState {
@@ -1410,6 +1543,9 @@ pub fn register_video_channels_from_sdr(
         );
         decoders.insert(ch, ChannelDecoderState::new(ch));
         encoders.insert(ch, ChannelEncoderState::new(display_type));
+    }
+    if let Ok(mut map) = DISPLAY_SOURCES.lock() {
+        *map = sources;
     }
 }
 
@@ -1514,7 +1650,7 @@ fn observe_codec_config_decoder_only(channel: u8, annex_b: &[u8]) {
 }
 
 fn observe_codec_config_encoder_only(channel: u8, parsed_dims: Option<(usize, usize)>) {
-    let (cfg, _) = get_cached_overlay_config_and_lines();
+    let (cfg, _) = get_cached_overlay_config_and_lines_for_channel(channel);
     if let Ok(mut map) = VIDEO_ENCODERS.lock() {
         if let Some(state) = map.get_mut(&channel) {
             state.reset_encoder();
@@ -1544,9 +1680,29 @@ pub fn observe_codec_config(channel: u8, frame_data: &[u8]) {
 
 /// Polls the configured `overlay_text_path` at most once every `poll_interval_ms` and returns `(config, lines)`.
 pub fn get_cached_overlay_config_and_lines() -> (OverlayConfig, Vec<String>) {
+    load_overlay_config_and_lines(&OVERLAY_TEXT_CACHE, &OVERLAY_FONT_CACHE)
+}
+
+/// `(config, lines)` of the overlay drawn on `channel`: its own `overlay_<id>.json`, or the main
+/// overlay file.
+pub fn get_cached_overlay_config_and_lines_for_channel(
+    channel: u8,
+) -> (OverlayConfig, Vec<String>) {
+    match display_source(channel) {
+        Some(source) => load_overlay_config_and_lines(&source.text, &source.font),
+        None => get_cached_overlay_config_and_lines(),
+    }
+}
+
+/// Polls the overlay file of `text_cache` at most once every `poll_interval_ms` and returns
+/// `(config, lines)`. Its `"font_path"` is passed on to `font_cache`.
+fn load_overlay_config_and_lines(
+    text_cache: &Mutex<CachedOverlayText>,
+    font_cache: &Mutex<CachedOverlayFont>,
+) -> (OverlayConfig, Vec<String>) {
     let now = Instant::now();
 
-    let mut cache = match OVERLAY_TEXT_CACHE.lock() {
+    let mut cache = match text_cache.lock() {
         Ok(guard) => guard,
         Err(_) => return (OverlayConfig::default(), Vec::new()),
     };
@@ -1576,7 +1732,9 @@ pub fn get_cached_overlay_config_and_lines() -> (OverlayConfig, Vec<String>) {
                 cache.lines.clear();
             }
         }
-        set_overlay_json_font_path(&cache.config.font_path);
+        if let Ok(mut font) = font_cache.lock() {
+            font.set_json_path(trimmed_path(Path::new(&cache.config.font_path)));
+        }
     }
 
     (cache.config.clone(), cache.lines.clone())
@@ -1844,7 +2002,7 @@ pub fn process_video_media_message(channel: u8, frame_data: Vec<u8>) -> (Vec<Vec
         return (vec![frame_data], false);
     }
 
-    let (cfg, lines) = get_cached_overlay_config_and_lines();
+    let (cfg, lines) = get_cached_overlay_config_and_lines_for_channel(channel);
     process_video_data_frame_with_config(channel, frame_data, &lines, &cfg)
 }
 
@@ -1854,7 +2012,7 @@ pub fn process_video_codec_config_in_place(
     channel: u8,
     frame_data: Vec<u8>,
 ) -> (Vec<Vec<u8>>, bool) {
-    let (cfg, _) = get_cached_overlay_config_and_lines();
+    let (cfg, _) = get_cached_overlay_config_and_lines_for_channel(channel);
     if let Ok(mut map) = VIDEO_ENCODERS.lock() {
         if let Some(state) = map.get_mut(&channel) {
             if let Some(sps_pps) = state.get_sps_pps(cfg.h264_encoder_qp) {
@@ -1996,12 +2154,12 @@ fn encode_decoded_video_frame(
     // The hardware encoder encodes in a few ms on the VPU and MUST receive every frame
     // so its internal reference picture stays 100% in sync with the car Head Unit.
     let (draw_dur, fast_skip) = if is_hw {
-        draw_overlay_box_yuv420_with_config(&mut yuv, lines, cfg);
+        draw_overlay_for_channel(channel, &mut yuv, lines, cfg);
         (t_draw_start.elapsed(), false)
     } else if !need_keyframe && !overlay_changed && has_newer_frame_in_queue {
         (Duration::ZERO, true)
     } else {
-        draw_overlay_box_yuv420_with_config(&mut yuv, lines, cfg);
+        draw_overlay_for_channel(channel, &mut yuv, lines, cfg);
         let d_dur = t_draw_start.elapsed();
         let unchanged = !need_keyframe
             && !overlay_changed
@@ -3441,6 +3599,17 @@ pub fn draw_overlay_box_yuv420_with_config(
     draw_overlay_box_yuv420_with_config_and_font(frame, lines, cfg, font.as_deref());
 }
 
+/// Draws the overlay of `channel` with the TTF font of that channel's overlay file.
+fn draw_overlay_for_channel(
+    channel: u8,
+    frame: &mut YuvFrame,
+    lines: &[String],
+    cfg: &OverlayConfig,
+) {
+    let font = overlay_font_for_channel(channel);
+    draw_overlay_box_yuv420_with_config_and_font(frame, lines, cfg, font.as_deref());
+}
+
 /// Draws a translucent box with multi-line text on `frame` with an explicit optional TTF font.
 pub fn draw_overlay_box_yuv420_with_config_and_font(
     frame: &mut YuvFrame,
@@ -4593,6 +4762,7 @@ mod tests {
             crate::config::OverlayHwAccel::None,
             "",
             "",
+            &HashMap::new(),
         );
         assert!(overlay_enabled());
         assert_eq!(
@@ -5089,6 +5259,7 @@ mod tests {
             crate::config::OverlayHwAccel::Auto,
             "",
             "",
+            &HashMap::new(),
         );
         assert!(overlay_enabled());
         assert!(is_registered_video_channel(0x03));
@@ -5118,6 +5289,7 @@ mod tests {
             crate::config::OverlayHwAccel::V4l2,
             "/dev/nonexistent_v4l2_dec",
             "/dev/nonexistent_v4l2_enc",
+            &HashMap::new(),
         );
         assert!(overlay_enabled());
         assert!(is_registered_video_channel(0x05));
@@ -5125,5 +5297,193 @@ mod tests {
         // When invalid paths are passed, fallback to software ensures states exist and run
         assert!(VIDEO_DECODERS.lock().unwrap().contains_key(&0x05));
         assert!(VIDEO_ENCODERS.lock().unwrap().contains_key(&0x05));
+    }
+
+    fn video_sink_service(
+        ch: u8,
+        display_type: DisplayType,
+        display_id: u32,
+    ) -> crate::mitm::protos::Service {
+        use crate::mitm::protos::{MediaSinkService, Service, VideoConfiguration};
+        let mut svc = Service::new();
+        svc.set_id(i32::from(ch));
+        let mut sink = MediaSinkService::new();
+        sink.set_available_type(MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP);
+        sink.set_display_type(display_type);
+        sink.set_display_id(display_id);
+        let mut vc = VideoConfiguration::new();
+        vc.set_frame_rate(VideoFrameRateType::VIDEO_FPS_60);
+        sink.video_configs.push(vc);
+        svc.media_sink_service = protobuf::MessageField::some(sink);
+        svc
+    }
+
+    fn sdr_frame_rate(sdr: &ServiceDiscoveryResponse, index: usize) -> VideoFrameRateType {
+        sdr.services[index]
+            .media_sink_service
+            .as_ref()
+            .unwrap()
+            .video_configs[0]
+            .frame_rate()
+    }
+
+    #[test]
+    fn test_display_overlay_path() {
+        let main = Path::new("/dev/shm/overlay.json");
+        assert_eq!(
+            display_overlay_path(main, "cluster-1"),
+            Some(PathBuf::from("/dev/shm/overlay_cluster-1.json"))
+        );
+        assert_eq!(
+            display_overlay_path(Path::new("  "), "auxiliary-2"),
+            Some(PathBuf::from("/dev/shm/overlay_auxiliary-2.json"))
+        );
+        assert_eq!(display_overlay_path(main, "../etc"), None);
+        assert_eq!(display_overlay_path(main, "Cluster"), None);
+        assert_eq!(display_overlay_path(main, ""), None);
+
+        let injected = HashMap::from([(0x10u8, "cluster-1".to_string())]);
+        assert_eq!(
+            display_overlay_id(0x10, DisplayType::DISPLAY_TYPE_CLUSTER, 5, &injected),
+            Some("cluster-1".to_string())
+        );
+        assert_eq!(
+            display_overlay_id(0x11, DisplayType::DISPLAY_TYPE_CLUSTER, 1, &injected),
+            Some("hu-cluster-1".to_string())
+        );
+        assert_eq!(
+            display_overlay_id(0x12, DisplayType::DISPLAY_TYPE_AUXILIARY, 2, &injected),
+            Some("hu-auxiliary-2".to_string())
+        );
+        assert_eq!(
+            display_overlay_id(0x13, DisplayType::DISPLAY_TYPE_MAIN, 0, &injected),
+            None
+        );
+    }
+
+    #[test]
+    fn test_per_display_overlay_files() {
+        let _guard = lock_test_state();
+        let dir =
+            std::env::temp_dir().join(format!("aa_proxy_overlay_displays_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let main_path = dir.join("overlay.json");
+        fs::write(&main_path, r#"{"text": "MAIN"}"#).unwrap();
+        // Injected cluster with its own file (keeps 60 fps), injected aux without a file.
+        fs::write(
+            dir.join("overlay_cluster-1.json"),
+            r#"{"text": "CLUSTER", "cap_video_fps_to_30": false, "font_path": "/x/cluster.ttf"}"#,
+        )
+        .unwrap();
+
+        let (main, cluster, aux) = (0x01u8, 0x10u8, 0x11u8);
+        let injected = HashMap::from([
+            (cluster, "cluster-1".to_string()),
+            (aux, "auxiliary-1".to_string()),
+        ]);
+        let mut sdr = ServiceDiscoveryResponse::new();
+        sdr.services
+            .push(video_sink_service(main, DisplayType::DISPLAY_TYPE_MAIN, 0));
+        sdr.services.push(video_sink_service(
+            cluster,
+            DisplayType::DISPLAY_TYPE_CLUSTER,
+            1,
+        ));
+        sdr.services.push(video_sink_service(
+            aux,
+            DisplayType::DISPLAY_TYPE_AUXILIARY,
+            2,
+        ));
+
+        let register = |sdr: &mut ServiceDiscoveryResponse| {
+            register_video_channels_from_sdr(
+                sdr,
+                true,
+                &main_path,
+                Path::new("/x/config.ttf"),
+                crate::config::OverlayHwAccel::None,
+                "",
+                "",
+                &injected,
+            )
+        };
+        register(&mut sdr);
+
+        // only_main_display defaults to true: the aux display without a file gets no overlay.
+        assert!(is_registered_video_channel(main));
+        assert!(is_registered_video_channel(cluster));
+        assert!(!is_registered_video_channel(aux));
+        assert_eq!(
+            get_cached_overlay_config_and_lines_for_channel(main).1,
+            vec!["MAIN"]
+        );
+        assert_eq!(
+            get_cached_overlay_config_and_lines_for_channel(cluster).1,
+            vec!["CLUSTER"]
+        );
+        // Each display has its own font: the JSON font_path of the cluster file does not
+        // change the main overlay's font, which uses overlay_font_path.
+        let source = display_source(cluster).unwrap();
+        assert_eq!(
+            source.font.lock().unwrap().path,
+            PathBuf::from("/x/cluster.ttf")
+        );
+        assert_eq!(
+            OVERLAY_FONT_CACHE.lock().unwrap().path,
+            PathBuf::from("/x/config.ttf")
+        );
+        assert_eq!(sdr_frame_rate(&sdr, 0), VideoFrameRateType::VIDEO_FPS_30);
+        assert_eq!(sdr_frame_rate(&sdr, 1), VideoFrameRateType::VIDEO_FPS_60);
+        assert_eq!(sdr_frame_rate(&sdr, 2), VideoFrameRateType::VIDEO_FPS_60);
+
+        // Legacy setup: only_main_display = false puts the main overlay on every display
+        // without its own file.
+        fs::write(
+            &main_path,
+            r#"{"text": "MAIN", "only_main_display": false}"#,
+        )
+        .unwrap();
+        OVERLAY_TEXT_CACHE.lock().unwrap().last_check = None;
+        let mut sdr = ServiceDiscoveryResponse::new();
+        sdr.services
+            .push(video_sink_service(main, DisplayType::DISPLAY_TYPE_MAIN, 0));
+        sdr.services.push(video_sink_service(
+            cluster,
+            DisplayType::DISPLAY_TYPE_CLUSTER,
+            1,
+        ));
+        sdr.services.push(video_sink_service(
+            aux,
+            DisplayType::DISPLAY_TYPE_AUXILIARY,
+            2,
+        ));
+        register(&mut sdr);
+        assert!(is_registered_video_channel(aux));
+        assert!(display_source(aux).is_none());
+        assert_eq!(
+            get_cached_overlay_config_and_lines_for_channel(aux).1,
+            vec!["MAIN"]
+        );
+        assert_eq!(
+            get_cached_overlay_config_and_lines_for_channel(cluster).1,
+            vec!["CLUSTER"]
+        );
+
+        // Disabling the overlay drops the per-display sources.
+        register_video_channels_from_sdr(
+            &mut sdr,
+            false,
+            &main_path,
+            Path::new(""),
+            crate::config::OverlayHwAccel::None,
+            "",
+            "",
+            &injected,
+        );
+        assert!(display_source(cluster).is_none());
+
+        OVERLAY_TEXT_CACHE.lock().unwrap().last_check = None;
+        set_overlay_text_path(Path::new(DEFAULT_OVERLAY_TEXT_PATH));
+        let _ = fs::remove_dir_all(&dir);
     }
 }

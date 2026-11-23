@@ -3734,6 +3734,7 @@ pub async fn pkt_modify_hook(
                 cfg.overlay_hw_accel,
                 &cfg.overlay_v4l2_decoder,
                 &cfg.overlay_v4l2_encoder,
+                &ctx.injected_media_profile_ids,
             );
 
             // Populate media tap channels from the final rewritten SDR. Ports are opened
