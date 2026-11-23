@@ -53,6 +53,10 @@ pub struct AaPcmFrame {
 static AA_PCM_RING: OnceLock<Arc<Mutex<VecDeque<AaPcmFrame>>>> = OnceLock::new();
 static SCO_UPLINK_RING: OnceLock<Arc<Mutex<VecDeque<Vec<u8>>>>> = OnceLock::new();
 static SCO_UPLINK_PENDING: OnceLock<Arc<Mutex<Vec<u8>>>> = OnceLock::new();
+static SCO_UPLINK_RESAMPLER: Mutex<Option<(u32, PcmResampler)>> = Mutex::new(None);
+/// Passband of the microphone path: the 8 kHz SCO uplink carries up to 4 kHz, keep a margin for
+/// the anti-alias filter.
+const SCO_UPLINK_CUTOFF_HZ: u32 = 3_500;
 static SCO_CONNECTED: AtomicBool = AtomicBool::new(false);
 static SCO_GENERATION: AtomicU64 = AtomicU64::new(0);
 
@@ -668,6 +672,7 @@ pub fn clear_sco_uplink_queue() {
     if let Some(pending) = SCO_UPLINK_PENDING.get() {
         pending.lock().unwrap().clear();
     }
+    *SCO_UPLINK_RESAMPLER.lock().unwrap() = None;
 }
 
 fn push_sco_uplink_packet(packet: Vec<u8>, capacity: usize) {
@@ -757,9 +762,10 @@ fn sco_uplink_queue_len() -> usize {
 /// Convert Android Auto microphone/source PCM to the SCO uplink format observed on
 /// the target setup: signed 16-bit little-endian, mono, 8 kHz, 60-byte packets.
 ///
-/// Current HUs usually expose the mic source as 16 kHz mono PCM, so the common
-/// path simply keeps every second sample. For 48 kHz sources it keeps every sixth
-/// sample. If the source is already 8 kHz, it passes samples through.
+/// Current HUs usually expose the mic source as 16 kHz mono PCM. Other rates are
+/// converted with an anti-alias low-pass and a fractional resampler (state kept
+/// across DATA packets), so neither aliasing nor a wrong speed for rates that are
+/// not a multiple of 8 kHz (e.g. 44.1 kHz) occurs. 8 kHz sources pass through.
 pub fn push_sco_uplink_pcm_from_aa_mic(
     input: &[u8],
     sample_rate: u32,
@@ -788,20 +794,35 @@ pub fn push_sco_uplink_pcm_from_aa_mic(
         return;
     }
 
-    let step = if sample_rate >= SCO_LINEAR_PCM_SAMPLE_RATE_HZ {
-        (sample_rate / SCO_LINEAR_PCM_SAMPLE_RATE_HZ).max(1) as usize
+    // Use the first channel when the HU ever exposes stereo/dual-mic PCM.
+    let first_channel = input
+        .chunks_exact(frame_bytes)
+        .map(|frame| i16::from_le_bytes([frame[0], frame[1]]));
+
+    let mut samples_8k: Vec<i16> = if sample_rate == SCO_LINEAR_PCM_SAMPLE_RATE_HZ {
+        first_channel.collect()
     } else {
-        1
+        let frames = input.len() / frame_bytes;
+        let mut out = Vec::with_capacity(
+            frames * SCO_LINEAR_PCM_SAMPLE_RATE_HZ as usize / sample_rate as usize + 2,
+        );
+        let mut resampler = SCO_UPLINK_RESAMPLER.lock().unwrap();
+        if resampler.as_ref().map(|(rate, _)| *rate) != Some(sample_rate) {
+            *resampler = Some((
+                sample_rate,
+                PcmResampler::new(
+                    sample_rate,
+                    SCO_LINEAR_PCM_SAMPLE_RATE_HZ,
+                    SCO_UPLINK_CUTOFF_HZ,
+                ),
+            ));
+        }
+        let (_, r) = resampler.as_mut().unwrap();
+        for sample in first_channel {
+            r.push(sample, &mut out);
+        }
+        out
     };
-
-    let frames = input.len() / frame_bytes;
-    let mut samples_8k: Vec<i16> = Vec::with_capacity(frames / step + 1);
-
-    for frame_idx in (0..frames).step_by(step) {
-        let offset = frame_idx * frame_bytes;
-        // Use the first channel when the HU ever exposes stereo/dual-mic PCM.
-        samples_8k.push(i16::from_le_bytes([input[offset], input[offset + 1]]));
-    }
 
     bt_sco_echo::process_mic_8k_samples(&mut samples_8k);
     if samples_8k.is_empty() {
