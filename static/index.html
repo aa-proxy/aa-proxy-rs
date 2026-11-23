@@ -616,7 +616,12 @@
             </div>
           </div>
           <div class="tool-panel overlay-editor-controls">
-            <div class="tool-switch-row"><label for="overlay-enabled">Enable overlay <small>Reconnect Android Auto after changing this switch</small></label><input id="overlay-enabled" type="checkbox"></div>
+            <div class="overlay-display-row">
+              <label for="overlay-display">Display<select id="overlay-display"><option value="main">Main display</option></select></label>
+              <button type="button" id="overlay-remove" class="secondary" hidden>Remove overlay file</button>
+            </div>
+            <p id="overlay-display-hint" class="tool-footnote" hidden></p>
+            <div class="tool-switch-row"><label for="overlay-enabled">Enable overlay <small>For all displays. Reconnect Android Auto after changing this switch</small></label><input id="overlay-enabled" type="checkbox"></div>
             <label for="overlay-text">Text / styled HTML</label>
             <textarea id="overlay-text" rows="5" maxlength="8192" spellcheck="false" placeholder="RPM: 2500"></textarea>
             <p class="tool-footnote">Supports &lt;b&gt;, &lt;i&gt;, &lt;u&gt;, &lt;font color&gt;, &lt;span style&gt;, &lt;br&gt; and variables.</p>

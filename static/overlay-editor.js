@@ -9,6 +9,9 @@
   ];
   const colors = [['color-text','text_rgb',[245,250,255]], ['color-bg','box_bg_rgb',[16,22,32]], ['color-border','box_border_rgb',[0,200,255]]];
   let loaded = null, dirty = false, loading = false, saving = false;
+  // 'main' or the id of a display with its own overlay_<id>.json (GET /overlay/displays).
+  let display = 'main';
+  const query = () => display === 'main' ? '' : `?display=${encodeURIComponent(display)}`;
   const el = id => document.getElementById('overlay-'+id);
   const clamp = (x,min,max) => Math.min(max, Math.max(min,x));
   const number = (str,min,max,fallback) => str.trim() === '' || !/^\d+$/.test(str) ? fallback : clamp(Number(str),min,max);
@@ -41,6 +44,12 @@
     for (const [id,key,fallback] of colors) el(id).value = toHex(rgba(o[key],fallback));
     chooseAnchor(o.anchor_horizontal || 'right', o.anchor_vertical || 'bottom');
     el('path').textContent = `Overlay file: ${response.text_path || '(unknown)'}${(response.text_path || '').startsWith('/dev/shm/') ? ' · RAM-backed: changes are lost on reboot.' : ''}`;
+    const other = (response.display || 'main') !== 'main';
+    el('remove').hidden = !other || !response.exists;
+    el('display-hint').hidden = !other;
+    el('display-hint').textContent = !other ? '' : response.exists
+      ? 'This display has its own overlay file. Text and style changes apply live; adding or removing the file applies after an Android Auto reconnect.'
+      : 'This display has no overlay file yet: it shows no overlay (or the main one if only_main_display is false in the main file). Save overlay creates the file; reconnect Android Auto to apply.';
     dirty = false;
     render();
     document.dispatchEvent(new CustomEvent('overlay-config-loaded', {detail: {text: o.text || ''}}));
@@ -55,7 +64,7 @@
     if (loading || saving || (loaded && !force)) return;
     loading=true; label('Loading overlay configuration…');
     try {
-      const res=await fetch('/overlay',{cache:'no-store'});
+      const res=await fetch('/overlay'+query(),{cache:'no-store'});
       if(!res.ok) throw new Error(`GET /overlay: ${res.status} ${await res.text()}`);
       populate(await res.json()); label('Ready. Changes are local until you save.');
     } catch(e) {label(e.message,true);} finally{loading=false;}
@@ -198,15 +207,55 @@
       const payload=values();
       // Keep the numeric text box editable while focused; normalize only at save.
       for(const [id,key,min,max,fallback] of config) el(id).value=number(el(id).value,min,max,fallback);
-      const res=await fetch('/overlay',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+      const res=await fetch('/overlay'+query(),{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
       if(!res.ok)throw new Error(`PUT /overlay: ${res.status} ${await res.text()}`);
-      const originalEnabled=loaded.enabled;
+      const originalEnabled=loaded.enabled, created=loaded.exists===false;
       populate(await res.json());
-      label(originalEnabled!==loaded.enabled?'Saved. Reconnect Android Auto to apply enable/disable.':'Overlay saved. Text and appearance updates are polled live.');
+      if(created)loadDisplays();
+      label(originalEnabled!==loaded.enabled?'Saved. Reconnect Android Auto to apply enable/disable.'
+        :created&&display!=='main'?'Overlay file created. Reconnect Android Auto to show it on this display.'
+        :'Overlay saved. Text and appearance updates are polled live.');
     } catch(e){label(e.message,true);} finally{saving=false;el('save').disabled=false;}
+  }
+  async function loadDisplays() {
+    try {
+      const res=await fetch('/overlay/displays',{cache:'no-store'});
+      if(!res.ok) return;
+      const list=await res.json();
+      if(!Array.isArray(list)) return;
+      const select=el('display');
+      select.replaceChildren();
+      for(const d of list) {
+        if(!d || typeof d.id!=='string') continue;
+        const option=document.createElement('option');
+        option.value=d.id;
+        option.textContent=d.id==='main' ? (d.label||'Main display') : `${d.label||d.id}${d.exists?'':' (no overlay file)'}`;
+        select.append(option);
+      }
+      if(![...select.options].some(o=>o.value===display)) display='main';
+      select.value=display;
+    } catch(_) { /* keep the main display only */ }
+  }
+  async function removeDisplayOverlay() {
+    if(display==='main'||saving||!confirm(`Remove the overlay file of ${display}? The display shows no overlay of its own after the next Android Auto reconnect.`))return;
+    saving=true;
+    try {
+      const res=await fetch('/overlay'+query(),{method:'DELETE'});
+      if(!res.ok)throw new Error(`DELETE /overlay: ${res.status} ${await res.text()}`);
+      populate(await res.json());
+      await loadDisplays();
+      label('Overlay file removed. Reconnect Android Auto to apply.');
+    } catch(e){label(e.message,true);} finally{saving=false;}
   }
   document.addEventListener('DOMContentLoaded',()=>{
     drawSampleScreen();
+    el('display').addEventListener('change',()=>{
+      const next=el('display').value;
+      if(dirty&&!confirm('Discard unsaved overlay changes?')){el('display').value=display;return;}
+      display=next;
+      fetchOverlay(true);
+    });
+    el('remove').addEventListener('click',removeDisplayOverlay);
     for (const id of ['preview-guides','preview-bounds']) el(id).addEventListener('change',render);
     for(const btn of el('anchor-grid').querySelectorAll('button'))btn.addEventListener('click',()=>{chooseAnchor(...btn.dataset.anchor.split(','));dirty=true;render();});
     for(const name of ['enabled','text','font',...config.map(v=>v[0]),...colors.map(v=>v[0])]){
@@ -226,8 +275,8 @@
       populate({...loaded,enabled:el('enabled').checked,overlay:v});dirty=true;
       label('Template applied to preview. Click Save overlay to publish.');
     });
-    document.addEventListener('dashboard-page',event=>{if(event.detail.page==='overlay'){fetchOverlay();render();}});
+    document.addEventListener('dashboard-page',event=>{if(event.detail.page==='overlay'){loadDisplays();fetchOverlay();render();}});
     window.addEventListener('resize',()=>{if(!el('preview-frame').closest('[hidden]'))render();});
-    if(window.location.hash.includes('overlay'))fetchOverlay();
+    if(window.location.hash.includes('overlay')){loadDisplays();fetchOverlay();}
   });
 })();
