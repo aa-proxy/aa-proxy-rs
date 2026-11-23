@@ -17,6 +17,7 @@
     <nav class="action-rail" aria-label="Dashboard navigation">
       <button type="button" class="rail-btn page-tab is-active" id="page-nav-config" data-page="config" data-label="Configuration" aria-label="Configuration" aria-pressed="true">⚙️</button>
       <button type="button" class="rail-btn page-tab" id="page-nav-overlay" data-page="overlay" data-label="Overlay Editor" aria-label="Overlay Editor" aria-pressed="false">🖥️</button>
+      <button type="button" class="rail-btn page-tab" id="page-nav-wasm-store" data-page="wasm-store" data-label="WASM Store" aria-label="WASM Store" aria-pressed="false">🧩</button>
     </nav>
     <button type="button" id="utility-toggle" class="utility-toggle" aria-controls="utility-rail" aria-expanded="false" aria-label="Open tools" title="Tools">☰ <span>Tools</span></button>
     <div class="utility-scrim" id="utility-scrim" aria-hidden="true"></div>
@@ -444,22 +445,6 @@
         />
         <div class="config-grid">{CONFIG_VALUES}</div>
       </form>
-      <section id="wasm-hooks-panel" class="config-card-wrapper" hidden>
-        <div class="card-glass-bg"></div>
-        <details class="config-card" open>
-          <summary class="card-header"><span class="card-header-title">WASM hooks</span></summary>
-          <div class="card-content">
-        <p>Upload a .wasm hook (up to 16 MiB). The hook loads automatically.</p>
-        <form id="wasm-hook-form">
-          <input type="file" id="wasm-hook-file" accept=".wasm" required />
-          <button type="submit" id="wasm-hook-upload">Upload hook</button>
-          <button type="button" id="wasm-hook-refresh">Refresh</button>
-        </form>
-        <p id="wasm-hook-status" role="status"></p>
-        <ul id="wasm-hook-list"></ul>
-          </div>
-        </details>
-      </section>
       </section>
 
       <section id="overlay-page" class="dashboard-page tools-page" aria-label="Overlay Editor" hidden>
@@ -516,6 +501,41 @@
           </div>
         </div>
       </section>
+      <section id="wasm-store-page" class="dashboard-page tools-page" aria-label="WASM Store" hidden>
+        <div class="tool-heading"><div><h2>🧩 WASM Store</h2><p>Install hooks from the official catalog or manage local .wasm files.</p></div><span class="tool-chip">aa-proxy/wasm-catalog-registry</span></div>
+        <div class="tool-tabbar" role="tablist" aria-label="WASM Store sections">
+          <button type="button" id="wasm-tab-installed" class="tool-tab is-active" role="tab" aria-selected="true">Installed</button>
+          <button type="button" id="wasm-tab-discover" class="tool-tab" role="tab" aria-selected="false">Discover</button>
+        </div>
+        <div id="wasm-store-status" class="tool-status" role="status" aria-live="polite"></div>
+        <div id="wasm-installed-pane" role="tabpanel">
+          <div class="tool-panel">
+            <div class="tool-panel-heading"><strong>Upload local WASM</strong><span>Existing upload API · 16 MiB maximum</span></div>
+            <form id="wasm-hook-form" class="wasm-upload-form">
+              <div class="wasm-file-group">
+                <input type="file" id="wasm-hook-file" accept=".wasm" required aria-label="Choose WASM file" />
+                <label for="wasm-hook-file" class="wasm-file-choose">Browse WASM</label>
+                <span id="wasm-selected-file" class="wasm-selected-file" aria-live="polite">No file selected</span>
+              </div>
+              <button type="submit" id="wasm-hook-upload">Upload hook</button>
+              <button type="button" id="wasm-hook-refresh" class="secondary">Refresh</button>
+            </form>
+            <p id="wasm-hook-status" role="status" aria-live="polite" class="tool-footnote"></p>
+          </div>
+          <div class="tool-panel"><div class="tool-panel-heading"><strong>Installed modules</strong><span id="wasm-installed-count"></span></div><ul id="wasm-hook-list" class="wasm-module-list"></ul></div>
+        </div>
+        <div id="wasm-discover-pane" role="tabpanel" hidden>
+          <div class="tool-panel">
+            <div class="tool-panel-heading"><strong>Online catalog</strong><button type="button" id="wasm-catalog-refresh" class="secondary">Refresh catalog</button></div>
+            <div class="wasm-search-group">
+              <label for="wasm-catalog-search">Search modules</label>
+              <input id="wasm-catalog-search" type="search" placeholder="Module name, category, author..." autocomplete="off" />
+            </div>
+            <p class="tool-footnote">Module descriptions load from the catalog. Detailed info loads only when requested. SHA-256 is checked before installation.</p>
+            <div id="wasm-catalog-list" class="wasm-module-list"></div>
+          </div>
+        </div>
+      </section>
     </main>
     <div
       id="snackbar"
@@ -528,72 +548,6 @@
     <script>
       document.addEventListener("DOMContentLoaded", () => {
         const fileInput = document.getElementById("file-input");
-        const hookStatus = document.getElementById("wasm-hook-status");
-        async function refreshWasmHooks() {
-          const response = await fetch("/wasm-hooks");
-          if (!response.ok) return [];
-          const hooks = await response.json();
-          document.getElementById("wasm-hooks-panel").hidden = false;
-          const list = document.getElementById("wasm-hook-list");
-          list.replaceChildren();
-          for (const hook of hooks) {
-            const row = document.createElement("li");
-            const label = document.createElement("span");
-            label.textContent = `${hook.name} (${hook.size} bytes): ${hook.error || (hook.loaded ? "loaded" : "pending")}`;
-            const remove = document.createElement("button");
-            remove.type = "button";
-            remove.textContent = "Delete";
-            remove.addEventListener("click", async () => {
-              remove.disabled = true;
-              try {
-                const result = await fetch(`/wasm-hooks/${encodeURIComponent(hook.name)}`, { method: "DELETE" });
-                if (!result.ok) throw new Error(await result.text());
-                await refreshWasmHooks();
-                hookStatus.textContent = "Hook deleted.";
-              } catch (error) {
-                hookStatus.textContent = error.message;
-                remove.disabled = false;
-              }
-            });
-            row.append(label, " ", remove);
-            list.append(row);
-          }
-          return hooks;
-        }
-        document.getElementById("wasm-hook-refresh").addEventListener("click", () => {
-          refreshWasmHooks().catch(error => { hookStatus.textContent = error.message; });
-        });
-        document.getElementById("wasm-hook-form").addEventListener("submit", async event => {
-          event.preventDefault();
-          const file = document.getElementById("wasm-hook-file").files[0];
-          if (!file) return;
-          if (file.size > 16 * 1024 * 1024) {
-            hookStatus.textContent = "The hook exceeds 16 MiB.";
-            return;
-          }
-          const button = document.getElementById("wasm-hook-upload");
-          button.disabled = true;
-          try {
-            const response = await fetch(`/wasm-hooks/${encodeURIComponent(file.name)}`, { method: "PUT", body: file });
-            if (!response.ok) throw new Error(await response.text());
-            hookStatus.textContent = "Uploaded. Waiting for the hook to load.";
-            for (let attempt = 0; attempt < 30; attempt++) {
-              const hooks = await refreshWasmHooks();
-              const hook = hooks.find(item => item.name === file.name);
-              if (hook && (hook.loaded || hook.error)) {
-                hookStatus.textContent = hook.error || "Hook loaded.";
-                break;
-              }
-              await new Promise(resolve => setTimeout(resolve, 500));
-            }
-          } catch (error) {
-            hookStatus.textContent = error.message;
-          } finally {
-            button.disabled = false;
-          }
-        });
-        refreshWasmHooks().catch(error => { hookStatus.textContent = error.message; });
-
         // Download buttons
         document.querySelectorAll(".download-btn").forEach((btn) => {
           btn.addEventListener("click", () =>
@@ -1997,5 +1951,6 @@
     </script>
     <script>{DASHBOARD_PAGES_JS}</script>
     <script>{OVERLAY_EDITOR_JS}</script>
+    <script>{WASM_STORE_JS}</script>
   </body>
 </html>

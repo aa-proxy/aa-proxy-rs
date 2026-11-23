@@ -1764,10 +1764,6 @@ body.show-advanced .rail-advanced .rail-advanced-label {
   font-weight: 400;
 }
 
-#wasm-hooks-panel {
-  margin-top: 2.5rem;
-}
-
 /* Dashboard pages: reuse existing rail and native mobile horizontal scroll. */
 .dashboard-page { width:100%; max-width:1100px; min-width:0; }
 .dashboard-page[hidden], #wasm-discover-pane[hidden], #wasm-installed-pane[hidden], .rail-btn[hidden], .aa-overlay-box[hidden] {display:none !important;}
@@ -1821,6 +1817,21 @@ body.show-advanced .rail-advanced .rail-advanced-label {
 .tool-switch-row label small{display:block;font-size:.7rem;font-weight:400;color:#91a9b0;margin-top:4px;}
 .tool-switch-row input[type="checkbox"]{width:22px;height:22px;flex:0 0 auto;margin:0;}
 .tool-layout-presets button{flex:1;min-width:110px;padding:.65rem .6rem;}
+.tool-tabbar{display:flex;gap:10px;border-bottom:1px solid rgba(255,255,255,.12);margin-bottom:1rem;}
+.tool-tabbar .tool-tab{border-radius:9px 9px 0 0;padding:.7rem 1.3rem;background:transparent;color:#acbbc9;border:1px solid transparent;border-bottom:0;}
+.tool-tabbar .tool-tab.is-active{color:#e8fffc;background:rgba(20,184,166,.16);border-color:rgba(20,184,166,.5);}
+.wasm-upload-form{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:10px;align-items:center;}
+.wasm-upload-form input{width:100%;}
+.wasm-module-list{list-style:none;padding:0;margin:0;display:grid;gap:12px;}
+.wasm-module-card{display:flex;align-items:flex-start;flex-wrap:wrap;gap:12px;border:1px solid rgba(255,255,255,.11);border-radius:12px;padding:14px;background:rgba(0,0,0,.22);min-width:0;}
+.wasm-module-info{flex:1 1 240px;min-width:0;overflow-wrap:anywhere;}
+.wasm-module-info strong{display:block;font-size:.96rem;}
+.wasm-module-meta{display:block;color:#a4b6c5;font-size:.76rem;margin-top:4px;}
+.wasm-module-description{font-size:.84rem;margin:.6rem 0 0;color:#cbd7e4;}
+.wasm-module-actions{display:flex;gap:7px;flex-wrap:wrap;align-items:center;}
+.wasm-module-actions button{padding:.5rem .8rem;min-height:39px;}
+.wasm-module-details{flex:1 0 100%;font-size:.84rem;white-space:pre-wrap;overflow-wrap:anywhere;border-top:1px solid rgba(255,255,255,.15);padding-top:10px;}
+.wasm-module-details p{margin:.4rem 0;}
 .tool-empty{color:#8fa7b4;padding:1rem;border:1px dashed rgba(255,255,255,.14);border-radius:8px;font-size:.84rem;}
 @media (max-width: 1050px){.overlay-layout{grid-template-columns:minmax(0,1fr);} .overlay-preview-column{position:static;}}
 @media (max-width:900px){
@@ -1832,11 +1843,18 @@ body.show-advanced .rail-advanced .rail-advanced-label {
   .tool-panel{padding:1rem;}
   .tool-panel-heading{flex-wrap:wrap;}
   .tool-chip{white-space:normal;font-size:.67rem;}
+  .wasm-module-actions{width:100%;}
+  .wasm-module-actions button{min-height:44px;}
+  .wasm-upload-form{grid-template-columns:repeat(2,minmax(0,1fr));}
+  .wasm-upload-form input{grid-column:1/-1;}
+  .wasm-upload-form button{min-height:44px;}
   .overlay-preview-column{position:static;}
 }
 @media (max-width:390px){
   .tool-fields-2{grid-template-columns:minmax(0,1fr);}
+  .wasm-upload-form{grid-template-columns:minmax(0,1fr);}
   .tool-layout-presets button{flex:1 0 100%;}
+  .tool-tabbar .tool-tab{flex:1;}
 }
 
 /* Ensure Pico's default heading colors remain legible on dark tool pages. */
@@ -1896,6 +1914,35 @@ html {background-color:#0a0e14;}
   .utility-rail {gap:.4rem;padding:.5rem 0;}
   .utility-rail .rail-btn {height:42px;width:42px;min-height:42px;font-size:1.05rem;}
 }
+
+/* WASM local picker: use a proper button-style label to avoid OS-native
+   filename text squeezing Browse to a few pixels. */
+.wasm-upload-form {grid-template-columns:minmax(0,1fr) auto auto;align-items:stretch;}
+.wasm-file-group {display:flex;align-items:center;gap:.75rem;min-width:0;min-height:48px;}
+.tools-page .wasm-file-group input[type=file] {
+  position:absolute !important;width:1px !important;height:1px !important;
+  padding:0 !important;margin:0 !important;opacity:0 !important;
+  overflow:hidden;clip-path:inset(50%);white-space:nowrap;
+}
+.tools-page .wasm-file-choose {
+  flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;
+  min-height:46px;padding:0 1rem;box-sizing:border-box;
+  background:rgba(20,184,166,.14);border:1px solid rgba(20,184,166,.6);
+  border-radius:9px;cursor:pointer;color:#e6fffb;font-weight:600;font-size:.86rem;
+  margin:0;white-space:nowrap;
+}
+.tools-page .wasm-file-group input[type=file]:focus-visible + .wasm-file-choose {outline:2px solid #74ede0;outline-offset:2px;}
+.wasm-selected-file {min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#a8bbca;font-size:.83rem;}
+.wasm-upload-form > button {min-height:46px;padding:.65rem 1rem;white-space:nowrap;}
+/* Search label and text entry are separate rows, never overlapping. */
+.wasm-search-group {display:flex;flex-direction:column;align-items:stretch;gap:.55rem;min-width:0;margin:1.15rem 0 1rem;}
+.tools-page .wasm-search-group label {margin:0;display:block;line-height:1.4;font-size:.85rem;}
+.tools-page #wasm-catalog-search {display:block;width:100%;height:48px;min-height:48px;padding:0 14px;box-sizing:border-box;margin:0 !important;line-height:normal;}
+@media (max-width:1100px) {
+  .wasm-upload-form {grid-template-columns:minmax(0,1fr) minmax(0,1fr);}
+  .wasm-file-group {grid-column:1/-1;}
+  .wasm-upload-form > button {width:100%;}
+}
 @media (max-width:900px) {
   .action-rail {
     position:fixed;top:0;left:0;right:auto;width:calc(100% - 78px);
@@ -1933,11 +1980,33 @@ html {background-color:#0a0e14;}
   .utility-scrim.is-open {opacity:1;visibility:visible;pointer-events:auto;}
   .main-content {margin-left:0;margin-right:0;margin-top:80px;}
   .rail-label-toast {left:12px;right:12px;}
+  .wasm-upload-form {grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;}
+  .wasm-file-group {grid-column:1/-1;display:flex;flex-wrap:wrap;}
+  .wasm-file-choose {min-width:140px;}
+  .wasm-selected-file {flex:1 1 100px;}
+  #wasm-discover-pane .tool-panel-heading {align-items:flex-start;gap:.75rem;}
+  #wasm-catalog-refresh {min-height:44px;}
+}
+@media (max-width:430px){
+  .wasm-upload-form{grid-template-columns:1fr 1fr;}
+  .wasm-file-group{display:grid;grid-template-columns:1fr;gap:.55rem;}
+  .tools-page .wasm-file-choose{width:100%;}
+  .wasm-selected-file{display:block;width:100%;}
+  .wasm-upload-form > button{font-size:.83rem;padding:.75rem .35rem;}
+  #wasm-discover-pane .tool-panel-heading {flex-direction:column;align-items:stretch;}
+  #wasm-catalog-refresh {width:100%;}
+  .wasm-search-group {margin-top:1.2rem;}
 }
 @media (prefers-reduced-motion:reduce){.utility-rail,.utility-scrim{transition:none;}}
 /* Final Pico normalization: its nav defaults must not space the three page
    icons down the entire left rail. */
 @media (min-width:901px){.action-rail{justify-content:flex-start !important;}}
+/* Search type inherits an embedded magnifier from Pico, reserve its space. */
+.tools-page #wasm-catalog-search{
+  padding-left:42px !important;
+  max-width:520px !important;
+}
+@media (max-width:900px){.tools-page #wasm-catalog-search{max-width:100% !important;}}
 
 /* Vector Canvas background. The editable text remains a separate HTML overlay. */
 .aa-preview-frame .aa-preview-canvas {position:absolute;inset:0;display:block;width:100%;height:100%;pointer-events:none;z-index:0;}
