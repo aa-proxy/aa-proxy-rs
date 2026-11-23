@@ -39,6 +39,7 @@ pub mod packet_fragment;
 pub mod proxy;
 #[cfg(feature = "wasm-scripting")]
 pub mod script_wasm;
+pub mod sdr_snapshot;
 pub mod sdr_ui;
 pub mod sdr_ui_preview;
 pub mod ssl;

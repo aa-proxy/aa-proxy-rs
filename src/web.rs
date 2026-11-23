@@ -35,6 +35,7 @@ use crate::overlay::OverlayConfig;
 use crate::proxy::media_tap_reverse_bridge_once;
 #[cfg(feature = "wasm-scripting")]
 use crate::script_wasm::{LoadedScript, ScriptRegistry};
+use crate::sdr_snapshot;
 use crate::sdr_ui;
 use crate::sdr_ui_preview;
 #[cfg(feature = "wasm-scripting")]
@@ -1940,18 +1941,45 @@ async fn media_tap_open_handler(
 async fn service_discovery_response_handler(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    let data = state.last_service_discovery_response.read().await;
-    if let Some(value) = data.clone() {
-        Json(value).into_response()
-    } else {
-        (
+    // The existing JSON response shape stays unchanged for Companion clients.
+    if let Some(value) = state.last_service_discovery_response.read().await.clone() {
+        return (
+            [("cache-control", "no-store"), ("x-sdr-source", "memory")],
+            Json(value),
+        )
+            .into_response();
+    }
+    // First request after aa-proxy-rs restart, or when AA is disconnected.
+    match sdr_snapshot::load().await {
+        Ok(Some(value)) => (
+            [("cache-control", "no-store"), ("x-sdr-source", "disk")],
+            Json(value),
+        )
+            .into_response(),
+        Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(json!({
                 "error": "service_discovery_response_not_available",
-                "message": "No ServiceDiscoveryResponse has been observed yet"
+                "message": "No ServiceDiscoveryResponse has been observed or saved yet"
             })),
         )
-            .into_response()
+            .into_response(),
+        Err(e) => {
+            warn!(
+                "{} failed to load saved SDR from {}: {}",
+                NAME,
+                sdr_snapshot::LAST_SDR_PATH,
+                e
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "service_discovery_response_cache_error",
+                    "message": "Saved SDR could not be read"
+                })),
+            )
+                .into_response()
+        }
     }
 }
 

@@ -26,6 +26,7 @@ use crate::mitm_prettyprint::{
     pkt_debug, pkt_debug_with_full_frame, update_debug_channel_kinds, PacketDebugServiceKind,
     PktDebugFullFrameBuffers,
 };
+use crate::sdr_snapshot;
 use crate::sdr_ui;
 use crate::ssl::{AaConnection, SslMemBuf, TlsBackend};
 use crate::vendor_ext::{
@@ -1335,7 +1336,17 @@ async fn update_last_service_discovery_response(
     match protobuf_json_mapping::print_to_string(msg) {
         Ok(json_string) => match serde_json::from_str::<serde_json::Value>(&json_string) {
             Ok(json_value) => {
-                *last_service_discovery_response.write().await = Some(json_value);
+                *last_service_discovery_response.write().await = Some(json_value.clone());
+                // Persist the most recently observed SDR for the web SDR Info page.
+                // Failure is non-fatal: keep the live AA session and in-memory SDR.
+                if let Err(e) = sdr_snapshot::save(&json_value).await {
+                    warn!(
+                        "{} could not persist last SDR to {}: {}",
+                        get_name(proxy_type),
+                        sdr_snapshot::LAST_SDR_PATH,
+                        e
+                    );
+                }
             }
             Err(e) => {
                 warn!(
