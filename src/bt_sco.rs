@@ -33,6 +33,8 @@ const DEFAULT_AA_PCM_RING_CAPACITY: usize = 128;
 pub const SCO_UPLINK_PACKET_BYTES: usize = 60;
 const DEFAULT_SCO_UPLINK_RING_CAPACITY: usize = 256;
 const SCO_DOWNLINK_AUDIO_LOG_PEAK_THRESHOLD: i16 = 64;
+/// Minimum interval between repeated error logs on per-packet paths.
+const ERROR_LOG_INTERVAL: Duration = Duration::from_secs(5);
 /// Uplink latency control: the HU microphone and the SCO link run on different clocks, so a
 /// slightly faster microphone makes the uplink queue (and the latency heard by the far end)
 /// grow during a call. The smallest queue length seen within a window is the standing latency
@@ -375,6 +377,7 @@ fn handle_sco_connection(fd: RawFd, options: &BtScoOptions, generation: u64) {
     let mut uplink_silence_packets = 0u64;
     let mut uplink_write_errors = 0u64;
     let mut uplink_latency = UplinkLatencyControl::new(Instant::now());
+    let mut last_write_error_log: Option<Instant> = None;
 
     loop {
         let n = unsafe {
@@ -477,12 +480,20 @@ fn handle_sco_connection(fd: RawFd, options: &BtScoOptions, generation: u64) {
             };
 
             if written < 0 {
+                let e = io::Error::last_os_error();
                 uplink_write_errors += 1;
-                warn!(
-                    "{} SCO mic-uplink write error: {}",
-                    NAME,
-                    io::Error::last_os_error()
-                );
+                // One write per received packet (~267/s): log the first error, then at most
+                // one summary per interval.
+                if last_write_error_log
+                    .map(|t| now.duration_since(t) >= ERROR_LOG_INTERVAL)
+                    .unwrap_or(true)
+                {
+                    warn!(
+                        "{} SCO mic-uplink write error: {} (write_errors={})",
+                        NAME, e, uplink_write_errors
+                    );
+                    last_write_error_log = Some(now);
+                }
             } else {
                 uplink_written_packets += 1;
                 if from_mic {

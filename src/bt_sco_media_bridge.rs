@@ -18,6 +18,8 @@ const IDLE_SLEEP: Duration = Duration::from_millis(5);
 const NO_TARGET_SLEEP: Duration = Duration::from_millis(100);
 const WAIT_LOG_INTERVAL: Duration = Duration::from_secs(10);
 const MIC_REQUEST_LOG_INTERVAL: Duration = Duration::from_secs(5);
+const MIC_REQUEST_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+const SEND_ERROR_LOG_INTERVAL: Duration = Duration::from_secs(5);
 const DEFAULT_SESSION_ID: i32 = 0x5343_4f02; // "SCO\x02"
 const DEFAULT_FIXED_CADENCE_MS: u32 = 0; // 0 = pace by the audio duration of each packet
 const DEFAULT_JITTER_BUFFER_MS: u32 = 60;
@@ -314,11 +316,16 @@ fn bridge_loop(runtime: Arc<Runtime>) {
     let mut silent_frames_before_start = 0u64;
     let mut next_cadence_send_at: Option<Instant> = None;
     let mut last_mic_wait_log = Instant::now();
+    let mut mic_request_retry_at: Option<Instant> = None;
     let mut rate_adapter: Option<bt_sco::PcmResampler> = None;
     let mut rate_adapter_generation = 0u64;
 
     loop {
-        handle_microphone_request_state(&runtime, &mut last_mic_wait_log);
+        handle_microphone_request_state(
+            &runtime,
+            &mut last_mic_wait_log,
+            &mut mic_request_retry_at,
+        );
 
         let channel = runtime.target_channel.load(Ordering::SeqCst);
         if channel == 0 {
@@ -796,7 +803,11 @@ fn send_media_stop(runtime: &Runtime, channel: u8) -> std::result::Result<(), ()
     result
 }
 
-fn handle_microphone_request_state(runtime: &Runtime, last_wait_log: &mut Instant) {
+fn handle_microphone_request_state(
+    runtime: &Runtime,
+    last_wait_log: &mut Instant,
+    retry_at: &mut Option<Instant>,
+) {
     let channel = runtime.mic_channel.load(Ordering::SeqCst);
     if channel == 0 || !runtime.mic_request_enabled.load(Ordering::SeqCst) {
         return;
@@ -807,7 +818,14 @@ fn handle_microphone_request_state(runtime: &Runtime, last_wait_log: &mut Instan
     let open_generation = runtime.mic_open_sco_generation.load(Ordering::SeqCst);
 
     if connected && generation != 0 && generation != open_generation {
-        if send_microphone_request(runtime, channel, true).is_ok() {
+        // A failed open request is retried every loop iteration (5 ms) otherwise.
+        if retry_at.map(|t| Instant::now() < t).unwrap_or(false) {
+            return;
+        }
+        if send_microphone_request(runtime, channel, true).is_err() {
+            *retry_at = Some(Instant::now() + MIC_REQUEST_RETRY_INTERVAL);
+        } else {
+            *retry_at = None;
             runtime
                 .mic_open_sco_generation
                 .store(generation, Ordering::SeqCst);
@@ -984,17 +1002,38 @@ fn drop_stale_sco_frames() {
     bt_sco::clear_aa_pcm_queue();
 }
 
+/// Send failures repeat on every loop iteration while the AA session is gone, so log the first
+/// one and then at most one per interval with the number of suppressed failures.
+fn warn_send_failure(label: &str, reason: &str) {
+    static LAST: Mutex<(Option<Instant>, u64)> = Mutex::new((None, 0));
+    let mut last = LAST.lock().unwrap();
+    let now = Instant::now();
+    if last
+        .0
+        .map(|t| now.duration_since(t) >= SEND_ERROR_LOG_INTERVAL)
+        .unwrap_or(true)
+    {
+        warn!(
+            "{} failed to send {}: {} (suppressed since last report: {})",
+            NAME, label, reason, last.1
+        );
+        *last = (Some(now), 0);
+    } else {
+        last.1 += 1;
+    }
+}
+
 fn send_packet(runtime: &Runtime, pkt: Packet, label: &str) -> std::result::Result<(), ()> {
     let tx = runtime.tx.lock().unwrap().clone();
     let Some(tx) = tx else {
-        warn!("{} cannot send {}, AA tx is not available", NAME, label);
+        warn_send_failure(label, "AA tx is not available");
         return Err(());
     };
 
     match tx.blocking_send(pkt) {
         Ok(_) => Ok(()),
         Err(e) => {
-            warn!("{} failed to send {}: {}", NAME, label, e);
+            warn_send_failure(label, &e.to_string());
             Err(())
         }
     }
