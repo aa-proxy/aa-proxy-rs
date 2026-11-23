@@ -564,6 +564,36 @@ If you prefer to configure hooks manually, you can run:
 
 However, using `setup-dev.sh` is the recommended approach.
 
+### Previewing the web interface
+You can work on the embedded web interface on your own computer, without
+building an image or running aa-proxy-rs on a device. Run this from the
+repository root:
+
+```sh
+cargo run --example dashboard-preview
+```
+
+and open http://127.0.0.1:8088 in a browser.
+
+The preview is a small web server (`examples/dashboard-preview.rs`) that
+renders the dashboard the same way as aa-proxy-rs does, with these
+differences:
+- The files in `static/` (`index.html`, `styles.css`, the page scripts
+  `*.js`, `config.json`, ...) are read on every request, so after you edit
+  them you only need to refresh the page. Changes to Rust code (for example
+  the config page renderer in `src/web.rs`) need a new `cargo run`.
+- The configuration starts from `../WebUI/web-dev/config.toml` if that file
+  exists, otherwise from the defaults. Saving it only changes the copy in
+  memory.
+- Nothing is done on the host: restart, reboot, key presses, uploads and all
+  other actions only print a `[preview]` line on the console and return
+  `OK`. Pages that show data from a running proxy (Overlay Editor, WASM
+  Store, SDR UI, SDR Info, Display Injection) therefore show no real data
+  and may report errors.
+
+The example uses the aa-proxy-rs library, so the first build needs the same
+build dependencies (e.g. OpenSSL development files) as aa-proxy-rs itself.
+
 ## Similar/other open source AndroidAuto-related projects
 - https://github.com/nisargjhaveri/WirelessAndroidAutoDongle
 - https://github.com/nisargjhaveri/AAWirelessGateway
