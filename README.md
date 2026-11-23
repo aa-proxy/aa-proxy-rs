@@ -276,8 +276,34 @@ Note: an incomplete or invalid JSON is not an error, but the overlay then falls 
 | `max_display_lines`, `max_line_chars` | `14`, `42` | Truncation limits |
 | `h264_encoder_qp` | `26` | Fixed quantizer (0-51); lower = better quality and higher bitrate |
 | `h264_encoder_gop` | `600` | Keyframe interval in frames (extra IDRs are still produced on demand) |
-| `only_main_display` | `true` | Apply only to the main display, not to cluster/auxiliary ones |
+| `only_main_display` | `true` | Apply only to the main display; `false` shows this overlay also on the cluster/auxiliary displays that have no [overlay file of their own](#overlay-on-cluster-and-auxiliary-displays) |
 | `cap_video_fps_to_30` | `true` | Cap `VIDEO_FPS_60` to 30 in the `ServiceDiscoveryResponse` while the overlay is enabled |
+
+#### Overlay on cluster and auxiliary displays
+By default the overlay is drawn only on the main display. A cluster or auxiliary display, injected with
+Display Injection or the head unit's own, can get **its own overlay** from a separate file next to the main one
+(same directory as `overlay_text_path`), named `overlay_<id>.json`:
+
+| Display | `<id>` | Example file (default directory) |
+|---|---|---|
+| injected with Display Injection | the display's id from Display Injection | `/dev/shm/overlay_cluster-1.json`, `/dev/shm/overlay_auxiliary-1.json` |
+| the head unit's own cluster/auxiliary display | `hu-cluster-<display_id>` / `hu-auxiliary-<display_id>` | `/dev/shm/overlay_hu-cluster-1.json` |
+
+The file has the same format and keys as the main one (its own text, position, colors, font, ...) and is
+re-read live in the same way. `overlay_enabled` applies to all displays. The log shows which file every
+display uses (`overlay: registered video channel ... from <file>`), which also tells the ids of the head unit's
+own displays.
+
+Whether a display gets its own overlay is decided when an Android Auto session starts, because every display
+with an overlay has its video re-encoded: **the file has to exist when the phone connects**, and creating or
+removing it applies on the next connection (its content can change at any time, `"text": ""` hides the
+overlay). A display without its own file behaves as before: no overlay, or the main overlay when
+`only_main_display` is `false` in the main file. Every additional display with an overlay needs its own
+decode/encode pipeline, so check the CPU load, especially with the software codec.
+
+The Overlay Editor page of the web interface has a Display selector to edit (and create or remove) these files.
+The same is available through `GET`/`PUT`/`DELETE /overlay?display=<id>`; `GET /overlay/displays` lists the
+displays.
 
 #### Live data templates
 `"text"` may contain `{{name}}` placeholders that `aa-proxy-rs` replaces with live data on every poll, e.g.
