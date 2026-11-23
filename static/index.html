@@ -2174,14 +2174,12 @@
         if (event.detail && event.detail.page === "sdr-ui") {
           initMarginsPanel();
           loadStoredSdrProfiles();
-          window.SdrProfilesWeb?.refreshStatus();
         }
       });
       document.addEventListener("DOMContentLoaded", () => {
         document.getElementById("sdr-refresh-current").addEventListener("click", () => {
           marginsState.loaded = false;
           reloadMarginsPanel();
-          window.SdrProfilesWeb?.refreshStatus();
         });
         document.getElementById("sdr-refresh-profiles").addEventListener("click", loadStoredSdrProfiles);
       });

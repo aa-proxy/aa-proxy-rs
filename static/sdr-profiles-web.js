@@ -275,11 +275,12 @@
       });
     });
     actions.append(cancel,save);dlg.append(actions);
-    dlg.addEventListener('click', e=>{if(e.target===dlg)dlg.close();},{once:true});
     syncDiagram();dlg.showModal();
   }
   function init() {
     const dlg=$('sdr-video-edit-dialog');if(!dlg)return;
+    // A click on the dialog element itself is a click on its backdrop.
+    dlg.addEventListener('click',e=>{if(e.target===dlg)dlg.close();});
     $('sdr-refresh-current')?.addEventListener('click',refreshStatus);
     document.addEventListener('dashboard-page',e=>{if(e.detail?.page==='sdr-ui')refreshStatus();});
     if(location.hash.includes('sdr-ui'))refreshStatus();
