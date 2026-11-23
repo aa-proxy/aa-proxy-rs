@@ -629,13 +629,6 @@ pub fn pop_aa_pcm_frame_for_generation(generation: u64) -> Option<AaPcmFrame> {
     None
 }
 
-pub fn aa_pcm_frame_count() -> usize {
-    AA_PCM_RING
-        .get()
-        .map(|ring| ring.lock().unwrap().len())
-        .unwrap_or(0)
-}
-
 /// Playback time (in ms) of the converted 48 kHz stereo s16le PCM queued for `generation`.
 pub fn aa_pcm_queued_ms_for_generation(generation: u64) -> u64 {
     const BYTES_PER_MS: u64 =

@@ -1,8 +1,6 @@
 use crate::bt_sco;
 use crate::config::BtScoMediaBridgeLimiter;
-use crate::mitm::protos::{
-    Ack, ChannelOpenResponse, Config as AudioConfig, MediaMessageId, Start, Stop,
-};
+use crate::mitm::protos::{Ack, Config as AudioConfig, MediaMessageId, Start, Stop};
 use crate::mitm::{Packet, ENCRYPTED, FRAME_TYPE_FIRST, FRAME_TYPE_LAST};
 use protobuf::Message;
 use simplelog::*;
@@ -321,13 +319,6 @@ pub fn notify_microphone_response(channel: u8, payload: &[u8]) {
         hex::encode(&payload[..payload.len().min(32)])
     );
 }
-
-/// Kept for compatibility with the previous safe-open patch.
-///
-/// The piggyback bridge deliberately does not send CHANNEL_OPEN_REQUEST anymore, so
-/// CHANNEL_OPEN_RESPONSE is not needed. Leaving this no-op lets this file compile
-/// both against the previous mitm.rs and against the current one.
-pub fn notify_channel_open_response(_resp: &ChannelOpenResponse) {}
 
 fn bridge_loop(runtime: Arc<Runtime>) {
     let mut active_epoch = 0u64;

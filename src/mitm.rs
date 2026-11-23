@@ -1278,27 +1278,21 @@ fn choose_bt_sco_media_bridge_sink(
         let audio_type_score = match preferred_audio_type {
             // Call-audio mode: try GUIDANCE first because several HUs mute MEDIA
             // while a phone call/microphone session is active.
-            // Call-audio mode: try GUIDANCE first because several HUs mute MEDIA
-            // while a phone call/microphone session is active.
             BtScoMediaBridgeAudioType::Guidance => match audio_type {
                 AUDIO_STREAM_GUIDANCE => 0,
                 AUDIO_STREAM_MEDIA => 40,
                 AUDIO_STREAM_SYSTEM_AUDIO => 80,
                 _ => 120,
             },
-            BtScoMediaBridgeAudioType::Media => match audio_type {
-                AUDIO_STREAM_MEDIA => 0,
-                AUDIO_STREAM_GUIDANCE => 40,
-                AUDIO_STREAM_SYSTEM_AUDIO => 80,
-                _ => 120,
-            },
-            // Legacy behaviour: prefer normal media first.
-            BtScoMediaBridgeAudioType::Auto => match audio_type {
-                AUDIO_STREAM_MEDIA => 0,
-                AUDIO_STREAM_GUIDANCE => 40,
-                AUDIO_STREAM_SYSTEM_AUDIO => 80,
-                _ => 120,
-            },
+            // Auto is the legacy behaviour: prefer normal media first.
+            BtScoMediaBridgeAudioType::Media | BtScoMediaBridgeAudioType::Auto => {
+                match audio_type {
+                    AUDIO_STREAM_MEDIA => 0,
+                    AUDIO_STREAM_GUIDANCE => 40,
+                    AUDIO_STREAM_SYSTEM_AUDIO => 80,
+                    _ => 120,
+                }
+            }
         };
 
         for acfg in sink.audio_configs.iter() {
