@@ -941,6 +941,9 @@ pub struct AppConfig {
     /// on some HUs, but is disabled by default to preserve the proven behavior.
     pub bt_sco_media_bridge_fixed_cadence: bool,
     /// Fixed DATA cadence in milliseconds when fixed cadence is enabled.
+    /// 0 (default) paces each packet by its own audio duration, which always
+    /// matches the SCO rate. A non-zero value must match the chunk duration,
+    /// otherwise the buffer drains (underruns) or grows (latency).
     pub bt_sco_media_bridge_cadence_ms: u32,
     /// Minimum converted-audio buffer before the first fixed-cadence DATA packet.
     pub bt_sco_media_bridge_jitter_buffer_ms: u32,
@@ -1294,7 +1297,7 @@ impl Default for AppConfig {
             bt_sco_media_bridge_start_timeout_ms: 5000,
             bt_sco_media_bridge_stop_existing_on_disconnect: true,
             bt_sco_media_bridge_fixed_cadence: false,
-            bt_sco_media_bridge_cadence_ms: 22,
+            bt_sco_media_bridge_cadence_ms: 0,
             bt_sco_media_bridge_jitter_buffer_ms: 60,
             bt_sco_mic_bridge: false,
             bt_sco_mic_request: true,

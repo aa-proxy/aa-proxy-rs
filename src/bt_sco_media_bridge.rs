@@ -19,7 +19,7 @@ const NO_TARGET_SLEEP: Duration = Duration::from_millis(100);
 const WAIT_LOG_INTERVAL: Duration = Duration::from_secs(10);
 const MIC_REQUEST_LOG_INTERVAL: Duration = Duration::from_secs(5);
 const DEFAULT_SESSION_ID: i32 = 0x5343_4f02; // "SCO\x02"
-const DEFAULT_FIXED_CADENCE_MS: u32 = 22;
+const DEFAULT_FIXED_CADENCE_MS: u32 = 0; // 0 = pace by the audio duration of each packet
 const DEFAULT_JITTER_BUFFER_MS: u32 = 60;
 const DEFAULT_AUDIO_PEAK_THRESHOLD: u32 = 64;
 const DEFAULT_START_TIMEOUT_MS: u32 = 1500;
@@ -165,9 +165,7 @@ pub fn set_target_channel(
         .start_timeout_ms
         .store(start_timeout_ms.max(1), Ordering::SeqCst);
     runtime.fixed_cadence.store(fixed_cadence, Ordering::SeqCst);
-    runtime
-        .cadence_ms
-        .store(cadence_ms.max(1), Ordering::SeqCst);
+    runtime.cadence_ms.store(cadence_ms, Ordering::SeqCst);
     runtime
         .jitter_buffer_ms
         .store(jitter_buffer_ms, Ordering::SeqCst);
@@ -185,12 +183,12 @@ pub fn set_target_channel(
     if previous != channel {
         debug!(
             "{} selected existing AA PCM sink channel=<b>{:#04x}</>, {}Hz, {}ch, {}bit, gain={}%, limiter={}, start_existing={}, start_on_first_audio={}, peak_threshold={}, start_timeout={}ms, stop_on_disconnect={}, fixed_cadence={}ms/{}, jitter_buffer={}ms, epoch={}; will piggyback DATA only",
-            NAME, channel, sample_rate, channels, bits, gain_percent, limiter, start_existing, start_on_first_audio, audio_peak_threshold, start_timeout_ms.max(1), stop_existing_on_disconnect, cadence_ms.max(1), fixed_cadence, jitter_buffer_ms, epoch
+            NAME, channel, sample_rate, channels, bits, gain_percent, limiter, start_existing, start_on_first_audio, audio_peak_threshold, start_timeout_ms.max(1), stop_existing_on_disconnect, cadence_ms, fixed_cadence, jitter_buffer_ms, epoch
         );
     } else {
         debug!(
             "{} re-armed existing AA PCM sink channel=<b>{:#04x}</>, {}Hz, {}ch, {}bit, gain={}%, limiter={}, start_existing={}, start_on_first_audio={}, peak_threshold={}, start_timeout={}ms, stop_on_disconnect={}, fixed_cadence={}ms/{}, jitter_buffer={}ms, epoch={}; will piggyback DATA only",
-            NAME, channel, sample_rate, channels, bits, gain_percent, limiter, start_existing, start_on_first_audio, audio_peak_threshold, start_timeout_ms.max(1), stop_existing_on_disconnect, cadence_ms.max(1), fixed_cadence, jitter_buffer_ms, epoch
+            NAME, channel, sample_rate, channels, bits, gain_percent, limiter, start_existing, start_on_first_audio, audio_peak_threshold, start_timeout_ms.max(1), stop_existing_on_disconnect, cadence_ms, fixed_cadence, jitter_buffer_ms, epoch
         );
     }
 }
@@ -384,8 +382,8 @@ fn bridge_loop(runtime: Arc<Runtime>) {
             continue;
         }
 
-        if should_wait_for_fixed_cadence(&runtime, data_packets, &mut next_cadence_send_at) {
-            thread::sleep(IDLE_SLEEP);
+        if let Some(wait) = fixed_cadence_wait(&runtime, data_packets, &next_cadence_send_at) {
+            thread::sleep(wait);
             continue;
         }
 
@@ -473,8 +471,13 @@ fn bridge_loop(runtime: Arc<Runtime>) {
 
         if send_packet(&runtime, pkt, "DATA").is_ok() {
             data_packets += 1;
-            pts_us += frames * 1_000_000 / (target_sample_rate as u64);
-            advance_fixed_cadence(&runtime, &mut next_cadence_send_at);
+            let frame_us = frames * 1_000_000 / (target_sample_rate as u64);
+            pts_us += frame_us;
+            advance_fixed_cadence(
+                &runtime,
+                &mut next_cadence_send_at,
+                Duration::from_micros(frame_us),
+            );
 
             if data_packets <= 5 || last_data_log.elapsed() >= Duration::from_secs(5) {
                 let config_index = runtime.configuration_index.load(Ordering::SeqCst);
@@ -499,46 +502,70 @@ fn bridge_loop(runtime: Arc<Runtime>) {
     }
 }
 
-fn should_wait_for_fixed_cadence(
+/// Returns how long to wait before the next fixed-cadence DATA packet, or `None` when a packet
+/// may be sent now.
+fn fixed_cadence_wait(
     runtime: &Runtime,
     data_packets: u64,
-    next_send_at: &mut Option<Instant>,
-) -> bool {
+    next_send_at: &Option<Instant>,
+) -> Option<Duration> {
     if !runtime.fixed_cadence.load(Ordering::SeqCst) {
-        return false;
+        return None;
     }
 
-    let cadence_ms = runtime.cadence_ms.load(Ordering::SeqCst).max(1);
     let jitter_buffer_ms = runtime.jitter_buffer_ms.load(Ordering::SeqCst);
 
     if data_packets == 0 && jitter_buffer_ms > 0 {
-        let needed_chunks = ((jitter_buffer_ms + cadence_ms - 1) / cadence_ms).max(1) as usize;
         let generation = bt_sco::sco_generation();
-        if generation == 0 || bt_sco::aa_pcm_frame_count_for_generation(generation) < needed_chunks
+        if generation == 0
+            || bt_sco::aa_pcm_queued_ms_for_generation(generation) < jitter_buffer_ms as u64
         {
-            return true;
+            return Some(IDLE_SLEEP);
         }
     }
 
-    if let Some(next) = *next_send_at {
-        if Instant::now() < next {
-            return true;
-        }
+    let next = (*next_send_at)?;
+    let now = Instant::now();
+    if now < next {
+        Some((next - now).min(IDLE_SLEEP))
+    } else {
+        None
     }
-
-    false
 }
 
-fn advance_fixed_cadence(runtime: &Runtime, next_send_at: &mut Option<Instant>) {
+/// Schedule the next fixed-cadence DATA packet. The deadline is advanced from the previous
+/// deadline (not from "now"), so the scheduling latency of the loop does not accumulate and the
+/// average send rate matches the real-time rate of the audio. `audio_duration` is the playback
+/// time of the packet just sent; `cadence_ms = 0` (default) paces by it, a non-zero value forces
+/// a fixed interval.
+fn advance_fixed_cadence(
+    runtime: &Runtime,
+    next_send_at: &mut Option<Instant>,
+    audio_duration: Duration,
+) {
     if !runtime.fixed_cadence.load(Ordering::SeqCst) {
         *next_send_at = None;
         return;
     }
 
-    let cadence = Duration::from_millis(runtime.cadence_ms.load(Ordering::SeqCst).max(1) as u64);
+    let cadence_ms = runtime.cadence_ms.load(Ordering::SeqCst);
+    let cadence = if cadence_ms == 0 {
+        audio_duration
+    } else {
+        Duration::from_millis(cadence_ms as u64)
+    };
+    if cadence.is_zero() {
+        *next_send_at = None;
+        return;
+    }
+
     let now = Instant::now();
     let next = match *next_send_at {
-        Some(previous) if previous > now => previous + cadence,
+        // On schedule or slightly late: keep the grid, the next packet catches up.
+        Some(previous) if now.saturating_duration_since(previous) < cadence * 2 => {
+            previous + cadence
+        }
+        // First packet, or far behind (underrun / stall): restart the grid from now.
         _ => now + cadence,
     };
     *next_send_at = Some(next);

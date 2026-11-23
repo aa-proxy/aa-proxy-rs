@@ -830,7 +830,7 @@
                 },
                 "bt_sco_media_bridge_cadence_ms": {
                   "typ": "integer",
-                  "description": "DATA packet cadence in milliseconds when fixed cadence is enabled. 22 ms matches the current 6-SCO-packet chunk timing closely.",
+                  "description": "DATA packet cadence in milliseconds when fixed cadence is enabled. 0 (recommended) paces every packet by its own audio duration, which always matches the SCO rate. A fixed value must match the chunk duration (22.5 ms for 60-byte SCO packets), otherwise audio underruns or latency grows.",
                   "requires": [
                     "bt_sco_media_bridge",
                     "bt_sco_media_bridge_fixed_cadence"
