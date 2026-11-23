@@ -1,8 +1,6 @@
 use crate::bt_sco;
 use crate::config::BtScoMediaBridgeLimiter;
-use crate::mitm::protos::{
-    ChannelOpenResponse, Config as AudioConfig, MediaMessageId, Start, Stop,
-};
+use crate::mitm::protos::{Ack, Config as AudioConfig, MediaMessageId, Start, Stop};
 use crate::mitm::{Packet, ENCRYPTED, FRAME_TYPE_FIRST, FRAME_TYPE_LAST};
 use protobuf::Message;
 use simplelog::*;
@@ -18,11 +16,20 @@ const IDLE_SLEEP: Duration = Duration::from_millis(5);
 const NO_TARGET_SLEEP: Duration = Duration::from_millis(100);
 const WAIT_LOG_INTERVAL: Duration = Duration::from_secs(10);
 const MIC_REQUEST_LOG_INTERVAL: Duration = Duration::from_secs(5);
+const MIC_REQUEST_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+const SEND_ERROR_LOG_INTERVAL: Duration = Duration::from_secs(5);
 const DEFAULT_SESSION_ID: i32 = 0x5343_4f02; // "SCO\x02"
-const DEFAULT_FIXED_CADENCE_MS: u32 = 22;
+const DEFAULT_FIXED_CADENCE_MS: u32 = 0; // 0 = pace by the audio duration of each packet
 const DEFAULT_JITTER_BUFFER_MS: u32 = 60;
 const DEFAULT_AUDIO_PEAK_THRESHOLD: u32 = 64;
 const DEFAULT_START_TIMEOUT_MS: u32 = 1500;
+
+/// bt_sco_media_bridge_start_on_timeout: when false, the bridge never sends MEDIA_MESSAGE_START just
+/// because `start_timeout_ms` elapsed with a silent SCO downlink (e.g. voice recording, which opens
+/// SCO but carries no far-end audio); it waits for real audio. Avoids hijacking the media channel
+/// (music) with silence and a later STOP. Set once at startup from the config.
+pub static START_ON_TIMEOUT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
 
 struct Runtime {
     tx: Mutex<Option<Sender<Packet>>>,
@@ -47,6 +54,8 @@ struct Runtime {
     config_epoch: AtomicU64,
     configuration_index: AtomicU32,
     max_unacked: AtomicU32,
+    /// ACKs (frames) received from the HU for the bridge's own session.
+    acked_frames: AtomicU64,
 
     // Uplink: HU microphone media_source -> SCO socket.
     mic_channel: AtomicU8,
@@ -88,6 +97,7 @@ pub fn init_or_update(tx: Sender<Packet>) {
         config_epoch: AtomicU64::new(0),
         configuration_index: AtomicU32::new(0),
         max_unacked: AtomicU32::new(0),
+        acked_frames: AtomicU64::new(0),
         mic_channel: AtomicU8::new(0),
         mic_sample_rate: AtomicU32::new(0),
         mic_channels: AtomicU32::new(0),
@@ -158,9 +168,7 @@ pub fn set_target_channel(
         .start_timeout_ms
         .store(start_timeout_ms.max(1), Ordering::SeqCst);
     runtime.fixed_cadence.store(fixed_cadence, Ordering::SeqCst);
-    runtime
-        .cadence_ms
-        .store(cadence_ms.max(1), Ordering::SeqCst);
+    runtime.cadence_ms.store(cadence_ms, Ordering::SeqCst);
     runtime
         .jitter_buffer_ms
         .store(jitter_buffer_ms, Ordering::SeqCst);
@@ -178,12 +186,12 @@ pub fn set_target_channel(
     if previous != channel {
         debug!(
             "{} selected existing AA PCM sink channel=<b>{:#04x}</>, {}Hz, {}ch, {}bit, gain={}%, limiter={}, start_existing={}, start_on_first_audio={}, peak_threshold={}, start_timeout={}ms, stop_on_disconnect={}, fixed_cadence={}ms/{}, jitter_buffer={}ms, epoch={}; will piggyback DATA only",
-            NAME, channel, sample_rate, channels, bits, gain_percent, limiter, start_existing, start_on_first_audio, audio_peak_threshold, start_timeout_ms.max(1), stop_existing_on_disconnect, cadence_ms.max(1), fixed_cadence, jitter_buffer_ms, epoch
+            NAME, channel, sample_rate, channels, bits, gain_percent, limiter, start_existing, start_on_first_audio, audio_peak_threshold, start_timeout_ms.max(1), stop_existing_on_disconnect, cadence_ms, fixed_cadence, jitter_buffer_ms, epoch
         );
     } else {
         debug!(
             "{} re-armed existing AA PCM sink channel=<b>{:#04x}</>, {}Hz, {}ch, {}bit, gain={}%, limiter={}, start_existing={}, start_on_first_audio={}, peak_threshold={}, start_timeout={}ms, stop_on_disconnect={}, fixed_cadence={}ms/{}, jitter_buffer={}ms, epoch={}; will piggyback DATA only",
-            NAME, channel, sample_rate, channels, bits, gain_percent, limiter, start_existing, start_on_first_audio, audio_peak_threshold, start_timeout_ms.max(1), stop_existing_on_disconnect, cadence_ms.max(1), fixed_cadence, jitter_buffer_ms, epoch
+            NAME, channel, sample_rate, channels, bits, gain_percent, limiter, start_existing, start_on_first_audio, audio_peak_threshold, start_timeout_ms.max(1), stop_existing_on_disconnect, cadence_ms, fixed_cadence, jitter_buffer_ms, epoch
         );
     }
 }
@@ -272,6 +280,29 @@ pub fn notify_media_config(channel: u8, cfg: &AudioConfig) {
     );
 }
 
+/// Returns true when `payload` is a MEDIA_MESSAGE_ACK from the HU for the DATA injected by the
+/// bridge (session started by the bridge with MEDIA_MESSAGE_START). Such ACKs must not reach the
+/// phone. ACKs of the phone's own sessions (and of the DATA-only mode, which reuses the phone's
+/// session) are left alone.
+pub fn consume_bridge_ack(channel: u8, payload: &[u8]) -> bool {
+    let Some(runtime) = RUNTIME.get() else {
+        return false;
+    };
+    if runtime.target_channel.load(Ordering::SeqCst) != channel {
+        return false;
+    }
+    let Ok(ack) = Ack::parse_from_bytes(payload) else {
+        return false;
+    };
+    if ack.session_id() != DEFAULT_SESSION_ID {
+        return false;
+    }
+    runtime
+        .acked_frames
+        .fetch_add(ack.ack().max(1) as u64, Ordering::SeqCst);
+    true
+}
+
 pub fn notify_microphone_response(channel: u8, payload: &[u8]) {
     let Some(runtime) = RUNTIME.get() else {
         return;
@@ -289,13 +320,6 @@ pub fn notify_microphone_response(channel: u8, payload: &[u8]) {
     );
 }
 
-/// Kept for compatibility with the previous safe-open patch.
-///
-/// The piggyback bridge deliberately does not send CHANNEL_OPEN_REQUEST anymore, so
-/// CHANNEL_OPEN_RESPONSE is not needed. Leaving this no-op lets this file compile
-/// both against the previous mitm.rs and against the current one.
-pub fn notify_channel_open_response(_resp: &ChannelOpenResponse) {}
-
 fn bridge_loop(runtime: Arc<Runtime>) {
     let mut active_epoch = 0u64;
     let mut pts_us = 0u64;
@@ -309,9 +333,16 @@ fn bridge_loop(runtime: Arc<Runtime>) {
     let mut silent_frames_before_start = 0u64;
     let mut next_cadence_send_at: Option<Instant> = None;
     let mut last_mic_wait_log = Instant::now();
+    let mut mic_request_retry_at: Option<Instant> = None;
+    let mut rate_adapter: Option<bt_sco::PcmResampler> = None;
+    let mut rate_adapter_generation = 0u64;
 
     loop {
-        handle_microphone_request_state(&runtime, &mut last_mic_wait_log);
+        handle_microphone_request_state(
+            &runtime,
+            &mut last_mic_wait_log,
+            &mut mic_request_retry_at,
+        );
 
         let channel = runtime.target_channel.load(Ordering::SeqCst);
         if channel == 0 {
@@ -333,6 +364,7 @@ fn bridge_loop(runtime: Arc<Runtime>) {
             pending_start_started_at = None;
             silent_frames_before_start = 0;
             next_cadence_send_at = None;
+            rate_adapter = None;
             debug!(
                 "{} target channel=<b>{:#04x}</>, epoch={} armed; waiting for existing HU media CONFIG, no CHANNEL_OPEN/SETUP will be injected",
                 NAME, channel, epoch
@@ -374,8 +406,8 @@ fn bridge_loop(runtime: Arc<Runtime>) {
             continue;
         }
 
-        if should_wait_for_fixed_cadence(&runtime, data_packets, &mut next_cadence_send_at) {
-            thread::sleep(IDLE_SLEEP);
+        if let Some(wait) = fixed_cadence_wait(&runtime, data_packets, &next_cadence_send_at) {
+            thread::sleep(wait);
             continue;
         }
 
@@ -410,11 +442,21 @@ fn bridge_loop(runtime: Arc<Runtime>) {
             continue;
         }
 
-        // The SCO reader currently emits 48kHz stereo s16le chunks. Adapt that
-        // to the actual selected sink: MEDIA is usually stereo, GUIDANCE is
-        // often mono. This lets us test GUIDANCE without changing the SCO reader.
-        let mut adapted =
-            adapt_48k_stereo_s16le_to_target(&frame.pcm, target_channels, gain_percent, limiter);
+        // The SCO reader emits 48kHz stereo s16le chunks. Adapt that to the
+        // actual selected sink: MEDIA is usually 48kHz stereo, GUIDANCE is
+        // often 16kHz mono.
+        if frame.generation != rate_adapter_generation {
+            rate_adapter = None;
+            rate_adapter_generation = frame.generation;
+        }
+        let mut adapted = adapt_48k_stereo_s16le_to_target(
+            &frame.pcm,
+            target_sample_rate,
+            target_channels,
+            gain_percent,
+            limiter,
+            &mut rate_adapter,
+        );
         let bytes_per_frame = target_channels as usize * 2;
         if bytes_per_frame == 0 || adapted.len() < bytes_per_frame {
             continue;
@@ -453,17 +495,24 @@ fn bridge_loop(runtime: Arc<Runtime>) {
 
         if send_packet(&runtime, pkt, "DATA").is_ok() {
             data_packets += 1;
-            pts_us += frames * 1_000_000 / (target_sample_rate as u64);
-            advance_fixed_cadence(&runtime, &mut next_cadence_send_at);
+            let frame_us = frames * 1_000_000 / (target_sample_rate as u64);
+            pts_us += frame_us;
+            advance_fixed_cadence(
+                &runtime,
+                &mut next_cadence_send_at,
+                Duration::from_micros(frame_us),
+            );
 
             if data_packets <= 5 || last_data_log.elapsed() >= Duration::from_secs(5) {
                 let config_index = runtime.configuration_index.load(Ordering::SeqCst);
                 let max_unacked = runtime.max_unacked.load(Ordering::SeqCst);
+                let acked = runtime.acked_frames.load(Ordering::SeqCst);
                 debug!(
-                    "{} DATA piggyback ch=<b>{:#04x}</> packets={} pts={}us last_frames={} last_bytes={} peak={} config_index={} max_unacked={}",
+                    "{} DATA piggyback ch=<b>{:#04x}</> packets={} acked={} pts={}us last_frames={} last_bytes={} peak={} config_index={} max_unacked={}",
                     NAME,
                     channel,
                     data_packets,
+                    acked,
                     pts_us,
                     frames,
                     frames * bytes_per_frame as u64,
@@ -479,46 +528,70 @@ fn bridge_loop(runtime: Arc<Runtime>) {
     }
 }
 
-fn should_wait_for_fixed_cadence(
+/// Returns how long to wait before the next fixed-cadence DATA packet, or `None` when a packet
+/// may be sent now.
+fn fixed_cadence_wait(
     runtime: &Runtime,
     data_packets: u64,
-    next_send_at: &mut Option<Instant>,
-) -> bool {
+    next_send_at: &Option<Instant>,
+) -> Option<Duration> {
     if !runtime.fixed_cadence.load(Ordering::SeqCst) {
-        return false;
+        return None;
     }
 
-    let cadence_ms = runtime.cadence_ms.load(Ordering::SeqCst).max(1);
     let jitter_buffer_ms = runtime.jitter_buffer_ms.load(Ordering::SeqCst);
 
     if data_packets == 0 && jitter_buffer_ms > 0 {
-        let needed_chunks = ((jitter_buffer_ms + cadence_ms - 1) / cadence_ms).max(1) as usize;
         let generation = bt_sco::sco_generation();
-        if generation == 0 || bt_sco::aa_pcm_frame_count_for_generation(generation) < needed_chunks
+        if generation == 0
+            || bt_sco::aa_pcm_queued_ms_for_generation(generation) < jitter_buffer_ms as u64
         {
-            return true;
+            return Some(IDLE_SLEEP);
         }
     }
 
-    if let Some(next) = *next_send_at {
-        if Instant::now() < next {
-            return true;
-        }
+    let next = (*next_send_at)?;
+    let now = Instant::now();
+    if now < next {
+        Some((next - now).min(IDLE_SLEEP))
+    } else {
+        None
     }
-
-    false
 }
 
-fn advance_fixed_cadence(runtime: &Runtime, next_send_at: &mut Option<Instant>) {
+/// Schedule the next fixed-cadence DATA packet. The deadline is advanced from the previous
+/// deadline (not from "now"), so the scheduling latency of the loop does not accumulate and the
+/// average send rate matches the real-time rate of the audio. `audio_duration` is the playback
+/// time of the packet just sent; `cadence_ms = 0` (default) paces by it, a non-zero value forces
+/// a fixed interval.
+fn advance_fixed_cadence(
+    runtime: &Runtime,
+    next_send_at: &mut Option<Instant>,
+    audio_duration: Duration,
+) {
     if !runtime.fixed_cadence.load(Ordering::SeqCst) {
         *next_send_at = None;
         return;
     }
 
-    let cadence = Duration::from_millis(runtime.cadence_ms.load(Ordering::SeqCst).max(1) as u64);
+    let cadence_ms = runtime.cadence_ms.load(Ordering::SeqCst);
+    let cadence = if cadence_ms == 0 {
+        audio_duration
+    } else {
+        Duration::from_millis(cadence_ms as u64)
+    };
+    if cadence.is_zero() {
+        *next_send_at = None;
+        return;
+    }
+
     let now = Instant::now();
     let next = match *next_send_at {
-        Some(previous) if previous > now => previous + cadence,
+        // On schedule or slightly late: keep the grid, the next packet catches up.
+        Some(previous) if now.saturating_duration_since(previous) < cadence * 2 => {
+            previous + cadence
+        }
+        // First packet, or far behind (underrun / stall): restart the grid from now.
         _ => now + cadence,
     };
     *next_send_at = Some(next);
@@ -636,7 +709,8 @@ fn ensure_media_started_for_frame(
     let is_non_silent = frame_peak >= threshold;
     let timed_out = elapsed >= timeout;
 
-    if start_on_first_audio && !is_non_silent && !timed_out {
+    let allow_timeout_start = START_ON_TIMEOUT.load(Ordering::Relaxed);
+    if start_on_first_audio && !is_non_silent && (!timed_out || !allow_timeout_start) {
         *silent_frames_before_start += 1;
         if *silent_frames_before_start <= 5 || *silent_frames_before_start % 100 == 0 {
             debug!(
@@ -661,6 +735,7 @@ fn ensure_media_started_for_frame(
         "start_timeout"
     };
 
+    runtime.acked_frames.store(0, Ordering::SeqCst);
     if runtime.start_existing.load(Ordering::SeqCst) {
         let config_index = runtime.configuration_index.load(Ordering::SeqCst);
         if send_media_start(runtime, channel, DEFAULT_SESSION_ID, config_index).is_ok() {
@@ -748,7 +823,11 @@ fn send_media_stop(runtime: &Runtime, channel: u8) -> std::result::Result<(), ()
     result
 }
 
-fn handle_microphone_request_state(runtime: &Runtime, last_wait_log: &mut Instant) {
+fn handle_microphone_request_state(
+    runtime: &Runtime,
+    last_wait_log: &mut Instant,
+    retry_at: &mut Option<Instant>,
+) {
     let channel = runtime.mic_channel.load(Ordering::SeqCst);
     if channel == 0 || !runtime.mic_request_enabled.load(Ordering::SeqCst) {
         return;
@@ -759,7 +838,14 @@ fn handle_microphone_request_state(runtime: &Runtime, last_wait_log: &mut Instan
     let open_generation = runtime.mic_open_sco_generation.load(Ordering::SeqCst);
 
     if connected && generation != 0 && generation != open_generation {
-        if send_microphone_request(runtime, channel, true).is_ok() {
+        // A failed open request is retried every loop iteration (5 ms) otherwise.
+        if retry_at.map(|t| Instant::now() < t).unwrap_or(false) {
+            return;
+        }
+        if send_microphone_request(runtime, channel, true).is_err() {
+            *retry_at = Some(Instant::now() + MIC_REQUEST_RETRY_INTERVAL);
+        } else {
+            *retry_at = None;
             runtime
                 .mic_open_sco_generation
                 .store(generation, Ordering::SeqCst);
@@ -837,32 +923,60 @@ fn build_microphone_request_payload(open: bool) -> Vec<u8> {
     payload
 }
 
+/// Sample rate of the PCM chunks produced by the SCO reader.
+const SOURCE_SAMPLE_RATE_HZ: u32 = bt_sco::AA_MEDIA_PCM_SAMPLE_RATE_HZ;
+/// Adapt one SCO reader chunk (48 kHz stereo s16le, L == R) to the selected sink format:
+/// sample rate, channel count, gain and limiter.
 fn adapt_48k_stereo_s16le_to_target(
     input: &[u8],
+    target_sample_rate: u32,
     target_channels: u32,
     gain_percent: u32,
     limiter: BtScoMediaBridgeLimiter,
+    rate_adapter: &mut Option<bt_sco::PcmResampler>,
 ) -> Vec<u8> {
-    let even_len = input.len() & !1;
     let gain = gain_percent.max(1) as i32;
+    let target_channels = target_channels.max(1) as usize;
 
-    if target_channels == 1 {
-        // Stereo 48k -> mono 48k by taking the left channel. The source is a
-        // duplicated mono SCO signal, so L/R are identical in the common path.
-        let mut out = Vec::with_capacity(even_len / 2);
-        for frame in input[..even_len].chunks_exact(4) {
-            let sample = i16::from_le_bytes([frame[0], frame[1]]);
-            out.extend_from_slice(&apply_gain(sample, gain, limiter).to_le_bytes());
-        }
-        out
+    // The source is a duplicated mono SCO signal, so taking the left channel is lossless.
+    let mono = input
+        .chunks_exact(4)
+        .map(|frame| i16::from_le_bytes([frame[0], frame[1]]));
+
+    let samples: Vec<i16> = if target_sample_rate == SOURCE_SAMPLE_RATE_HZ {
+        *rate_adapter = None;
+        mono.collect()
     } else {
-        let mut out = Vec::with_capacity(even_len);
-        for sample in input[..even_len].chunks_exact(2) {
-            let sample = i16::from_le_bytes([sample[0], sample[1]]);
-            out.extend_from_slice(&apply_gain(sample, gain, limiter).to_le_bytes());
+        if rate_adapter
+            .as_ref()
+            .map(|a| a.out_rate() != target_sample_rate)
+            .unwrap_or(true)
+        {
+            // The SCO voice band ends at 4 kHz, so that is the widest useful passband.
+            *rate_adapter = Some(bt_sco::PcmResampler::new(
+                SOURCE_SAMPLE_RATE_HZ,
+                target_sample_rate,
+                4_000,
+            ));
+        }
+        let adapter = rate_adapter.as_mut().unwrap();
+        let mut out = Vec::with_capacity(
+            input.len() / 4 * target_sample_rate as usize / SOURCE_SAMPLE_RATE_HZ as usize + 2,
+        );
+        for sample in mono {
+            adapter.push(sample, &mut out);
         }
         out
+    };
+
+    let mut out = Vec::with_capacity(samples.len() * target_channels * 2);
+    for sample in samples {
+        let bytes = apply_gain(sample, gain, limiter).to_le_bytes();
+        for _ in 0..target_channels {
+            out.extend_from_slice(&bytes);
+        }
     }
+    out
 }
 
 fn apply_gain(sample: i16, gain_percent: i32, limiter: BtScoMediaBridgeLimiter) -> i16 {
@@ -908,17 +1022,38 @@ fn drop_stale_sco_frames() {
     bt_sco::clear_aa_pcm_queue();
 }
 
+/// Send failures repeat on every loop iteration while the AA session is gone, so log the first
+/// one and then at most one per interval with the number of suppressed failures.
+fn warn_send_failure(label: &str, reason: &str) {
+    static LAST: Mutex<(Option<Instant>, u64)> = Mutex::new((None, 0));
+    let mut last = LAST.lock().unwrap();
+    let now = Instant::now();
+    if last
+        .0
+        .map(|t| now.duration_since(t) >= SEND_ERROR_LOG_INTERVAL)
+        .unwrap_or(true)
+    {
+        warn!(
+            "{} failed to send {}: {} (suppressed since last report: {})",
+            NAME, label, reason, last.1
+        );
+        *last = (Some(now), 0);
+    } else {
+        last.1 += 1;
+    }
+}
+
 fn send_packet(runtime: &Runtime, pkt: Packet, label: &str) -> std::result::Result<(), ()> {
     let tx = runtime.tx.lock().unwrap().clone();
     let Some(tx) = tx else {
-        warn!("{} cannot send {}, AA tx is not available", NAME, label);
+        warn_send_failure(label, "AA tx is not available");
         return Err(());
     };
 
     match tx.blocking_send(pkt) {
         Ok(_) => Ok(()),
         Err(e) => {
-            warn!("{} failed to send {}: {}", NAME, label, e);
+            warn_send_failure(label, &e.to_string());
             Err(())
         }
     }
@@ -927,4 +1062,81 @@ fn send_packet(runtime: &Runtime, pkt: Packet, label: &str) -> std::result::Resu
 fn push_media_message_id(payload: &mut Vec<u8>, id: u16) {
     payload.insert(0, (id & 0xff) as u8);
     payload.insert(0, (id >> 8) as u8);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stereo_48k_sine(freq: f64, frames: usize, amplitude: f64) -> Vec<u8> {
+        let mut out = Vec::with_capacity(frames * 4);
+        for i in 0..frames {
+            let v = (amplitude * (2.0 * std::f64::consts::PI * freq * i as f64 / 48_000.0).sin())
+                as i16;
+            out.extend_from_slice(&v.to_le_bytes());
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn adapt_keeps_48k_stereo_unchanged() {
+        let input = stereo_48k_sine(1000.0, 1080, 8000.0);
+        let mut adapter = None;
+        let out = adapt_48k_stereo_s16le_to_target(
+            &input,
+            48_000,
+            2,
+            100,
+            BtScoMediaBridgeLimiter::Off,
+            &mut adapter,
+        );
+        assert_eq!(out, input);
+        assert!(adapter.is_none());
+    }
+
+    #[test]
+    fn adapt_48k_to_16k_mono_keeps_duration_and_level() {
+        let mut adapter = None;
+        let mut total = 0usize;
+        let mut peak = 0i16;
+        // 10 chunks of 22.5 ms, like the SCO reader produces.
+        for chunk in 0..10 {
+            let input = stereo_48k_sine(1000.0, 1080, 8000.0);
+            let out = adapt_48k_stereo_s16le_to_target(
+                &input,
+                16_000,
+                1,
+                100,
+                BtScoMediaBridgeLimiter::Off,
+                &mut adapter,
+            );
+            total += out.len() / 2;
+            if chunk > 0 {
+                peak = peak.max(peak_s16le(&out));
+            }
+        }
+        assert_eq!(total, 10 * 360);
+        assert!((7000..=8200).contains(&peak), "peak={}", peak);
+    }
+
+    #[test]
+    fn adapt_handles_non_integer_ratio() {
+        let mut adapter = None;
+        let mut total = 0usize;
+        for _ in 0..100 {
+            let input = stereo_48k_sine(500.0, 480, 8000.0);
+            let out = adapt_48k_stereo_s16le_to_target(
+                &input,
+                44_100,
+                2,
+                100,
+                BtScoMediaBridgeLimiter::Off,
+                &mut adapter,
+            );
+            total += out.len() / 4;
+        }
+        // 1 s of input -> 44100 frames (+/- 1 for the fractional position).
+        assert!((44_099..=44_101).contains(&total), "total={}", total);
+    }
 }

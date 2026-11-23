@@ -85,7 +85,10 @@ wasmtime-wasi = { version = "38", optional = true }
 notify = { version = "8", optional = true }
 ureq = "2"
 rust_h264 = "0.4"
-rusty_h264 = "0.16"
+# no default features: the default "global-alloc" installs rusty_alloc as the
+# process-wide allocator, which reserves a 1 GiB (fallback: 64 MiB) committed
+# arena on the first allocation and aborts on low-RAM boards (e.g. RV1103 aaw2b)
+rusty_h264 = { version = "0.16", default-features = false, features = ["std", "asm"] }
 png = "0.17"
 wpactrl = "0.5.1"
 fontdue = "0.9.4"

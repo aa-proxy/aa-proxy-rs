@@ -89,6 +89,16 @@
           "description": "Bluetooth handshake timeout [seconds], for rare cases when the phone stops responding (prevents the bluetooth handshake deadlock with infinite waiting and not restarting connection again)",
           "advanced": true
         },
+        "bt_connect_max_delay_secs": {
+          "typ": "integer",
+          "description": "Longest wait [seconds] between rounds of Bluetooth connection attempts to the known phone. The wait doubles from 1 s up to this value; lower = the Pi insists more often (1-60, default 15).",
+          "advanced": true
+        },
+        "bt_connect_attempt_timeout_secs": {
+          "typ": "integer",
+          "description": "Per-attempt limit [seconds, 0 = off] when the Pi connects to the known phone: abort a pending attempt after this long instead of the built-in 20 s, so a phone that comes into range is noticed sooner. Values are clamped to 5-20. Connection times differ between Bluetooth controllers, so test the value on your hardware: a too short limit cuts connections that would succeed.",
+          "advanced": true
+        },
         "bt_poweroff": {
           "typ": "boolean",
           "description": "Powers off the Bluetooth adapter after the handshake. Intended for use only in specific configurations.",
@@ -726,6 +736,16 @@
               "typ": "boolean",
               "description": "When `bt_sco` is enabled, keep the Android Auto Bluetooth profile / RFCOMM connection alive after Wi-Fi bootstrap so the phone continues routing call audio to aa-proxy-rs.",
               "requires": "bt_sco"
+            },
+            "bt_sco_media_bridge_start_on_timeout": {
+              "typ": "boolean",
+              "description": "With start_on_first_audio, start the media bridge anyway after the start timeout even if the SCO downlink is still silent. Turn off so voice recording (SCO without far-end audio) does not touch the media channel. Default: true.",
+              "requires": "bt_sco_media_bridge"
+            },
+            "bt_sco_hsp_responder": {
+              "typ": "boolean",
+              "description": "Keep the HSP control stream from the phone open and answer its AT commands with OK, so Android treats aa-proxy-rs as a headset and routes call audio to the SCO listener. Needs `bt_sco`; applied at startup.",
+              "requires": "bt_sco"
             }
           },
           "subsections": [
@@ -757,8 +777,8 @@
                 },
                 "bt_sco_media_bridge_resampler": {
                   "typ": "select",
-                  "description": "SCO 8 kHz → AA 48 kHz resampler. `repeat` preserves the proven path; `linear` smooths the 6× upsampling and may reduce crackle.",
-                  "values": ["repeat", "linear"],
+                  "description": "SCO 8 kHz → AA 48 kHz resampler. `repeat` preserves the proven path; `linear` smooths the 6× upsampling and may reduce crackle; `enhanced` uses a windowed-sinc filter plus a low-shelf boost and a soft high-frequency exciter (less metallic call voice).",
+                  "values": ["repeat", "linear", "enhanced"],
                   "requires": "bt_sco_media_bridge",
                   "advanced": true
                 },
@@ -810,7 +830,7 @@
                 },
                 "bt_sco_media_bridge_cadence_ms": {
                   "typ": "integer",
-                  "description": "DATA packet cadence in milliseconds when fixed cadence is enabled. 22 ms matches the current 6-SCO-packet chunk timing closely.",
+                  "description": "DATA packet cadence in milliseconds when fixed cadence is enabled. 0 (recommended) paces every packet by its own audio duration, which always matches the SCO rate. A fixed value must match the chunk duration (22.5 ms for 60-byte SCO packets), otherwise audio underruns or latency grows.",
                   "requires": [
                     "bt_sco_media_bridge",
                     "bt_sco_media_bridge_fixed_cadence"
@@ -879,7 +899,7 @@
                 },
                 "bt_sco_mic_uplink_ring_capacity": {
                   "typ": "integer",
-                  "description": "Maximum 60-byte SCO uplink packets buffered for the microphone bridge. 256 is a safe default.",
+                  "description": "Hard limit of 60-byte SCO uplink packets (3.75 ms each) buffered for the microphone bridge. The standing latency is trimmed to ~15 ms automatically; this only caps short bursts. 256 is a safe default.",
                   "requires": "bt_sco_mic_bridge",
                   "advanced": true
                 }

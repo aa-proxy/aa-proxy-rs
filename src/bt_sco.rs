@@ -33,6 +33,18 @@ const DEFAULT_AA_PCM_RING_CAPACITY: usize = 128;
 pub const SCO_UPLINK_PACKET_BYTES: usize = 60;
 const DEFAULT_SCO_UPLINK_RING_CAPACITY: usize = 256;
 const SCO_DOWNLINK_AUDIO_LOG_PEAK_THRESHOLD: i16 = 64;
+/// Minimum interval between repeated error logs on per-packet paths.
+const ERROR_LOG_INTERVAL: Duration = Duration::from_secs(5);
+/// Uplink latency control: the HU microphone and the SCO link run on different clocks, so a
+/// slightly faster microphone makes the uplink queue (and the latency heard by the far end)
+/// grow during a call. The smallest queue length seen within a window is the standing latency
+/// (microphone bursts do not count); when it exceeds the maximum, the oldest packets are dropped
+/// down to the target.
+const SCO_UPLINK_LATENCY_WINDOW: Duration = Duration::from_secs(1);
+/// 16 x 3.75 ms = 60 ms
+const SCO_UPLINK_MAX_STANDING_PACKETS: usize = 16;
+/// 4 x 3.75 ms = 15 ms
+const SCO_UPLINK_TARGET_STANDING_PACKETS: usize = 4;
 
 #[derive(Debug, Clone)]
 pub struct AaPcmFrame {
@@ -43,6 +55,10 @@ pub struct AaPcmFrame {
 static AA_PCM_RING: OnceLock<Arc<Mutex<VecDeque<AaPcmFrame>>>> = OnceLock::new();
 static SCO_UPLINK_RING: OnceLock<Arc<Mutex<VecDeque<Vec<u8>>>>> = OnceLock::new();
 static SCO_UPLINK_PENDING: OnceLock<Arc<Mutex<Vec<u8>>>> = OnceLock::new();
+static SCO_UPLINK_RESAMPLER: Mutex<Option<(u32, PcmResampler)>> = Mutex::new(None);
+/// Passband of the microphone path: the 8 kHz SCO uplink carries up to 4 kHz, keep a margin for
+/// the anti-alias filter.
+const SCO_UPLINK_CUTOFF_HZ: u32 = 3_500;
 static SCO_CONNECTED: AtomicBool = AtomicBool::new(false);
 static SCO_GENERATION: AtomicU64 = AtomicU64::new(0);
 
@@ -290,9 +306,17 @@ fn run(options: BtScoOptions) -> io::Result<()> {
             format_bdaddr(peer.sco_bdaddr),
             generation
         );
-        log_sco_socket_info(fd);
+        let voice_setting = log_sco_socket_info(fd);
+        let linear_pcm = voice_setting.map(is_linear_pcm_voice).unwrap_or(true);
+        if !linear_pcm {
+            warn!(
+                "{} SCO link uses transparent air coding (BT_VOICE=0x{:04x}, e.g. mSBC/LC3 wideband speech), not linear PCM; audio bridging and echo control are disabled for this connection",
+                NAME,
+                voice_setting.unwrap_or(0)
+            );
+        }
 
-        handle_sco_connection(fd, &options, generation);
+        handle_sco_connection(fd, &options, generation, linear_pcm);
 
         SCO_CONNECTED.store(false, Ordering::SeqCst);
         clear_aa_pcm_queue();
@@ -341,7 +365,9 @@ fn create_sco_listener() -> io::Result<RawFd> {
     Ok(fd)
 }
 
-fn handle_sco_connection(fd: RawFd, options: &BtScoOptions, generation: u64) {
+/// `linear_pcm = false` means the socket carries encoded (transparent) data: the connection is
+/// still drained so the link stays up, but nothing is bridged in either direction.
+fn handle_sco_connection(fd: RawFd, options: &BtScoOptions, generation: u64, linear_pcm: bool) {
     let started = Instant::now();
 
     let mut buf = [0u8; 2048];
@@ -360,6 +386,8 @@ fn handle_sco_connection(fd: RawFd, options: &BtScoOptions, generation: u64) {
     let mut uplink_mic_packets = 0u64;
     let mut uplink_silence_packets = 0u64;
     let mut uplink_write_errors = 0u64;
+    let mut uplink_latency = UplinkLatencyControl::new(Instant::now());
+    let mut last_write_error_log: Option<Instant> = None;
 
     loop {
         let n = unsafe {
@@ -418,9 +446,11 @@ fn handle_sco_connection(fd: RawFd, options: &BtScoOptions, generation: u64) {
             );
         }
 
-        bt_sco_echo::observe_downlink_sco_8k_mono(&buf[..n]);
+        if linear_pcm {
+            bt_sco_echo::observe_downlink_sco_8k_mono(&buf[..n]);
+        }
 
-        if options.bridge_aa_media_pcm {
+        if options.bridge_aa_media_pcm && linear_pcm {
             sco_s16le_mono_8k_to_aa_pcm_s16le_stereo_48k(
                 &buf[..n],
                 &mut aa_pcm_chunk,
@@ -436,11 +466,23 @@ fn handle_sco_connection(fd: RawFd, options: &BtScoOptions, generation: u64) {
             }
         }
 
-        if options.bridge_sco_uplink_pcm {
+        if options.bridge_sco_uplink_pcm && linear_pcm {
             let (uplink, from_mic) = match pop_sco_uplink_frame(n) {
                 Some(frame) => (frame, true),
                 None => (vec![0u8; n], false),
             };
+            if let Some(excess) = uplink_latency.observe(sco_uplink_queue_len(), now) {
+                let dropped = drop_oldest_sco_uplink_packets(excess);
+                debug!(
+                    "{} mic-uplink latency control: standing queue above {} packets for {}ms, dropped {} oldest packets ({}ms), total_dropped={}",
+                    NAME,
+                    SCO_UPLINK_MAX_STANDING_PACKETS,
+                    SCO_UPLINK_LATENCY_WINDOW.as_millis(),
+                    dropped,
+                    dropped as u64 * SCO_UPLINK_PACKET_BYTES as u64 / 16,
+                    uplink_latency.dropped_total
+                );
+            }
             let written = unsafe {
                 libc::write(
                     fd,
@@ -450,12 +492,20 @@ fn handle_sco_connection(fd: RawFd, options: &BtScoOptions, generation: u64) {
             };
 
             if written < 0 {
+                let e = io::Error::last_os_error();
                 uplink_write_errors += 1;
-                warn!(
-                    "{} SCO mic-uplink write error: {}",
-                    NAME,
-                    io::Error::last_os_error()
-                );
+                // One write per received packet (~267/s): log the first error, then at most
+                // one summary per interval.
+                if last_write_error_log
+                    .map(|t| now.duration_since(t) >= ERROR_LOG_INTERVAL)
+                    .unwrap_or(true)
+                {
+                    warn!(
+                        "{} SCO mic-uplink write error: {} (write_errors={})",
+                        NAME, e, uplink_write_errors
+                    );
+                    last_write_error_log = Some(now);
+                }
             } else {
                 uplink_written_packets += 1;
                 if from_mic {
@@ -579,14 +629,10 @@ pub fn pop_aa_pcm_frame_for_generation(generation: u64) -> Option<AaPcmFrame> {
     None
 }
 
-pub fn aa_pcm_frame_count() -> usize {
-    AA_PCM_RING
-        .get()
-        .map(|ring| ring.lock().unwrap().len())
-        .unwrap_or(0)
-}
-
-pub fn aa_pcm_frame_count_for_generation(generation: u64) -> usize {
+/// Playback time (in ms) of the converted 48 kHz stereo s16le PCM queued for `generation`.
+pub fn aa_pcm_queued_ms_for_generation(generation: u64) -> u64 {
+    const BYTES_PER_MS: u64 =
+        (AA_MEDIA_PCM_SAMPLE_RATE_HZ as u64 / 1000) * AA_MEDIA_PCM_CHANNELS as u64 * 2;
     AA_PCM_RING
         .get()
         .map(|ring| {
@@ -594,7 +640,9 @@ pub fn aa_pcm_frame_count_for_generation(generation: u64) -> usize {
                 .unwrap()
                 .iter()
                 .filter(|frame| frame.generation == generation)
-                .count()
+                .map(|frame| frame.pcm.len() as u64)
+                .sum::<u64>()
+                / BYTES_PER_MS
         })
         .unwrap_or(0)
 }
@@ -640,6 +688,7 @@ pub fn clear_sco_uplink_queue() {
     if let Some(pending) = SCO_UPLINK_PENDING.get() {
         pending.lock().unwrap().clear();
     }
+    *SCO_UPLINK_RESAMPLER.lock().unwrap() = None;
 }
 
 fn push_sco_uplink_packet(packet: Vec<u8>, capacity: usize) {
@@ -673,6 +722,52 @@ fn pop_sco_uplink_frame(len: usize) -> Option<Vec<u8>> {
     }
 }
 
+fn drop_oldest_sco_uplink_packets(count: usize) -> usize {
+    let Some(ring) = SCO_UPLINK_RING.get() else {
+        return 0;
+    };
+    let mut q = ring.lock().unwrap();
+    let count = count.min(q.len());
+    q.drain(..count);
+    count
+}
+
+struct UplinkLatencyControl {
+    window_started: Instant,
+    window_min: usize,
+    dropped_total: u64,
+}
+
+impl UplinkLatencyControl {
+    fn new(now: Instant) -> Self {
+        Self {
+            window_started: now,
+            window_min: usize::MAX,
+            dropped_total: 0,
+        }
+    }
+
+    /// Feed the queue length after each uplink write. Returns how many of the oldest packets
+    /// should be dropped once per window when the standing latency is too high.
+    fn observe(&mut self, queued: usize, now: Instant) -> Option<usize> {
+        self.window_min = self.window_min.min(queued);
+        if now.duration_since(self.window_started) < SCO_UPLINK_LATENCY_WINDOW {
+            return None;
+        }
+
+        let standing = self.window_min;
+        self.window_started = now;
+        self.window_min = usize::MAX;
+        if standing > SCO_UPLINK_MAX_STANDING_PACKETS {
+            let excess = standing - SCO_UPLINK_TARGET_STANDING_PACKETS;
+            self.dropped_total += excess as u64;
+            Some(excess)
+        } else {
+            None
+        }
+    }
+}
+
 fn sco_uplink_queue_len() -> usize {
     SCO_UPLINK_RING
         .get()
@@ -683,9 +778,10 @@ fn sco_uplink_queue_len() -> usize {
 /// Convert Android Auto microphone/source PCM to the SCO uplink format observed on
 /// the target setup: signed 16-bit little-endian, mono, 8 kHz, 60-byte packets.
 ///
-/// Current HUs usually expose the mic source as 16 kHz mono PCM, so the common
-/// path simply keeps every second sample. For 48 kHz sources it keeps every sixth
-/// sample. If the source is already 8 kHz, it passes samples through.
+/// Current HUs usually expose the mic source as 16 kHz mono PCM. Other rates are
+/// converted with an anti-alias low-pass and a fractional resampler (state kept
+/// across DATA packets), so neither aliasing nor a wrong speed for rates that are
+/// not a multiple of 8 kHz (e.g. 44.1 kHz) occurs. 8 kHz sources pass through.
 pub fn push_sco_uplink_pcm_from_aa_mic(
     input: &[u8],
     sample_rate: u32,
@@ -714,20 +810,35 @@ pub fn push_sco_uplink_pcm_from_aa_mic(
         return;
     }
 
-    let step = if sample_rate >= SCO_LINEAR_PCM_SAMPLE_RATE_HZ {
-        (sample_rate / SCO_LINEAR_PCM_SAMPLE_RATE_HZ).max(1) as usize
+    // Use the first channel when the HU ever exposes stereo/dual-mic PCM.
+    let first_channel = input
+        .chunks_exact(frame_bytes)
+        .map(|frame| i16::from_le_bytes([frame[0], frame[1]]));
+
+    let mut samples_8k: Vec<i16> = if sample_rate == SCO_LINEAR_PCM_SAMPLE_RATE_HZ {
+        first_channel.collect()
     } else {
-        1
+        let frames = input.len() / frame_bytes;
+        let mut out = Vec::with_capacity(
+            frames * SCO_LINEAR_PCM_SAMPLE_RATE_HZ as usize / sample_rate as usize + 2,
+        );
+        let mut resampler = SCO_UPLINK_RESAMPLER.lock().unwrap();
+        if resampler.as_ref().map(|(rate, _)| *rate) != Some(sample_rate) {
+            *resampler = Some((
+                sample_rate,
+                PcmResampler::new(
+                    sample_rate,
+                    SCO_LINEAR_PCM_SAMPLE_RATE_HZ,
+                    SCO_UPLINK_CUTOFF_HZ,
+                ),
+            ));
+        }
+        let (_, r) = resampler.as_mut().unwrap();
+        for sample in first_channel {
+            r.push(sample, &mut out);
+        }
+        out
     };
-
-    let frames = input.len() / frame_bytes;
-    let mut samples_8k: Vec<i16> = Vec::with_capacity(frames / step + 1);
-
-    for frame_idx in (0..frames).step_by(step) {
-        let offset = frame_idx * frame_bytes;
-        // Use the first channel when the HU ever exposes stereo/dual-mic PCM.
-        samples_8k.push(i16::from_le_bytes([input[offset], input[offset + 1]]));
-    }
 
     bt_sco_echo::process_mic_8k_samples(&mut samples_8k);
     if samples_8k.is_empty() {
@@ -773,7 +884,8 @@ fn rms_from_energy(energy: u128, samples: u64) -> f64 {
     }
 }
 
-fn log_sco_socket_info(fd: RawFd) {
+/// Logs the SCO socket parameters and returns the BT_VOICE setting when available.
+fn log_sco_socket_info(fd: RawFd) -> Option<u16> {
     match getsockopt_value::<ScoOptions>(fd, SOL_SCO, SCO_OPTIONS) {
         Ok(v) => debug!("{} SCO_OPTIONS mtu={}", NAME, v.mtu),
         Err(e) => debug!("{} SCO_OPTIONS unavailable: {}", NAME, e),
@@ -787,15 +899,21 @@ fn log_sco_socket_info(fd: RawFd) {
         Err(e) => debug!("{} SCO_CONNINFO unavailable: {}", NAME, e),
     }
 
-    match getsockopt_value::<BtVoice>(fd, SOL_BLUETOOTH, BT_VOICE) {
-        Ok(v) => debug!(
-            "{} BT_VOICE setting=0x{:04x} ({})",
-            NAME,
-            v.setting,
-            describe_bt_voice(v.setting)
-        ),
-        Err(e) => debug!("{} BT_VOICE unavailable: {}", NAME, e),
-    }
+    let voice_setting = match getsockopt_value::<BtVoice>(fd, SOL_BLUETOOTH, BT_VOICE) {
+        Ok(v) => {
+            debug!(
+                "{} BT_VOICE setting=0x{:04x} ({})",
+                NAME,
+                v.setting,
+                describe_bt_voice(v.setting)
+            );
+            Some(v.setting)
+        }
+        Err(e) => {
+            debug!("{} BT_VOICE unavailable: {}", NAME, e);
+            None
+        }
+    };
 
     match getsockopt_int(fd, SOL_BLUETOOTH, BT_RCVMTU) {
         Ok(v) => debug!("{} BT_RCVMTU={}", NAME, v),
@@ -806,6 +924,8 @@ fn log_sco_socket_info(fd: RawFd) {
         Ok(v) => debug!("{} BT_SNDMTU={}", NAME, v),
         Err(e) => debug!("{} BT_SNDMTU unavailable: {}", NAME, e),
     }
+
+    voice_setting
 }
 
 fn getsockopt_value<T: Copy + Default>(
@@ -836,17 +956,24 @@ fn getsockopt_int(fd: RawFd, level: libc::c_int, optname: libc::c_int) -> io::Re
     getsockopt_value::<libc::c_int>(fd, level, optname)
 }
 
+/// HCI voice setting: bits 0-1 are the air coding format (CVSD, u-law, A-law, transparent),
+/// bits 8-9 the input coding (linear, u-law, A-law). Linux uses 0x0060 (CVSD, 16-bit linear PCM
+/// input) by default and 0x0003 (transparent) for wideband speech.
 fn describe_bt_voice(setting: u16) -> &'static str {
-    // These are the common HCI voice-setting low bits used by Linux/BlueZ.
-    // Exact transport codec is still best confirmed with HCI events, but this
-    // is useful enough to distinguish the common CVSD path from transparent data.
-    match setting & 0x0003 {
-        0x0000 => "linear/input coding",
-        0x0001 => "u-law/input coding",
-        0x0002 => "a-law/input coding",
-        0x0003 => "reserved/input coding",
+    match (setting & 0x0003, (setting >> 8) & 0x0003) {
+        (0x0003, _) => "transparent air coding (encoded data, e.g. mSBC)",
+        (0x0000, 0x0000) => "CVSD air coding, linear PCM input",
+        (0x0001, 0x0000) => "u-law air coding, linear PCM input",
+        (0x0002, 0x0000) => "A-law air coding, linear PCM input",
+        (_, 0x0001) => "u-law input coding",
+        (_, 0x0002) => "A-law input coding",
         _ => "unknown",
     }
+}
+
+/// True when the SCO socket carries 16-bit linear PCM (the only format the bridge handles).
+fn is_linear_pcm_voice(setting: u16) -> bool {
+    setting & 0x0003 != 0x0003 && (setting >> 8) & 0x0003 == 0
 }
 
 /// Confirmed format for the current HSP/SCO path seen on the target phone/HU setup.
@@ -867,6 +994,170 @@ pub const AA_MEDIA_PCM_BITS_PER_SAMPLE: u16 = 16;
 #[derive(Debug, Default)]
 pub struct DownlinkResamplerState {
     last_sample: Option<i16>,
+    enhanced: Option<EnhancedVoice>,
+}
+
+/// Direct-form biquad (coefficients normalised by a0).
+#[derive(Debug, Clone)]
+struct Biquad {
+    b0: f32,
+    b1: f32,
+    b2: f32,
+    a1: f32,
+    a2: f32,
+    x1: f32,
+    x2: f32,
+    y1: f32,
+    y2: f32,
+}
+
+impl Biquad {
+    fn new(b0: f64, b1: f64, b2: f64, a0: f64, a1: f64, a2: f64) -> Self {
+        Self {
+            b0: (b0 / a0) as f32,
+            b1: (b1 / a0) as f32,
+            b2: (b2 / a0) as f32,
+            a1: (a1 / a0) as f32,
+            a2: (a2 / a0) as f32,
+            x1: 0.0,
+            x2: 0.0,
+            y1: 0.0,
+            y2: 0.0,
+        }
+    }
+
+    fn lowpass(f: f64, fs: f64) -> Self {
+        let w = 2.0 * std::f64::consts::PI * f / fs;
+        let (c, a) = (w.cos(), w.sin() / 2f64.sqrt());
+        Self::new(
+            (1.0 - c) / 2.0,
+            1.0 - c,
+            (1.0 - c) / 2.0,
+            1.0 + a,
+            -2.0 * c,
+            1.0 - a,
+        )
+    }
+
+    fn highpass(f: f64, fs: f64) -> Self {
+        let w = 2.0 * std::f64::consts::PI * f / fs;
+        let (c, a) = (w.cos(), w.sin() / 2f64.sqrt());
+        Self::new(
+            (1.0 + c) / 2.0,
+            -(1.0 + c),
+            (1.0 + c) / 2.0,
+            1.0 + a,
+            -2.0 * c,
+            1.0 - a,
+        )
+    }
+
+    fn low_shelf(f: f64, gain_db: f64, fs: f64) -> Self {
+        let a = 10f64.powf(gain_db / 40.0);
+        let w = 2.0 * std::f64::consts::PI * f / fs;
+        let (c, s) = (w.cos(), w.sin());
+        let al = s / 2.0 * 2f64.sqrt();
+        let sq = 2.0 * a.sqrt() * al;
+        Self::new(
+            a * ((a + 1.0) - (a - 1.0) * c + sq),
+            2.0 * a * ((a - 1.0) - (a + 1.0) * c),
+            a * ((a + 1.0) - (a - 1.0) * c - sq),
+            (a + 1.0) + (a - 1.0) * c + sq,
+            -2.0 * ((a - 1.0) + (a + 1.0) * c),
+            (a + 1.0) + (a - 1.0) * c - sq,
+        )
+    }
+
+    fn process(&mut self, v: f32) -> f32 {
+        let mut o = self.b0 * v + self.b1 * self.x1 + self.b2 * self.x2
+            - self.a1 * self.y1
+            - self.a2 * self.y2;
+        // During silence the recursive state decays into subnormal floats, which are very slow
+        // on some ARM cores. Anything this small is far below one 16-bit LSB, so flush it.
+        if o.abs() < 1e-20 {
+            o = 0.0;
+        }
+        self.x2 = self.x1;
+        self.x1 = v;
+        self.y2 = self.y1;
+        self.y1 = o;
+        o
+    }
+}
+
+const ENH_TAPS_PER_PHASE: usize = 24;
+const ENH_FIR_LEN: usize = 6 * ENH_TAPS_PER_PHASE + 1;
+/// Output scale that leaves headroom for the low-shelf boost and the exciter before the
+/// bridge gain/limiter stage.
+const ENH_OUT_SCALE: f32 = 0.85;
+
+/// "Enhanced" call voice: causal polyphase windowed-sinc 6x upsampler (8 -> 48 kHz), +4 dB low
+/// shelf at 350 Hz, and a soft exciter that adds harmonics above 3.8 kHz generated from the
+/// 2-3.6 kHz band. State is kept across chunks. Tuned by ear with a Python simulation.
+#[derive(Debug)]
+struct EnhancedVoice {
+    taps: Vec<f32>,
+    hist: [f32; ENH_TAPS_PER_PHASE + 1],
+    shelf: Biquad,
+    ex_hp_lo: Biquad,
+    ex_lp_hi: Biquad,
+    ex_hp: Biquad,
+}
+
+impl EnhancedVoice {
+    fn new() -> Self {
+        let n = ENH_FIR_LEN;
+        let (fc, fs) = (3900.0f64, 48000.0f64);
+        let mut taps: Vec<f64> = (0..n)
+            .map(|i| {
+                let x = 2.0 * fc / fs * (i as f64 - (n as f64 - 1.0) / 2.0);
+                let sinc = if x == 0.0 {
+                    1.0
+                } else {
+                    (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x)
+                };
+                let m = (n - 1) as f64;
+                let blackman = 0.42 - 0.5 * (2.0 * std::f64::consts::PI * i as f64 / m).cos()
+                    + 0.08 * (4.0 * std::f64::consts::PI * i as f64 / m).cos();
+                sinc * blackman
+            })
+            .collect();
+        let sum: f64 = taps.iter().sum();
+        for t in taps.iter_mut() {
+            *t = *t / sum * 6.0;
+        }
+        Self {
+            taps: taps.into_iter().map(|t| t as f32).collect(),
+            hist: [0.0; ENH_TAPS_PER_PHASE + 1],
+            shelf: Biquad::low_shelf(350.0, 4.0, 48000.0),
+            ex_hp_lo: Biquad::highpass(2000.0, 48000.0),
+            ex_lp_hi: Biquad::lowpass(3600.0, 48000.0),
+            ex_hp: Biquad::highpass(3800.0, 48000.0),
+        }
+    }
+
+    fn push_sample(&mut self, input: i16, output: &mut Vec<u8>) {
+        for k in (1..self.hist.len()).rev() {
+            self.hist[k] = self.hist[k - 1];
+        }
+        self.hist[0] = input as f32 / 32768.0;
+        for p in 0..6 {
+            let mut acc = 0.0f32;
+            for k in 0..=ENH_TAPS_PER_PHASE {
+                let idx = p + 6 * k;
+                if idx < ENH_FIR_LEN {
+                    acc += self.taps[idx] * self.hist[k];
+                }
+            }
+            let s = self.shelf.process(acc);
+            let band = self.ex_lp_hi.process(self.ex_hp_lo.process(s));
+            let hf = self.ex_hp.process((3.0 * band).tanh());
+            let y = ((s + 0.18 * hf) * ENH_OUT_SCALE * 32768.0).clamp(-32768.0, 32767.0) as i16;
+            let b = y.to_le_bytes();
+            output.extend_from_slice(&b);
+            output.extend_from_slice(&b);
+        }
+    }
 }
 
 /// Convert one chunk of SCO linear PCM (`s16le`, mono, 8 kHz) into the
@@ -898,6 +1189,12 @@ pub fn sco_s16le_mono_8k_to_aa_pcm_s16le_stereo_48k(
                 let previous = state.last_sample.unwrap_or(current);
                 push_stereo_linear_6x(output, previous, current);
             }
+            BtScoMediaBridgeResampler::Enhanced => {
+                state
+                    .enhanced
+                    .get_or_insert_with(EnhancedVoice::new)
+                    .push_sample(current, output);
+            }
         }
         state.last_sample = Some(current);
     }
@@ -924,6 +1221,107 @@ fn push_stereo_linear_6x(output: &mut Vec<u8>, previous: i16, current: i16) {
         let bytes = sample.to_le_bytes();
         output.extend_from_slice(&bytes);
         output.extend_from_slice(&bytes);
+    }
+}
+
+/// Streaming sample rate converter for mono s16 PCM: windowed-sinc (Blackman) low-pass at the
+/// input rate followed by fractional linear interpolation. Used for downsampling (the low-pass is
+/// the anti-alias filter) as well as for upsampling. The filter is only evaluated at the input
+/// positions that an output sample needs. State is kept across calls, so a stream can be fed in
+/// arbitrary chunks.
+#[derive(Debug)]
+pub struct PcmResampler {
+    out_rate: u32,
+    step: f64,
+    taps: Vec<f32>,
+    hist: Vec<f32>,
+    hist_pos: usize,
+    prev: f32,
+    prev_valid: bool,
+    pos: f64,
+}
+
+impl PcmResampler {
+    /// `cutoff_hz` is the passband edge; it is capped below the Nyquist frequency of both rates.
+    pub fn new(in_rate: u32, out_rate: u32, cutoff_hz: u32) -> Self {
+        let in_rate = in_rate.max(1);
+        let out_rate = out_rate.max(1);
+        let cutoff = (cutoff_hz as f64)
+            .min(0.45 * in_rate as f64)
+            .min(0.45 * out_rate as f64)
+            .max(1.0);
+        // Blackman transition width is ~5.5 * fs / N; 8 * fs / cutoff keeps it below the cutoff.
+        let n = (((8.0 * in_rate as f64 / cutoff) as usize) | 1).clamp(15, 129);
+        let m = (n - 1) as f64;
+        let mut taps: Vec<f64> = (0..n)
+            .map(|i| {
+                let x = 2.0 * cutoff / in_rate as f64 * (i as f64 - m / 2.0);
+                let sinc = if x == 0.0 {
+                    1.0
+                } else {
+                    (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x)
+                };
+                let blackman = 0.42 - 0.5 * (2.0 * std::f64::consts::PI * i as f64 / m).cos()
+                    + 0.08 * (4.0 * std::f64::consts::PI * i as f64 / m).cos();
+                sinc * blackman
+            })
+            .collect();
+        let sum: f64 = taps.iter().sum();
+        for t in taps.iter_mut() {
+            *t /= sum;
+        }
+
+        Self {
+            out_rate,
+            step: in_rate as f64 / out_rate as f64,
+            taps: taps.into_iter().map(|t| t as f32).collect(),
+            hist: vec![0.0; n + 1],
+            hist_pos: 0,
+            prev: 0.0,
+            prev_valid: true,
+            pos: 0.0,
+        }
+    }
+
+    pub fn out_rate(&self) -> u32 {
+        self.out_rate
+    }
+
+    /// Low-pass output for the input sample `delay` samples before the newest one.
+    fn filtered(&self, delay: usize) -> f32 {
+        let len = self.hist.len();
+        let newest = self.hist_pos + len - 1 - delay;
+        self.taps
+            .iter()
+            .enumerate()
+            .map(|(k, tap)| tap * self.hist[(newest - k) % len])
+            .sum()
+    }
+
+    pub fn push(&mut self, input: i16, out: &mut Vec<i16>) {
+        self.hist[self.hist_pos] = input as f32;
+        self.hist_pos = (self.hist_pos + 1) % self.hist.len();
+
+        if self.pos < 1.0 {
+            // At least one output point lies between the previous input sample (0.0) and
+            // this one (1.0).
+            let cur = self.filtered(0);
+            let prev = if self.prev_valid {
+                self.prev
+            } else {
+                self.filtered(1)
+            };
+            while self.pos < 1.0 {
+                let v = prev + (cur - prev) * self.pos as f32;
+                out.push(v.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16);
+                self.pos += self.step;
+            }
+            self.prev = cur;
+            self.prev_valid = true;
+        } else {
+            self.prev_valid = false;
+        }
+        self.pos -= 1.0;
     }
 }
 
@@ -964,6 +1362,87 @@ mod tests {
             &output[second_sample_offset..second_sample_offset + 4],
             &[0x02, 0x00, 0x02, 0x00]
         );
+    }
+
+    fn sine(rate: u32, freq: f64, samples: usize, amplitude: f64) -> Vec<i16> {
+        (0..samples)
+            .map(|i| {
+                (amplitude * (2.0 * std::f64::consts::PI * freq * i as f64 / rate as f64).sin())
+                    as i16
+            })
+            .collect()
+    }
+
+    fn resample_all(r: &mut PcmResampler, input: &[i16]) -> Vec<i16> {
+        let mut out = Vec::new();
+        for &s in input {
+            r.push(s, &mut out);
+        }
+        out
+    }
+
+    fn peak(samples: &[i16]) -> i32 {
+        samples.iter().map(|s| (*s as i32).abs()).max().unwrap_or(0)
+    }
+
+    #[test]
+    fn resampler_output_length_matches_ratio() {
+        for (inr, outr) in [
+            (48_000, 16_000),
+            (16_000, 8_000),
+            (44_100, 8_000),
+            (8_000, 16_000),
+        ] {
+            let mut r = PcmResampler::new(inr, outr, 3_500);
+            let out = resample_all(&mut r, &sine(inr, 500.0, inr as usize, 8000.0));
+            let diff = (out.len() as i64 - outr as i64).abs();
+            assert!(diff <= 1, "{}->{}: {} samples", inr, outr, out.len());
+        }
+    }
+
+    #[test]
+    fn resampler_passes_voice_and_rejects_alias() {
+        // 1 kHz is in the voice band and must pass at ~full level.
+        let mut r = PcmResampler::new(16_000, 8_000, 3_500);
+        let out = resample_all(&mut r, &sine(16_000, 1_000.0, 16_000, 10_000.0));
+        let p = peak(&out[100..]);
+        assert!((9_000..=10_300).contains(&p), "passband peak={}", p);
+
+        // 6 kHz would alias to 2 kHz with plain decimation; it must be strongly attenuated.
+        let mut r = PcmResampler::new(16_000, 8_000, 3_500);
+        let out = resample_all(&mut r, &sine(16_000, 6_000.0, 16_000, 10_000.0));
+        let p = peak(&out[100..]);
+        assert!(p < 500, "alias peak={}", p);
+    }
+
+    #[test]
+    fn uplink_latency_control_ignores_bursts_and_trims_standing_queue() {
+        let t0 = Instant::now();
+        let ms = |v: u64| t0 + Duration::from_millis(v);
+
+        // Bursty microphone: the queue drains to 0 between bursts -> nothing to drop.
+        let mut c = UplinkLatencyControl::new(t0);
+        for i in 0..200u64 {
+            let queued = (20 - (i % 20)) as usize % 20;
+            assert_eq!(c.observe(queued, ms(i * 7)), None);
+        }
+
+        // Standing queue of 30 packets for a whole window -> drop down to the target.
+        let mut c = UplinkLatencyControl::new(t0);
+        let mut dropped = None;
+        for i in 0..150u64 {
+            if let Some(n) = c.observe(30 + (i % 3) as usize, ms(i * 7 + 7)) {
+                dropped = Some(n);
+            }
+        }
+        assert_eq!(dropped, Some(30 - SCO_UPLINK_TARGET_STANDING_PACKETS));
+    }
+
+    #[test]
+    fn bt_voice_linear_pcm_detection() {
+        assert!(is_linear_pcm_voice(0x0060)); // Linux default: CVSD, 16-bit linear input
+        assert!(!is_linear_pcm_voice(0x0003)); // transparent (mSBC / LC3)
+        assert!(!is_linear_pcm_voice(0x0160)); // u-law input coding
     }
 
     #[test]

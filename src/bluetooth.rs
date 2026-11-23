@@ -46,6 +46,21 @@ const ATTEMPTS: usize = 3;
 /// Our own limit for Device1.ConnectProfile (a normal page timeout is ~10s;
 /// bluer's built-in D-Bus timeout is 120s).
 const CONNECT_PROFILE_TIMEOUT: Duration = Duration::from_secs(20);
+/// Lower bound for bt_connect_attempt_timeout_secs. A shorter limit can cut a connection that
+/// would succeed (paging + authentication + SDP + RFCOMM), and every cut also costs a Disconnect().
+const CONNECT_ATTEMPT_TIMEOUT_MIN: Duration = Duration::from_secs(5);
+
+/// Per-attempt limit for connect_profile(): CONNECT_PROFILE_TIMEOUT, unless
+/// bt_connect_attempt_timeout_secs (`limit_secs` > 0) shortens it. The option can only shorten
+/// the limit: with a longer one bluer's 120s D-Bus timeout could fire first, which returns an
+/// error without our Disconnect() and leaves the stale pending connect in BlueZ.
+fn connect_attempt_timeout(limit_secs: u64) -> Duration {
+    if limit_secs > 0 {
+        Duration::from_secs(limit_secs).clamp(CONNECT_ATTEMPT_TIMEOUT_MIN, CONNECT_PROFILE_TIMEOUT)
+    } else {
+        CONNECT_PROFILE_TIMEOUT
+    }
+}
 
 // module name for logging engine
 const NAME: &str = "<i><bright-black> bluetooth: </>";
@@ -402,6 +417,82 @@ const SDP_PHONEBOOK_ACCESS_SERVER_UUID: Uuid = Uuid::from_u128(0x0000112f0000100
 const SDP_MESSAGE_ACCESS_SERVER_UUID: Uuid = Uuid::from_u128(0x0000113200001000800000805f9b34fb);
 const SDP_PNP_INFORMATION_UUID: Uuid = Uuid::from_u128(0x0000120000001000800000805f9b34fb);
 pub const KNOWN_DEVICES_FILE: &str = concat!(crate::base_config_dir!(), "/known_devices");
+
+/// bt_connect_max_delay_secs: longest wait between rounds of "connect to the known phone" attempts
+/// (backoff starts at 1 s and doubles up to this). Set once at startup from the config.
+pub static BT_CONNECT_MAX_DELAY_SECS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(15);
+
+/// bt_connect_attempt_timeout_secs: per-attempt limit (0 = off) for "connect to the known phone".
+/// Without it an attempt to an absent phone can take up to CONNECT_PROFILE_TIMEOUT (20 s), so a
+/// phone that comes into range mid-attempt is only noticed on the next round. With a shorter limit
+/// the Pi aborts (Disconnect) and tries again sooner. The value is clamped to
+/// CONNECT_ATTEMPT_TIMEOUT_MIN..=CONNECT_PROFILE_TIMEOUT. Set once at startup from the config.
+pub static BT_CONNECT_ATTEMPT_TIMEOUT_SECS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// bt_sco_hsp_responder: when true (and bt_sco is on), the HSP control RFCOMM stream accepted from
+/// the phone is kept open and answered by `hsp_respond` instead of being dropped. Set once at startup.
+pub static BT_SCO_HSP_RESPONDER: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Minimal Headset-role AT responder. Android only routes call audio to a headset whose control
+/// channel stays open and answers; the SCO audio link itself is accepted by the `bt_sco` listener.
+/// Every AT command gets `OK` (AT+BRSF also gets a zero feature set so a phone that talks HFP does
+/// not stall). Unsolicited result codes from the audio gateway (`RING`, `+VGS=`, `+VGM=`, ...) are
+/// only logged: a headset does not answer them. Runs until the phone closes the stream.
+async fn hsp_respond(mut stream: bluer::rfcomm::Stream, device: String) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    info!(
+        "{} 🎧 HSP responder: holding control stream with <b>{}</>",
+        NAME, device
+    );
+    let mut buf = [0u8; 256];
+    let mut pending: Vec<u8> = Vec::new();
+    loop {
+        let n = match stream.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) => {
+                warn!(
+                    "{} 🎧 HSP responder: read error from {}: {}",
+                    NAME, device, e
+                );
+                break;
+            }
+        };
+        pending.extend_from_slice(&buf[..n]);
+        while let Some(pos) = pending.iter().position(|&b| b == b'\r') {
+            let line: Vec<u8> = pending.drain(..=pos).collect();
+            let cmd = String::from_utf8_lossy(&line).trim().to_string();
+            if cmd.is_empty() {
+                continue;
+            }
+            info!("{} 🎧 HSP responder: <- {:?}", NAME, cmd);
+            let upper = cmd.to_ascii_uppercase();
+            if !upper.starts_with("AT") {
+                // Result code / unsolicited indication from the AG, not a command.
+                continue;
+            }
+            let reply: &[u8] = if upper.starts_with("AT+BRSF") {
+                b"\r\n+BRSF: 0\r\n\r\nOK\r\n"
+            } else {
+                b"\r\nOK\r\n"
+            };
+            if let Err(e) = stream.write_all(reply).await {
+                warn!(
+                    "{} 🎧 HSP responder: write error to {}: {}",
+                    NAME, device, e
+                );
+                return;
+            }
+        }
+    }
+    info!(
+        "{} 🎧 HSP responder: control stream with {} closed",
+        NAME, device
+    );
+}
 
 #[derive(Debug, Clone, PartialEq)]
 #[repr(u16)]
@@ -5796,7 +5887,11 @@ impl Bluetooth {
 
                         let retry_policy = ExponentialBuilder::default()
                             .with_min_delay(Duration::from_secs(1))
-                            .with_max_delay(Duration::from_secs(15))
+                            .with_max_delay(Duration::from_secs(
+                                BT_CONNECT_MAX_DELAY_SECS
+                                    .load(std::sync::atomic::Ordering::Relaxed)
+                                    .clamp(1, 60),
+                            ))
                             .without_max_times();
 
                         self.current_index = try_connect_bluetooth_addresses_retry
@@ -5976,7 +6071,11 @@ impl Bluetooth {
 
                         let retry_policy = ExponentialBuilder::default()
                             .with_min_delay(Duration::from_secs(1))
-                            .with_max_delay(Duration::from_secs(15))
+                            .with_max_delay(Duration::from_secs(
+                                BT_CONNECT_MAX_DELAY_SECS
+                                    .load(std::sync::atomic::Ordering::Relaxed)
+                                    .clamp(1, 60),
+                            ))
                             .without_max_times();
 
                         self.current_index = try_connect_bluetooth_addresses_retry
@@ -6216,13 +6315,25 @@ impl Bluetooth {
                     // shorter timeout and explicitly Disconnect() to clear the stale
                     // pending connect (otherwise subsequent calls may return
                     // InProgress / br-connection-busy forever).
+                    // bt_connect_attempt_timeout_secs (> 0) overrides the default limit with a
+                    // shorter one, so a phone that shows up in the middle of a pending attempt
+                    // is found in seconds instead of after CONNECT_PROFILE_TIMEOUT.
+                    let attempt_limit =
+                        BT_CONNECT_ATTEMPT_TIMEOUT_SECS.load(std::sync::atomic::Ordering::Relaxed);
+                    let attempt_timeout = connect_attempt_timeout(attempt_limit);
                     let started = Instant::now();
-                    match timeout(
-                        CONNECT_PROFILE_TIMEOUT,
-                        device.connect_profile(&HSP_AG_UUID),
-                    )
-                    .await
-                    {
+                    match timeout(attempt_timeout, device.connect_profile(&HSP_AG_UUID)).await {
+                        // After a pending attempt was aborted, BlueZ may still report success
+                        // without the phone being connected; only trust it if the device is.
+                        Ok(Ok(_))
+                            if attempt_limit > 0
+                                && !device.is_connected().await.unwrap_or(false) =>
+                        {
+                            warn!(
+                                "{} 🔇 {}{}: BlueZ reported success but the phone is not connected, retrying",
+                                NAME, addr, dev_name
+                            );
+                        }
                         Ok(Ok(_)) => {
                             info!(
                                 "{} 🔗 Successfully connected to device: {}{}",
@@ -6387,7 +6498,11 @@ impl Bluetooth {
                                         NAME, device
                                     );
                                 }
-                                drop(stream);
+                                if BT_SCO_HSP_RESPONDER.load(std::sync::atomic::Ordering::Relaxed) {
+                                    tokio::spawn(hsp_respond(stream, device.to_string()));
+                                } else {
+                                    drop(stream);
+                                }
                             }
                             Err(e) => {
                                 warn!(
@@ -7828,7 +7943,13 @@ impl Bluetooth {
                                             device
                                         );
                                     }
-                                    drop(stream);
+                                    if BT_SCO_HSP_RESPONDER
+                                        .load(std::sync::atomic::Ordering::Relaxed)
+                                    {
+                                        tokio::spawn(hsp_respond(stream, device.to_string()));
+                                    } else {
+                                        drop(stream);
+                                    }
                                 }
                                 Err(e) => {
                                     warn!(
@@ -8061,5 +8182,29 @@ impl Bluetooth {
         info!("{} 🚀 Bluetooth launch sequence completed", NAME);
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connect_attempt_timeout_defaults_to_connect_profile_timeout() {
+        assert_eq!(connect_attempt_timeout(0), Duration::from_secs(20));
+    }
+
+    #[test]
+    fn connect_attempt_timeout_is_clamped() {
+        assert_eq!(connect_attempt_timeout(1), Duration::from_secs(5));
+        assert_eq!(connect_attempt_timeout(5), Duration::from_secs(5));
+        assert_eq!(connect_attempt_timeout(8), Duration::from_secs(8));
+        assert_eq!(connect_attempt_timeout(20), Duration::from_secs(20));
+        // never longer than CONNECT_PROFILE_TIMEOUT, so bluer's 120 s D-Bus timeout can't win
+        assert_eq!(connect_attempt_timeout(120), Duration::from_secs(20));
+        assert_eq!(
+            connect_attempt_timeout(u16::MAX as u64),
+            Duration::from_secs(20)
+        );
     }
 }
