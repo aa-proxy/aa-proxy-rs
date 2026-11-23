@@ -184,7 +184,9 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/config-data-tree", get(get_config_data_tree))
         .route(
             "/overlay",
-            get(overlay_get_handler).put(overlay_put_handler),
+            get(overlay_get_handler)
+                .put(overlay_put_handler)
+                .delete(overlay_delete_handler),
         )
         // Dedicated authenticated telemetry ingestion; existing /overlay and
         // legacy /raw-topic-data paths are intentionally preserved.
@@ -195,6 +197,7 @@ pub fn app(state: Arc<AppState>) -> Router {
                 .layer(axum::extract::DefaultBodyLimit::max(16 * 1024)),
         )
         .route("/ws/overlay", get(overlay_data_api::websocket))
+        .route("/overlay/displays", get(overlay_displays_handler))
         .route(
             "/map-album-art",
             post(map_album_art_upload_handler)
@@ -2021,7 +2024,12 @@ async fn logo_handler() -> impl IntoResponse {
 #[derive(Debug, Serialize)]
 struct OverlayApiResponse {
     enabled: bool,
+    /// "main", or the id of a display with its own overlay file.
+    display: String,
     text_path: String,
+    /// Whether the overlay file exists. A display without its own file has no overlay of its
+    /// own (or shows the main one with only_main_display = false).
+    exists: bool,
     overlay: OverlayConfig,
     // Enabling/disabling the video transform is latched per AA session.
     reconnect_required_for_enable_change: bool,
@@ -2033,6 +2041,15 @@ struct OverlayApiUpdate {
     overlay: OverlayConfig,
 }
 
+/// `?display=<id>` selects the overlay file of a non-main display; missing or `main` is the
+/// main overlay file.
+#[derive(Debug, Deserialize)]
+struct OverlayQuery {
+    display: Option<String>,
+}
+
+const MAIN_OVERLAY_DISPLAY: &str = "main";
+
 fn overlay_file_path(config: &AppConfig) -> PathBuf {
     let path = config.overlay_text_path.to_string_lossy();
     if path.trim().is_empty() {
@@ -2042,10 +2059,38 @@ fn overlay_file_path(config: &AppConfig) -> PathBuf {
     }
 }
 
-async fn overlay_get_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+/// `(display id, overlay file path)` selected by `query`.
+fn overlay_target(
+    config: &AppConfig,
+    query: &OverlayQuery,
+) -> std::result::Result<(String, PathBuf), axum::response::Response> {
+    let main_path = overlay_file_path(config);
+    match query.display.as_deref().map(str::trim) {
+        None | Some("") | Some(MAIN_OVERLAY_DISPLAY) => {
+            Ok((MAIN_OVERLAY_DISPLAY.to_string(), main_path))
+        }
+        Some(id) => match crate::overlay::display_overlay_path(&main_path, id) {
+            Some(path) => Ok((id.to_string(), path)),
+            None => Err((
+                StatusCode::BAD_REQUEST,
+                "display must be 1-64 characters: lowercase letters, digits, - or _",
+            )
+                .into_response()),
+        },
+    }
+}
+
+async fn overlay_get_handler(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<OverlayQuery>,
+) -> impl IntoResponse {
     let cfg = state.config.read().await;
-    let path = overlay_file_path(&cfg);
+    let (display, path) = match overlay_target(&cfg, &query) {
+        Ok(target) => target,
+        Err(response) => return response,
+    };
     let mut overlay = OverlayConfig::default();
+    let mut exists = true;
     match fs::read_to_string(&path).await {
         Ok(raw) => {
             if raw.len() > 32 * 1024 {
@@ -2068,7 +2113,7 @@ async fn overlay_get_handler(State(state): State<Arc<AppState>>) -> impl IntoRes
                 overlay.text = raw;
             }
         }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => exists = false,
         Err(err) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -2079,15 +2124,128 @@ async fn overlay_get_handler(State(state): State<Arc<AppState>>) -> impl IntoRes
     }
     Json(OverlayApiResponse {
         enabled: cfg.overlay_enabled,
+        display,
         text_path: path.to_string_lossy().into_owned(),
+        exists,
         overlay,
         reconnect_required_for_enable_change: true,
     })
     .into_response()
 }
 
+/// Removes the overlay file of a non-main display, so it has no overlay of its own after the
+/// next Android Auto connection. The main overlay file cannot be removed.
+async fn overlay_delete_handler(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<OverlayQuery>,
+) -> impl IntoResponse {
+    let cfg = state.config.write().await;
+    let (display, path) = match overlay_target(&cfg, &query) {
+        Ok(target) => target,
+        Err(response) => return response,
+    };
+    if display == MAIN_OVERLAY_DISPLAY {
+        return (
+            StatusCode::BAD_REQUEST,
+            "The main overlay file cannot be removed",
+        )
+            .into_response();
+    }
+    match fs::remove_file(&path).await {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Cannot remove overlay file: {err}"),
+            )
+                .into_response();
+        }
+    }
+    Json(OverlayApiResponse {
+        enabled: cfg.overlay_enabled,
+        display,
+        text_path: path.to_string_lossy().into_owned(),
+        exists: false,
+        overlay: OverlayConfig::default(),
+        reconnect_required_for_enable_change: true,
+    })
+    .into_response()
+}
+
+#[derive(Debug, Serialize)]
+struct OverlayDisplayInfo {
+    id: String,
+    label: String,
+    text_path: String,
+    exists: bool,
+}
+
+/// Displays an overlay can be edited for: the main display, the displays configured in Display
+/// Injection, and every display that already has an overlay file (e.g. `hu-cluster-<n>`).
+async fn overlay_displays_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let (main_path, inject_displays_file) = {
+        let cfg = state.config.read().await;
+        (overlay_file_path(&cfg), cfg.inject_displays_file.clone())
+    };
+    let mut displays = vec![OverlayDisplayInfo {
+        id: MAIN_OVERLAY_DISPLAY.to_string(),
+        label: "Main display".to_string(),
+        text_path: main_path.to_string_lossy().into_owned(),
+        exists: fs::metadata(&main_path).await.is_ok(),
+    }];
+    let mut ids = Vec::new();
+    if let Ok(response) = inject_displays::list_displays(inject_displays_file).await {
+        for display in response.displays {
+            let kind = match display.display_type {
+                crate::mitm::protos::DisplayType::DISPLAY_TYPE_CLUSTER => "Cluster",
+                crate::mitm::protos::DisplayType::DISPLAY_TYPE_AUXILIARY => "Auxiliary",
+                crate::mitm::protos::DisplayType::DISPLAY_TYPE_MAIN => "Main",
+            };
+            ids.push((display.id.clone(), format!("{} ({kind})", display.name)));
+        }
+    }
+    // Overlay files of other displays (e.g. the head unit's own cluster).
+    if let Some(dir) = main_path.parent() {
+        let dir = if dir.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            dir
+        };
+        if let Ok(mut entries) = fs::read_dir(dir).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let Some(id) = name
+                    .strip_prefix("overlay_")
+                    .and_then(|rest| rest.strip_suffix(".json"))
+                else {
+                    continue;
+                };
+                if crate::overlay::valid_display_overlay_id(id)
+                    && !ids.iter().any(|(known, _)| known == id)
+                {
+                    ids.push((id.to_string(), id.to_string()));
+                }
+            }
+        }
+    }
+    for (id, label) in ids {
+        let Some(path) = crate::overlay::display_overlay_path(&main_path, &id) else {
+            continue;
+        };
+        displays.push(OverlayDisplayInfo {
+            exists: fs::metadata(&path).await.is_ok(),
+            id,
+            label,
+            text_path: path.to_string_lossy().into_owned(),
+        });
+    }
+    Json(displays).into_response()
+}
+
 async fn overlay_put_handler(
     State(state): State<Arc<AppState>>,
+    Query(query): Query<OverlayQuery>,
     Json(update): Json<OverlayApiUpdate>,
 ) -> impl IntoResponse {
     let c = &update.overlay;
@@ -2117,7 +2275,10 @@ async fn overlay_put_handler(
     // Serialize all companion writes (including enabled flag changes) against
     // config-entry updates by taking the same shared config write lock.
     let mut cfg = state.config.write().await;
-    let path = overlay_file_path(&cfg);
+    let (display, path) = match overlay_target(&cfg, &query) {
+        Ok(target) => target,
+        Err(response) => return response,
+    };
     let raw = match serde_json::to_vec_pretty(&update.overlay) {
         Ok(raw) => raw,
         Err(err) => {
@@ -2197,7 +2358,9 @@ async fn overlay_put_handler(
     }
     Json(OverlayApiResponse {
         enabled: cfg.overlay_enabled,
+        display,
         text_path: path.to_string_lossy().into_owned(),
+        exists: true,
         overlay: update.overlay,
         reconnect_required_for_enable_change: true,
     })
@@ -2937,5 +3100,32 @@ mod tests {
         assert_eq!(saved_margins["right"], 4);
 
         let _ = std::fs::remove_file(&cfg_snapshot.sdr_ui_override_file);
+    }
+
+    #[test]
+    fn overlay_target_selects_main_or_display_file() {
+        let mut cfg = AppConfig::default();
+        cfg.overlay_text_path = PathBuf::from("/dev/shm/overlay.json");
+        let target = |display: Option<&str>| {
+            overlay_target(
+                &cfg,
+                &OverlayQuery {
+                    display: display.map(str::to_string),
+                },
+            )
+            .ok()
+        };
+        let main = Some(("main".to_string(), PathBuf::from("/dev/shm/overlay.json")));
+        assert_eq!(target(None), main);
+        assert_eq!(target(Some("main")), main);
+        assert_eq!(target(Some("")), main);
+        assert_eq!(
+            target(Some("cluster-1")),
+            Some((
+                "cluster-1".to_string(),
+                PathBuf::from("/dev/shm/overlay_cluster-1.json")
+            ))
+        );
+        assert!(target(Some("../config")).is_none());
     }
 }
