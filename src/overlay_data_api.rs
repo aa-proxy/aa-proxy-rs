@@ -11,7 +11,7 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use futures::{SinkExt, StreamExt};
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::time::Duration;
