@@ -18,6 +18,7 @@
       <button type="button" class="rail-btn page-tab is-active" id="page-nav-config" data-page="config" data-label="Configuration" aria-label="Configuration" aria-pressed="true">⚙️</button>
       <button type="button" class="rail-btn page-tab" id="page-nav-overlay" data-page="overlay" data-label="Overlay Editor" aria-label="Overlay Editor" aria-pressed="false">🖥️</button>
       <button type="button" class="rail-btn page-tab" id="page-nav-wasm-store" data-page="wasm-store" data-label="WASM Store" aria-label="WASM Store" aria-pressed="false">🧩</button>
+      <button type="button" class="rail-btn page-tab" id="page-nav-sdr-ui" data-page="sdr-ui" data-label="SDR UI Editor" aria-label="SDR UI Editor" aria-pressed="false">📐</button>
     </nav>
     <button type="button" id="utility-toggle" class="utility-toggle" aria-controls="utility-rail" aria-expanded="false" aria-label="Open tools" title="Tools">☰ <span>Tools</span></button>
     <div class="utility-scrim" id="utility-scrim" aria-hidden="true"></div>
@@ -30,14 +31,6 @@
         data-label="Controller Panel"
       >
         📱
-      </button>
-      <button
-        type="button"
-        class="rail-btn drawer-toggle"
-        id="margins-drawer-toggle"
-        data-label="Display Margins"
-      >
-        📐
       </button>
       <button
         type="button"
@@ -261,21 +254,55 @@
       </div>
     </aside>
 
-    <aside class="controller-drawer" id="margins-drawer" aria-hidden="true">
-      <div class="controller-drawer-header">
-        <div class="controller-drawer-title">
-          <span>📐</span><span>Display Margins</span>
+
+
+    <main class="main-content">
+      <header class="dashboard-header">
+        <h1 class="title">
+          <img src="{LOGO_URL}" alt="logo" class="logo-img" />
+          <span style="color: var(--accent)">aa-proxy-rs</span>
+          <span style="color: #4b5563">//</span>
+          <span style="color: #ffffff" id="dashboard-section-label">Configuration</span>
+        </h1>
+        <div class="build-tags">
+          <span class="tag-base tag-build">
+            Build: <span class="val">{BUILD_DATE}</span>
+          </span>
+          <span class="tag-base tag-git">
+            Git: <span class="val">{GIT_INFO}</span>
+          </span>
         </div>
-        <button
-          type="button"
-          class="controller-drawer-close"
-          id="margins-drawer-close"
-          aria-label="Close display margins panel"
-        >
-          ×
-        </button>
-      </div>
-      <div class="controller-drawer-body">
+      </header>
+
+      <section id="config-page" class="dashboard-page" aria-label="Configuration">
+      <form id="config-form">
+        <input
+          type="file"
+          id="file-input"
+          accept=".tar.gz"
+          style="display: none"
+        />
+        <div class="config-grid">{CONFIG_VALUES}</div>
+      </form>
+      </section>
+
+      <section id="sdr-ui-page" class="dashboard-page tools-page" aria-label="SDR UI Editor" hidden>
+        <div class="tool-heading sdr-page-heading">
+          <div>
+            <h2>📐 SDR UI Editor</h2>
+            <p>Edit the vehicle-specific Android Auto display geometry. Select a display, preview its margins and safe areas, then save the vehicle profile.</p>
+          </div>
+          <button type="button" id="sdr-refresh-current" class="sdr-refresh-current">↻ Refresh current</button>
+        </div>
+        <div class="tool-panel sdr-status-panel" id="sdr-status-panel" aria-live="polite">
+          <div class="tool-panel-heading"><strong>Current connection · Profile status</strong><small id="sdr-status-captured">Checking SDR status…</small></div>
+          <div class="sdr-identity" id="sdr-identity"></div>
+          <div class="sdr-status-chips" id="sdr-status-chips" aria-label="SDR profile state"></div>
+          <div class="tool-footnote" id="sdr-profile-path"></div>
+          <p class="tool-footnote">Global and File are read-only status indicators (their settings live under Config). Vehicle and Phone overrides can be edited below. A new AA connection is needed to apply handshake geometry.</p>
+        </div>
+        <div class="tool-panel sdr-editor-panel">
+
         <p class="margins-status" id="margins-status">
           Loading current display…
         </p>
@@ -310,6 +337,7 @@
         </div>
         <p class="margins-type-hint" id="margins-type-hint" hidden></p>
 
+        <div class="sdr-editor-grid"><div class="sdr-preview-column">
         <div class="margins-preview-wrap" id="margins-preview-wrap" hidden>
           <div class="margins-preview" id="margins-preview">
             <img
@@ -352,6 +380,7 @@
           </button>
         </div>
 
+        </div><div class="sdr-controls-column">
         <div class="margins-sliders" id="margins-sliders" hidden>
           <div class="margins-slider-row">
             <label for="margin-top">Top</label>
@@ -406,6 +435,7 @@
           </button>
         </div>
 
+        </div></div>
         <p class="margins-hint" id="margins-hint" hidden>
           Saves margins, content insets, and stable content insets for this
           display. Android Auto only reads these from the initial connection
@@ -414,39 +444,18 @@
           attempted in the background; on every phone tested so far it had no
           visible effect, so treat it as a no-op, not a shortcut.)
         </p>
-      </div>
-    </aside>
 
-    <main class="main-content">
-      <header class="dashboard-header">
-        <h1 class="title">
-          <img src="{LOGO_URL}" alt="logo" class="logo-img" />
-          <span style="color: var(--accent)">aa-proxy-rs</span>
-          <span style="color: #4b5563">//</span>
-          <span style="color: #ffffff" id="dashboard-section-label">Configuration</span>
-        </h1>
-        <div class="build-tags">
-          <span class="tag-base tag-build">
-            Build: <span class="val">{BUILD_DATE}</span>
-          </span>
-          <span class="tag-base tag-git">
-            Git: <span class="val">{GIT_INFO}</span>
-          </span>
         </div>
-      </header>
-
-      <section id="config-page" class="dashboard-page" aria-label="Configuration">
-      <form id="config-form">
-        <input
-          type="file"
-          id="file-input"
-          accept=".tar.gz"
-          style="display: none"
-        />
-        <div class="config-grid">{CONFIG_VALUES}</div>
-      </form>
+        <div class="tool-panel sdr-profiles-panel">
+          <div class="tool-panel-heading">
+            <div><strong>Stored vehicle profiles</strong><p class="tool-footnote">Saved profiles remain available even when no Android Auto phone is connected.</p></div>
+            <button type="button" id="sdr-refresh-profiles" class="sdr-refresh-profiles">↻ Refresh profiles</button>
+          </div>
+          <div id="sdr-profiles-list" class="sdr-profiles-list" role="status" aria-live="polite">Loading saved profiles…</div>
+        </div>
+        <div id="sdr-profile-detail" class="tool-panel sdr-profile-detail" hidden aria-label="Vehicle and phone profile editor"></div>
+        <dialog id="sdr-video-edit-dialog" class="sdr-video-dialog" aria-label="Video geometry editor"></dialog>
       </section>
-
       <section id="overlay-page" class="dashboard-page tools-page" aria-label="Overlay Editor" hidden>
         <div class="tool-heading"><div><h2>🖥️ Overlay Editor</h2><p>Design a text overlay for Android Auto video. Preview is local and approximate.</p></div><span class="tool-chip">16:9 preview</span></div>
         <div id="overlay-status" class="tool-status" role="status" aria-live="polite"></div>
@@ -735,21 +744,14 @@
 
         setupMobileLongPressLabels();
 
-        // Side drawers (Controller Panel, Display Margins): toggled via rail
-        // buttons, closed via X / scrim click / Esc. Share one scrim and are
-        // mutually exclusive -- opening one closes the other.
+        // Controller side drawer, toggled via the tools rail. The SDR UI
+        // editor now lives on its own dashboard page, not in a drawer.
         const drawerScrim = document.getElementById("drawer-scrim");
         const drawers = [
           {
             aside: document.getElementById("controller-drawer"),
             toggle: document.getElementById("controller-drawer-toggle"),
             close: document.getElementById("controller-drawer-close"),
-          },
-          {
-            aside: document.getElementById("margins-drawer"),
-            toggle: document.getElementById("margins-drawer-toggle"),
-            close: document.getElementById("margins-drawer-close"),
-            onOpen: () => initMarginsPanel(),
           },
         ];
         const setActiveDrawer = (target) => {
@@ -1474,7 +1476,7 @@
           const res = await fetch("/sdr-ui/current");
           if (!res.ok) {
             statusEl.textContent =
-              "No Android Auto session detected yet. Connect a phone, then reopen this panel.";
+              "No Android Auto session detected. Connect a phone and select Refresh current. Stored profiles are listed below.";
             return;
           }
           current = await res.json();
@@ -1877,6 +1879,7 @@
           }
 
           marginsState.profile = body.profile;
+          if (!document.getElementById("sdr-ui-page").hidden) loadStoredSdrProfiles();
           const pushed = body.live_push_channels || 0;
           showSnackbar(
             pushed > 0
@@ -1892,6 +1895,94 @@
         }
       }
 
+
+      // SDR UI full-page controls. Reuses the existing margins/insets editor
+      // and /sdr-ui/* routes; no backend changes or duplicate DOM IDs.
+      async function loadStoredSdrProfiles() {
+        const list = document.getElementById("sdr-profiles-list");
+        list.textContent = "Loading saved profiles…";
+        try {
+          const response = await fetch("/sdr-ui/profiles", { cache: "no-store" });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const data = await response.json();
+          const vehicles = Array.isArray(data.profiles?.vehicles) ? data.profiles.vehicles : [];
+          window.SdrProfilesWeb?.onListLoaded(data);
+          list.replaceChildren();
+          if (!vehicles.length) {
+            const empty = document.createElement("p");
+            empty.className = "tool-empty";
+            empty.textContent = "No saved vehicle profiles yet. Connect a phone and save an SDR UI layout.";
+            list.append(empty);
+            return;
+          }
+          for (const vehicle of vehicles) {
+            const card = document.createElement("article");
+            card.className = "sdr-profile-card";
+            const info = document.createElement("div");
+            info.className = "sdr-profile-info";
+            const title = document.createElement("strong");
+            title.textContent = vehicle.name || vehicle.id || "Unnamed vehicle";
+            const meta = document.createElement("small");
+            meta.textContent = `${vehicle.enabled ? "Enabled" : "Disabled"} · ${(vehicle.displays || []).length} display(s) · ${vehicle.id || "unknown ID"}`;
+            info.append(title, meta);
+            const details = document.createElement("details");
+            details.className = "sdr-profile-details";
+            const summary = document.createElement("summary");
+            summary.textContent = "View profile";
+            const pre = document.createElement("pre");
+            pre.textContent = JSON.stringify(vehicle, null, 2);
+            details.append(summary, pre);
+            const open = document.createElement("button");
+            open.type = "button";
+            open.className = "sdr-open-profile";
+            open.textContent = "Edit profile";
+            open.addEventListener("click", () => window.SdrProfilesWeb?.open(vehicle.id));
+            const remove = document.createElement("button");
+            remove.type = "button";
+            remove.className = "sdr-delete-profile";
+            remove.textContent = "Delete";
+            remove.setAttribute("aria-label", `Delete ${vehicle.name || vehicle.id} profile`);
+            remove.addEventListener("click", async () => {
+              if (!vehicle.id) return;
+              if (!window.confirm(`Delete SDR UI profile for ${vehicle.name || vehicle.id}? This cannot be undone.`)) return;
+              remove.disabled = true;
+              try {
+                const result = await fetch(`/sdr-ui/profiles/${encodeURIComponent(vehicle.id)}`, { method: "DELETE" });
+                if (!result.ok) throw new Error(`HTTP ${result.status}`);
+                if (vehicle.id === marginsState.vehicleId) marginsState.loaded = false;
+                await loadStoredSdrProfiles();
+                showSnackbar("SDR UI profile deleted.", "success");
+              } catch (e) {
+                remove.disabled = false;
+                showSnackbar("Failed to delete profile: " + e.message, "error");
+              }
+            });
+            const actions = document.createElement("div");
+            actions.className = "sdr-profile-actions";
+            actions.append(open, remove);
+            card.append(info, actions, details);
+            list.append(card);
+          }
+        } catch (e) {
+          list.textContent = "Could not load SDR UI profiles: " + e.message;
+        }
+      }
+
+      document.addEventListener("dashboard-page", (event) => {
+        if (event.detail && event.detail.page === "sdr-ui") {
+          initMarginsPanel();
+          loadStoredSdrProfiles();
+          window.SdrProfilesWeb?.refreshStatus();
+        }
+      });
+      document.addEventListener("DOMContentLoaded", () => {
+        document.getElementById("sdr-refresh-current").addEventListener("click", () => {
+          marginsState.loaded = false;
+          reloadMarginsPanel();
+          window.SdrProfilesWeb?.refreshStatus();
+        });
+        document.getElementById("sdr-refresh-profiles").addEventListener("click", loadStoredSdrProfiles);
+      });
 
       async function saveConfig() {
         const out = {};
@@ -1952,5 +2043,6 @@
     <script>{DASHBOARD_PAGES_JS}</script>
     <script>{OVERLAY_EDITOR_JS}</script>
     <script>{WASM_STORE_JS}</script>
+    <script>{SDR_PROFILES_WEB_JS}</script>
   </body>
 </html>

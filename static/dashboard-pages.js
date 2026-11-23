@@ -1,7 +1,7 @@
 (() => {
   'use strict';
-  const names = {config: 'Configuration', overlay: 'Overlay Editor', 'wasm-store': 'WASM Store'};
-  const panels = { config: 'config-page', overlay: 'overlay-page', 'wasm-store': 'wasm-store-page' };
+  const names = {config: 'Configuration', overlay: 'Overlay Editor', 'wasm-store': 'WASM Store', 'sdr-ui': 'SDR UI Editor'};
+  const panels = { config: 'config-page', overlay: 'overlay-page', 'wasm-store': 'wasm-store-page', 'sdr-ui': 'sdr-ui-page' };
   let current = null;
   function route() {
     const page = window.location.hash.replace(/^#\/?/, '').toLowerCase();
