@@ -1,7 +1,7 @@
 use crate::bt_sco;
 use crate::config::BtScoMediaBridgeLimiter;
 use crate::mitm::protos::{
-    ChannelOpenResponse, Config as AudioConfig, MediaMessageId, Start, Stop,
+    Ack, ChannelOpenResponse, Config as AudioConfig, MediaMessageId, Start, Stop,
 };
 use crate::mitm::{Packet, ENCRYPTED, FRAME_TYPE_FIRST, FRAME_TYPE_LAST};
 use protobuf::Message;
@@ -56,6 +56,8 @@ struct Runtime {
     config_epoch: AtomicU64,
     configuration_index: AtomicU32,
     max_unacked: AtomicU32,
+    /// ACKs (frames) received from the HU for the bridge's own session.
+    acked_frames: AtomicU64,
 
     // Uplink: HU microphone media_source -> SCO socket.
     mic_channel: AtomicU8,
@@ -97,6 +99,7 @@ pub fn init_or_update(tx: Sender<Packet>) {
         config_epoch: AtomicU64::new(0),
         configuration_index: AtomicU32::new(0),
         max_unacked: AtomicU32::new(0),
+        acked_frames: AtomicU64::new(0),
         mic_channel: AtomicU8::new(0),
         mic_sample_rate: AtomicU32::new(0),
         mic_channels: AtomicU32::new(0),
@@ -277,6 +280,29 @@ pub fn notify_media_config(channel: u8, cfg: &AudioConfig) {
         max_unacked,
         epoch
     );
+}
+
+/// Returns true when `payload` is a MEDIA_MESSAGE_ACK from the HU for the DATA injected by the
+/// bridge (session started by the bridge with MEDIA_MESSAGE_START). Such ACKs must not reach the
+/// phone. ACKs of the phone's own sessions (and of the DATA-only mode, which reuses the phone's
+/// session) are left alone.
+pub fn consume_bridge_ack(channel: u8, payload: &[u8]) -> bool {
+    let Some(runtime) = RUNTIME.get() else {
+        return false;
+    };
+    if runtime.target_channel.load(Ordering::SeqCst) != channel {
+        return false;
+    }
+    let Ok(ack) = Ack::parse_from_bytes(payload) else {
+        return false;
+    };
+    if ack.session_id() != DEFAULT_SESSION_ID {
+        return false;
+    }
+    runtime
+        .acked_frames
+        .fetch_add(ack.ack().max(1) as u64, Ordering::SeqCst);
+    true
 }
 
 pub fn notify_microphone_response(channel: u8, payload: &[u8]) {
@@ -489,11 +515,13 @@ fn bridge_loop(runtime: Arc<Runtime>) {
             if data_packets <= 5 || last_data_log.elapsed() >= Duration::from_secs(5) {
                 let config_index = runtime.configuration_index.load(Ordering::SeqCst);
                 let max_unacked = runtime.max_unacked.load(Ordering::SeqCst);
+                let acked = runtime.acked_frames.load(Ordering::SeqCst);
                 debug!(
-                    "{} DATA piggyback ch=<b>{:#04x}</> packets={} pts={}us last_frames={} last_bytes={} peak={} config_index={} max_unacked={}",
+                    "{} DATA piggyback ch=<b>{:#04x}</> packets={} acked={} pts={}us last_frames={} last_bytes={} peak={} config_index={} max_unacked={}",
                     NAME,
                     channel,
                     data_packets,
+                    acked,
                     pts_us,
                     frames,
                     frames * bytes_per_frame as u64,
@@ -716,6 +744,7 @@ fn ensure_media_started_for_frame(
         "start_timeout"
     };
 
+    runtime.acked_frames.store(0, Ordering::SeqCst);
     if runtime.start_existing.load(Ordering::SeqCst) {
         let config_index = runtime.configuration_index.load(Ordering::SeqCst);
         if send_media_start(runtime, channel, DEFAULT_SESSION_ID, config_index).is_ok() {

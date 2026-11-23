@@ -2694,6 +2694,19 @@ pub async fn pkt_modify_hook(
         }
     }
 
+    // The HU acknowledges the DATA injected by the SCO media bridge with the bridge's own
+    // session id. The phone never sent that data, so keep those ACKs away from it.
+    if cfg.bt_sco
+        && cfg.bt_sco_media_bridge
+        && proxy_type == ProxyType::MobileDevice
+        && flow == PacketFlow::ToEndpoint
+        && pkt.channel != 0
+        && message_id == MEDIA_MESSAGE_ACK as i32
+        && bt_sco_media_bridge::consume_bridge_ack(pkt.channel, data)
+    {
+        return Ok(PacketAction::Drop);
+    }
+
     if cfg.bt_sco
         && cfg.bt_sco_mic_bridge
         && proxy_type == ProxyType::MobileDevice
