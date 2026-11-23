@@ -2282,3 +2282,61 @@ html {background-color:#0a0e14;}
   .di-page .di-card {padding:13px;}
   .di-page .di-section-panel {padding:12px;}
 }
+
+
+/* Dynamic Overlay Builder: isolated from legacy Pico form and action rail styles. */
+.dynamic-overlay-panel { margin-top: 18px; min-width: 0; }
+.dynamic-overlay-actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 12px 0; align-items: center; }
+.dynamic-overlay-actions button { width: auto; max-width: 100%; }
+.dynamic-fields { display: grid; gap: 12px; }
+.dynamic-field { border: 1px solid rgba(22,195,189,.22); background: rgba(6,15,24,.4); padding: 14px; border-radius: 12px; min-width: 0; }
+.dynamic-field-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 12px; }
+.dynamic-field-head strong { font-size: .95rem; }
+.dynamic-field-head .tool-actions { display: flex; gap: 6px; }
+.dynamic-field-head button { padding: .4rem .65rem; width: auto; margin: 0; min-width: 38px; }
+.dynamic-field-grid { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 12px; }
+.dynamic-field-grid label { display: block !important; width: 100%; min-width: 0; white-space: normal; }
+.dynamic-field-grid input, .dynamic-field-grid select { min-width: 0; max-width: 100%; width: 100%; margin: 6px 0 0 !important; }
+.dynamic-field.is-static .dynamic-source-only { opacity: .4; pointer-events: none; }
+.dynamic-example-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; padding-bottom:8px; }
+.dynamic-example-heading button { width:auto; padding:.4rem .8rem; }
+.dynamic-examples { display:grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap:14px; }
+.dynamic-examples > div { min-width:0; }
+.dynamic-examples pre { min-width:0; max-width:100%; min-height: 160px; padding:16px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; background: #070f19; border:1px solid rgba(15,206,197,.24); border-radius:10px; font-size:.78rem; color:#b8e6dd; }
+.dynamic-overlay-panel .tool-status { min-height:1.5em; overflow-wrap:anywhere; }
+@media (max-width: 850px) { .dynamic-examples { grid-template-columns: 1fr; } }
+@media (max-width: 610px) { .dynamic-field-grid { grid-template-columns: repeat(2,minmax(0,1fr)); } .dynamic-overlay-actions button { width: 100%; } }
+@media (max-width: 375px) { .dynamic-field-grid { grid-template-columns: 1fr; } }
+
+
+/* Dynamic overlay V10: in-context help and explicit sample/live badges. */
+.dynamic-builder-heading { gap: 12px; flex-wrap: wrap; }
+.dynamic-help-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.dynamic-help-actions span { font-size: .83rem; color: var(--muted-color, #8fa7b4); }
+.dynamic-help-actions button { width: auto; margin: 0; padding: .42rem .8rem; min-height: 40px; }
+.dynamic-field-head { flex-wrap: wrap; }
+.dynamic-field-status { padding: 4px 9px; border-radius: 30px; white-space: normal; font-size: .68rem; font-weight: 700; border: 1px solid #3c5665; color: #adc4d0; }
+.dynamic-field-status[data-state="live"] { color: #8cf2d7; border-color: #0b8d79; }
+.dynamic-field-status[data-state="sample"] { color: #f4d18b; border-color: #9b7126; }
+.dynamic-field-status[data-state="stale"] { color: #f0a8a8; border-color: #a64e56; }
+.dynamic-field-hint { display:block; margin-top: 12px; color: #9aafbc; font-size: .75rem; line-height: 1.5; }
+dialog.dynamic-help-dialog {
+  position: fixed !important; inset: 0; margin: auto; padding: 0;
+  width: min(860px, calc(100vw - 24px)); max-width: none;
+  max-height: min(88vh, 920px); overflow: hidden;
+  border: 1px solid rgba(22,195,189,.35); border-radius: 14px;
+  background: #0d1825; color: #e8f2f4; box-shadow: 0 20px 80px #000a;
+  flex-direction: column;
+}
+dialog.dynamic-help-dialog::backdrop { background: rgba(0,5,12,.8); }
+dialog.dynamic-help-dialog > article { margin:0; padding: 0; width: 100%; min-width:0; max-height: inherit; overflow-y:auto; background: transparent; color:inherit; }
+.dynamic-help-header { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap:14px; padding:20px; border-bottom:1px solid #284553; position: sticky; top: 0; z-index: 1; background: #0d1825; }
+.dynamic-help-header h3 { margin:0 0 5px; font-size: 1.25rem; }
+.dynamic-help-header small { color:#a1b6bf; }
+.dynamic-help-header button { width:auto; margin:0; min-height:42px; }
+.dynamic-help-content { padding: 12px 20px 24px; overflow-wrap: anywhere; }
+.dynamic-help-content details { margin: 0; border-bottom:1px solid #263b48; padding:12px 0; }
+.dynamic-help-content summary { cursor:pointer; font-weight:650; color:#d9eef0; }
+.dynamic-help-content p, .dynamic-help-content li { color:#c7d7de; line-height: 1.65; font-size: .9rem; }
+.dynamic-help-content code { color:#9be9dc; background:#07111d; padding:2px 4px; border-radius:3px; }
+@media (max-width: 610px) { .dynamic-help-header { padding: 14px; } .dynamic-help-content { padding: 8px 14px 18px; } }
