@@ -112,7 +112,7 @@ async fn index() -> impl IntoResponse {
         Err(e) => return preview_error("parse static/config.json", e.into()),
     };
 
-    let html = template
+    let html = inline_page_scripts(&template)
         .replace("{BUILD_DATE}", "preview")
         .replace("{GIT_INFO}", "dashboard-preview")
         .replace("{PICO_CSS}", &pico)
@@ -177,6 +177,44 @@ async fn noop_action() -> impl IntoResponse {
 async fn unhandled(method: axum::http::Method, uri: axum::http::Uri) -> impl IntoResponse {
     eprintln!("[preview] unhandled {method} {uri} -> 200 OK no-op");
     (StatusCode::OK, "OK (preview no-op)")
+}
+
+/// Inlines the dashboard page scripts like `src/web.rs` does with
+/// `include_str!`, but reads them at request time: a
+/// `<script>{SDR_INFO_WEB_JS}</script>` placeholder is replaced with the
+/// contents of `static/sdr-info-web.js`.
+fn inline_page_scripts(template: &str) -> String {
+    const OPEN: &str = "<script>{";
+    const CLOSE: &str = "}</script>";
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(start) = rest.find(OPEN) {
+        let after = &rest[start + OPEN.len()..];
+        let Some(end) = after.find(CLOSE) else { break };
+        let name = &after[..end];
+        let file = name
+            .strip_suffix("_JS")
+            .filter(|base| base.bytes().all(|b| b.is_ascii_uppercase() || b == b'_'))
+            .map(|base| format!("{}.js", base.to_ascii_lowercase().replace('_', "-")));
+        out.push_str(&rest[..start]);
+        match file.as_deref().map(|f| (f, read_static(f))) {
+            Some((_, Ok(js))) => {
+                out.push_str("<script>");
+                out.push_str(&js);
+                out.push_str("</script>");
+            }
+            other => {
+                if let Some((f, Err(e))) = other {
+                    eprintln!("[preview] cannot read static/{f}: {e}");
+                }
+                // Not a script placeholder (or unreadable): keep it as is.
+                out.push_str(&rest[start..start + OPEN.len() + end + CLOSE.len()]);
+            }
+        }
+        rest = &after[end + CLOSE.len()..];
+    }
+    out.push_str(rest);
+    out
 }
 
 fn read_static(name: &str) -> std::io::Result<String> {
