@@ -35,6 +35,7 @@ use crate::overlay::OverlayConfig;
 use crate::proxy::media_tap_reverse_bridge_once;
 #[cfg(feature = "wasm-scripting")]
 use crate::script_wasm::{LoadedScript, ScriptRegistry};
+use crate::sdr_snapshot;
 use crate::sdr_ui;
 use crate::sdr_ui_preview;
 #[cfg(feature = "wasm-scripting")]
@@ -86,6 +87,12 @@ use toml_edit::{value, DocumentMut};
 const TEMPLATE: &str = include_str!("../static/index.html");
 const PICO_CSS: &str = include_str!("../static/pico.min.css");
 const STYLES_CSS: &str = include_str!("../static/styles.css");
+const DASHBOARD_PAGES_JS: &str = include_str!("../static/dashboard-pages.js");
+const OVERLAY_EDITOR_JS: &str = include_str!("../static/overlay-editor.js");
+const WASM_STORE_JS: &str = include_str!("../static/wasm-store.js");
+const SDR_PROFILES_WEB_JS: &str = include_str!("../static/sdr-profiles-web.js");
+const SDR_INFO_WEB_JS: &str = include_str!("../static/sdr-info-web.js");
+const DISPLAY_INJECTION_WEB_JS: &str = include_str!("../static/display-injection-web.js");
 const LOGO_WEBP: &[u8] = include_bytes!("../static/aa-proxy-rs.webp");
 const AA_PROXY_RS_URL: &str = "https://github.com/aa-proxy/aa-proxy-rs";
 const BUILDROOT_URL: &str = "https://github.com/aa-proxy/buildroot";
@@ -531,6 +538,12 @@ async fn index(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         )
         .replace("{PICO_CSS}", PICO_CSS)
         .replace("{STYLES_CSS}", STYLES_CSS)
+        .replace("{DASHBOARD_PAGES_JS}", DASHBOARD_PAGES_JS)
+        .replace("{OVERLAY_EDITOR_JS}", OVERLAY_EDITOR_JS)
+        .replace("{WASM_STORE_JS}", WASM_STORE_JS)
+        .replace("{SDR_PROFILES_WEB_JS}", SDR_PROFILES_WEB_JS)
+        .replace("{SDR_INFO_WEB_JS}", SDR_INFO_WEB_JS)
+        .replace("{DISPLAY_INJECTION_WEB_JS}", DISPLAY_INJECTION_WEB_JS)
         .replace("{CONFIG_VALUES}", &render_config_values(&config_json))
         .replace("{CONFIG_IDS}", &render_config_ids(&config_json))
         .replace("{LOGO_URL}", "/aa-proxy-rs.webp");
@@ -1932,18 +1945,36 @@ async fn media_tap_open_handler(
 async fn service_discovery_response_handler(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    let data = state.last_service_discovery_response.read().await;
-    if let Some(value) = data.clone() {
-        Json(value).into_response()
-    } else {
-        (
+    // The existing JSON response shape stays unchanged for Companion clients.
+    if let Some(value) = state.last_service_discovery_response.read().await.clone() {
+        return (
+            [("cache-control", "no-store"), ("x-sdr-source", "memory")],
+            Json(value),
+        ).into_response();
+    }
+    // First request after aa-proxy-rs restart, or when AA is disconnected.
+    match sdr_snapshot::load().await {
+        Ok(Some(value)) => (
+            [("cache-control", "no-store"), ("x-sdr-source", "disk")],
+            Json(value),
+        ).into_response(),
+        Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(json!({
                 "error": "service_discovery_response_not_available",
-                "message": "No ServiceDiscoveryResponse has been observed yet"
+                "message": "No ServiceDiscoveryResponse has been observed or saved yet"
             })),
-        )
-            .into_response()
+        ).into_response(),
+        Err(e) => {
+            warn!("{} failed to load saved SDR from {}: {}", NAME, sdr_snapshot::LAST_SDR_PATH, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "service_discovery_response_cache_error",
+                    "message": "Saved SDR could not be read"
+                })),
+            ).into_response()
+        }
     }
 }
 
