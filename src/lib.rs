@@ -18,6 +18,7 @@ pub mod device_info;
 pub mod display;
 pub mod ev;
 pub mod ffs_io;
+pub mod hfp_guard;
 pub mod hu_input;
 pub mod inject_displays;
 pub mod io_backend;
