@@ -7989,6 +7989,14 @@ impl Bluetooth {
         };
         sdr_ui::set_current_phone_from_bt(&address.to_string(), phone_name);
 
+        // The hands-free guard from here on, not after the whole Wi-Fi bootstrap. The car's own
+        // hands-free link is up long before (SYNC 3 connects 10-15 s after the ignition), and until a second
+        // hands-free unit is connected Android rings in-band on it: a call then loses the microphone. Started
+        // after the bootstrap it came up ~20 s after SYNC's own link in a car run.
+        if crate::hfp_guard::enabled() && !bt_poweroff {
+            crate::hfp_guard::spawn(self.adapter.clone(), bluer::Address(*address), need_restart.resubscribe());
+        }
+
         Self::send_params(wifi_config.clone(), &mut stream).await?;
 
         // Record this device as a known-good AA device (only when using wildcard connect)
@@ -8159,24 +8167,41 @@ impl Bluetooth {
                 profile_connected.store(false, Ordering::Relaxed);
             }));
         } else {
-            // attempt graceful shutdown of the RFCOMM stream before disconnect
-            let _ = stream.shutdown().await;
-            // let some phones that have problems with handshake time to
-            // finish all bluetooth frames before disconnect
-            let _ = tokio::time::sleep(Duration::from_millis(150));
-            // handshake complete, now disconnect the device so it should
-            // connect to real HU for calls
-            let device = self.adapter.device(bluer::Address(*address))?;
-            let _ = device.disconnect().await;
-            //
-            // --- UNREGISTER HSP ---
-            //
-            if !self.dongle_mode {
-                Self::unregister_hsp(hsp_handle.take()).await;
-            }
-            if bt_poweroff {
-                let _ = self.adapter.set_powered(false).await;
-            }
+            // The Bluetooth wrap-up runs in the background. The phone is on the hotspot already (its TCP
+            // session is up: tcp_start above), and the USB side toward the car starts only when this function
+            // returns. The phone's disconnect alone took ~2.4 s on the test unit, all of it in front of the car.
+            // Same steps, same order: RFCOMM close, disconnect, HSP unregister, then power-off or the guard.
+            let adapter = self.adapter.clone();
+            let addr = bluer::Address(*address);
+            let hsp = if !self.dongle_mode { hsp_handle.take() } else { None };
+            let dongle_mode = self.dongle_mode;
+            tokio::spawn(async move {
+                // attempt graceful shutdown of the RFCOMM stream before disconnect
+                let _ = stream.shutdown().await;
+                // let some phones that have problems with handshake time to
+                // finish all bluetooth frames before disconnect
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                // handshake complete, now disconnect the device so it should
+                // connect to real HU for calls. Not with the hands-free guard on: that would drop the
+                // guard's link too (the phone then rings in-band on the car until it reconnects). The AA RFCOMM
+                // is closed above and the HSP stub below, the guard's own link stays
+                if !crate::hfp_guard::enabled() || bt_poweroff {
+                    if let Ok(device) = adapter.device(addr) {
+                        let _ = device.disconnect().await;
+                    }
+                }
+                //
+                // --- UNREGISTER HSP ---
+                //
+                if !dongle_mode {
+                    Self::unregister_hsp(hsp).await;
+                }
+                if bt_poweroff {
+                    let _ = adapter.set_powered(false).await;
+                }
+                let _ = need_restart; // the guard took its own receiver at the start of the bootstrap
+                info!("{} 🚀 Bluetooth wrap-up done (in the background)", NAME);
+            });
         }
 
         info!("{} 🚀 Bluetooth launch sequence completed", NAME);
