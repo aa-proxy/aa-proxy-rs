@@ -54,7 +54,16 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>
 // Bounded below the transfer-stall timeout (config.timeout_secs, default 10s) so a
 // missed/late notification can't outlast the stall detector, and above the observed
 // ~2-3s gadget-switch duration so the common case never actually waits this long.
-const USB_ACCESSORY_READY_TIMEOUT: Duration = Duration::from_secs(8);
+// The gadget switch can now take minutes (AA_MTP_WAIT_SECS: a car that asks the driver first),
+// and main.rs notifies usb_accessory_ready when the USB setup FAILED too, so this is only a safety net:
+// AA_USB_READY_SECS, default 300 s (was 8 s, which tore down every switch slower than that).
+fn usb_accessory_ready_timeout() -> Duration {
+    let v = std::env::var("AA_USB_READY_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(300);
+    Duration::from_secs(v.clamp(8, 900))
+}
 pub const BUFFER_LEN: usize = 16 * 1024;
 const TCP_CLIENT_TIMEOUT: Duration = Duration::new(30, 0);
 const COMP_APP_TCP_PORT: u16 = 9999;
@@ -891,7 +900,7 @@ pub async fn io_loop(
             // trips the stall-detection timeout above every single session.
             // Wait for the "switched" signal first, bounded so a failed/skipped
             // gadget switch elsewhere can't hang this loop forever.
-            if timeout(USB_ACCESSORY_READY_TIMEOUT, usb_accessory_ready.notified())
+            if timeout(usb_accessory_ready_timeout(), usb_accessory_ready.notified())
                 .await
                 .is_err()
             {

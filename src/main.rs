@@ -1322,6 +1322,11 @@ async fn tokio_main(
             )
             .await
             {
+                // io_loop waits for usb_accessory_ready (minutes now): wake it, it finds no session,
+                // drops the phone connection and sends the one restart for this iteration. Wait for that
+                // restart here, so it cannot land in (and tear down) the NEXT iteration's session
+                usb_accessory_ready.notify_one();
+                let _ = tokio::time::timeout(Duration::from_secs(20), need_restart.recv()).await;
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 continue;
             }
