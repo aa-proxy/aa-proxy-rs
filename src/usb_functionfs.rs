@@ -76,6 +76,15 @@ const AOA_ACCESSORY_PID: u16 = 0x2d00;
 const MTP_STAGE_VID: u16 = 0x18d1;
 const MTP_STAGE_PID: u16 = 0x4ee1;
 
+/// A wait in seconds from the environment (`name`), else `default`, clamped to `min..=max`.
+fn env_wait(name: &str, default: u64, min: u64, max: u64) -> Duration {
+    let v = std::env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(default);
+    Duration::from_secs(v.clamp(min, max))
+}
+
 /// Read/write halves of the active accessory session, handed off to
 /// `proxy::io_loop` once the AOA handshake has completed (or been given
 /// up on, see `require_accessory_start`).
@@ -352,7 +361,10 @@ impl FfsGadget {
         &mut self,
         require_accessory_start: bool,
     ) -> Option<AccessorySession> {
-        const MTP_WAIT_TIMEOUT: Duration = Duration::from_secs(6);
+        // This used to wait 6 s. A head unit can ask the driver first ("Enable Android Auto?",
+        // Ford SYNC 3) and only then send ACCESSORY_START. At 6 s the gadget was torn down under it
+        // (reproduced with a USB head-unit simulator). AA_MTP_WAIT_SECS, default 90 s.
+        let mtp_wait_timeout = env_wait("AA_MTP_WAIT_SECS", 90, 6, 600);
         const MAX_TRIES: u32 = 2;
         // How long to wait after tearing a failed gadget down before trying
         // again. Deliberately generous (not just "a moment") — too short a
@@ -375,7 +387,7 @@ impl FfsGadget {
         if self.legacy {
             let mut got_start = false;
             for try_n in 1..=MAX_TRIES {
-                match self.run_mtp_stage(&udc, MTP_WAIT_TIMEOUT).await {
+                match self.run_mtp_stage(&udc, mtp_wait_timeout).await {
                     Ok(()) => {
                         got_start = true;
                         break;
@@ -736,13 +748,15 @@ impl FfsGadget {
         // runtime (webserver, Bluetooth, ...). So never "try anyway": if the
         // host does not enable the gadget in time, give up and let the caller
         // tear down and retry.
-        const ENABLE_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
-        if timeout(ENABLE_WAIT_TIMEOUT, enabled.notified())
+        // AA_ENABLE_WAIT_SECS (default 30 s, was 5 s): a slow head unit may configure the
+        // re-enumerated accessory late
+        let enable_wait_timeout = env_wait("AA_ENABLE_WAIT_SECS", 30, 5, 300);
+        if timeout(enable_wait_timeout, enabled.notified())
             .await
             .is_err()
         {
             return Err(anyhow!(
-                "host did not enable the accessory gadget within {ENABLE_WAIT_TIMEOUT:?}"
+                "host did not enable the accessory gadget within {enable_wait_timeout:?}"
             ));
         }
 
@@ -803,7 +817,7 @@ fn handle_ep0_event(event: Event) -> bool {
             if (request_type & USB_TYPE_MASK) == USB_TYPE_VENDOR {
                 match request {
                     AOA_GET_PROTOCOL => {
-                        debug!("{} received AOA GET_PROTOCOL", NAME);
+                        info!("{} 🔌 car asked AOA GET_PROTOCOL (answering 2)", NAME);
                         let _ = req.send(&[0x02, 0x00]);
                     }
                     _ => {
@@ -823,17 +837,18 @@ fn handle_ep0_event(event: Event) -> bool {
             let ctrl_req = req.ctrl_req();
             let request_type = ctrl_req.request_type;
             let request = ctrl_req.request;
-            let value = ctrl_req.value;
             let length = ctrl_req.length;
 
             if (request_type & USB_TYPE_MASK) == USB_TYPE_VENDOR {
                 match request {
                     AOA_SEND_STRING => {
+                        // The string's index is wIndex (this logged wValue, which is always 0)
+                        let index = ctrl_req.index;
                         if let Ok(data) = req.recv_all() {
-                            debug!(
-                                "{} received AOA string index {value}: {}",
+                            info!(
+                                "{} 🔌 car AOA string {index}: {}",
                                 NAME,
-                                String::from_utf8_lossy(&data)
+                                String::from_utf8_lossy(&data).trim_end_matches('\0')
                             );
                         }
                     }
@@ -857,7 +872,8 @@ fn handle_ep0_event(event: Event) -> bool {
         }
 
         other => {
-            debug!("{} ep0 event: {other:?}", NAME);
+            // Bind/Enable/Disable/Suspend/Resume are a handful per session and say what the car did
+            info!("{} 🔌 ep0 event: {other:?}", NAME);
         }
     }
 

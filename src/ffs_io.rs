@@ -14,6 +14,19 @@ use std::mem::replace;
 use tokio_util::io::{CopyToBytes, SinkWriter, StreamReader};
 use usb_gadget::function::custom::{EndpointReceiver, EndpointSender};
 
+/// USB transfer size for the FunctionFS bulk pipes. Splitting every write into
+/// max-packet (512 B) transfers costs one AIO submit and one UDC interrupt per 512 B of video,
+/// and the usb-gadget crate recommends ~16 KiB transfers. Rounded to a multiple of the endpoint
+/// max packet size. `AA_FFS_CHUNK=512` restores the old behaviour without a rebuild.
+fn transfer_size(max_packet_size: usize) -> usize {
+    let want = std::env::var("AA_FFS_CHUNK")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(16384);
+    let mps = max_packet_size.max(1);
+    (want.max(mps) / mps) * mps
+}
+
 struct BytesPool {
     buf: BytesMut,
     pool_size: usize,
@@ -73,6 +86,11 @@ impl IntoStreamReader for EndpointReceiver {
     ) -> std::io::Result<StreamReader<impl Stream<Item = std::io::Result<BytesMut>>, BytesMut>>
     {
         let max_packet_size = self.max_packet_size().map_err(std::io::Error::other)?;
+        // Car -> dongle reads stay one max-packet per transfer. A 16 KiB read only
+        // completes on a short packet, so a head unit that ends a full-packet write without a
+        // zero-length packet would leave that frame stuck in the UDC until its next write (seen with a USB head-unit
+        // simulator that sends no zero-length packet: 512/4096/8192-byte frames stalled > 5 s). This direction carries
+        // touch, sensor and mic data only. The 16 KiB transfers stay on the write (video) side.
         let context = RecvContext::new(self, max_packet_size);
 
         Ok(StreamReader::new(futures::stream::try_unfold(
@@ -93,6 +111,7 @@ impl IntoSinkWriter for EndpointSender {
         mut self,
     ) -> std::io::Result<SinkWriter<impl for<'a> Sink<&'a [u8], Error = Error>>> {
         let max_packet_size = self.max_packet_size().map_err(std::io::Error::other)?;
+        let xfer = transfer_size(max_packet_size);
         Ok(SinkWriter::new(CopyToBytes::new(futures::sink::unfold(
             self,
             move |mut this, mut bytes: Bytes| async move {
@@ -100,7 +119,7 @@ impl IntoSinkWriter for EndpointSender {
 
                 // Limit maximum USB transfer size to avoid issues with some UDCs.
                 while !bytes.is_empty() {
-                    let part = bytes.split_to(bytes.len().min(max_packet_size));
+                    let part = bytes.split_to(bytes.len().min(xfer));
                     this.send_async(part).await.map_err(std::io::Error::other)?;
                 }
 
