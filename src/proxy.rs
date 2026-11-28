@@ -592,6 +592,7 @@ macro_rules! impl_tcp_wait_for_connection {
     // disable Nagle algorithm, so segments are always sent as soon as possible,
     // even if there is only a small amount of data
     stream.set_nodelay(true)?;
+    set_phone_socket_priority(&stream);
 
     Ok((stream, addr, cancel))
 }
@@ -641,6 +642,7 @@ async fn tcp_connect_to_aa_server(addr: &str) -> Result<NativeTcpStream> {
     };
 
     stream.set_nodelay(true)?;
+    set_phone_socket_priority(&stream);
     info!(
         "{} 📳 MD direct TCP: connected to Android Auto Head Unit Server at <u>{}</u>",
         NAME, socket_addr
@@ -1219,4 +1221,24 @@ pub async fn io_loop(
     // terminate ev client handler
     ev_tx.send(EvTaskCommand::Terminate).await?;
     client_handler.await?;
+}
+
+/// 802.1d priority 5 (WMM AC_VI) for the phone socket. brcmfmac uses skb->priority 1..7 as is
+/// (brcmfmac/core.c), so our AA messages and the TCP ACKs that pace the video from the phone win airtime.
+fn set_phone_socket_priority(stream: &tokio::net::TcpStream) {
+    use std::os::fd::AsRawFd;
+    let prio: libc::c_int = 5;
+    // SAFETY: the fd is valid for the lifetime of `stream`, and the pointer and length describe one c_int
+    let rc = unsafe {
+        libc::setsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PRIORITY,
+            &prio as *const libc::c_int as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if rc != 0 {
+        log::warn!("SO_PRIORITY 5 on the phone socket failed: {}", std::io::Error::last_os_error());
+    }
 }

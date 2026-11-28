@@ -70,8 +70,10 @@ impl IoDevice {
                 d.write(buf).await
             }
             IoDevice::TcpWrite(writer) => {
+                // write_all: a plain write() may be short on TCP (send buffer full during a Wi-Fi stall),
+                // and every caller ignores the returned length, which silently truncates an AA frame.
                 let mut w = writer.lock().await;
-                w.write(buf).await
+                w.write_all(buf).await.map(|_| buf.len())
             }
             IoDevice::UsbReader(_) => Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
